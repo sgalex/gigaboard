@@ -1,0 +1,36 @@
+[
+  {
+    "test_id": "tc001",
+    "timestamp": "2026-02-02T15:30:08.093262",
+    "user_message": "Получи текущую цену Bitcoin в USD и построй график изменения цены за последнюю неделю",
+    "session_id": "69e389f2-b540-4ea7-a760-4020655e6743",
+    "execution_plan": {
+      "status": "success",
+      "result": {
+        "status": "error",
+        "error": "Unknown task type: None",
+        "suggestions": [
+          "Supported types: create_plan, replan, evaluate_result"
+        ],
+        "agent": "planner",
+        "timestamp": "2026-02-02T15:30:08.106708"
+      },
+      "execution_time": 0.0,
+      "agent": "planner"
+    },
+    "steps_executed": [],
+    "agent_results": {},
+    "validation_result": {
+      "status": "success",
+      "result": {
+        "error": "Unknown task type: None",
+        "valid": false
+      },
+      "execution_time": 0.0,
+      "agent": "critic"
+    },
+    "status": "success",
+    "error": null,
+    "duration_ms": 31
+  }
+]

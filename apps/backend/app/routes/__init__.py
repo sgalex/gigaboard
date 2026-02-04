@@ -1,0 +1,40 @@
+from .auth import router as auth_router
+from .health import router as health_router
+from .projects import router as projects_router
+from .boards import router as boards_router
+from .edges import router as edges_router
+
+# Node routes
+from .widget_nodes import router as widget_nodes_router
+from .comment_nodes import router as comment_nodes_router
+
+# Source-Content Node Architecture routes
+from .source_nodes import router as source_nodes_router
+from .content_nodes import router as content_nodes_router
+from .extraction import router as extraction_router
+
+# AI Assistant routes
+from .ai_assistant import router as ai_assistant_router
+from .ai_resolver import router as ai_resolver_router
+
+# Database routes
+from .database import router as database_router
+
+# File upload routes
+from .files import router as files_router
+
+__all__ = [
+    "auth_router",
+    "health_router",
+    "projects_router",
+    "boards_router",
+    "edges_router",
+    "widget_nodes_router",
+    "comment_nodes_router",
+    "source_nodes_router",
+    "content_nodes_router",
+    "extraction_router",
+    "ai_assistant_router",
+    "database_router",
+    "files_router",
+]

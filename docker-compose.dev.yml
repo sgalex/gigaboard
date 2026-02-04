@@ -1,0 +1,59 @@
+# Development override for docker-compose
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: development
+    volumes:
+      # Mount source code for hot reload
+      - ./apps/backend/app:/app/app:ro
+    environment:
+      DEBUG: "true"
+      ENVIRONMENT: development
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile.dev
+    volumes:
+      # Mount source code for hot reload
+      - ./apps/web/src:/app/src:ro
+      - ./apps/web/public:/app/public:ro
+    environment:
+      NODE_ENV: development
+    command: npm run dev -- --host 0.0.0.0
+
+  # Optional: pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: gigaboard-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@gigaboard.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - gigaboard-network
+    restart: unless-stopped
+
+  # Optional: Redis Commander for Redis management
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: gigaboard-redis-commander
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - gigaboard-network
+    restart: unless-stopped

@@ -1,0 +1,105 @@
+{
+  "session_id": "3b1aab20-3cec-4344-99c8-53986931b8e3",
+  "status": "completed",
+  "user_message": "\nAnalyze current Bitcoin (BTC) market data:\n1. Get current price in USD\n2. Calculate 24h price change\n3. Provide brief market analysis\n\nReturn structured data with price and analysis.\n",
+  "plan": {
+    "plan_id": "f3c776b2-7894-47ff-a792-f88767638890",
+    "user_request": "Analyze current Bitcoin (BTC) market data: 1. Get current price in USD 2. Calculate 24h price change 3. Provide brief market analysis Return structured data with price and analysis.",
+    "steps": [
+      {
+        "step_id": "1",
+        "agent": "researcher",
+        "task": {
+          "type": "fetch_from_api",
+          "description": "Get current Bitcoin price in USD",
+          "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+        },
+        "depends_on": [],
+        "estimated_time": "5s"
+      },
+      {
+        "step_id": "2",
+        "agent": "researcher",
+        "task": {
+          "type": "fetch_from_api",
+          "description": "Get historical Bitcoin price at this time 24 hours ago",
+          "url": "https://api.coingecko.com/api/v3/exchanges/kraken/btcusd/history?date=yesterday"
+        },
+        "depends_on": [
+          "1"
+        ],
+        "estimated_time": "5s"
+      },
+      {
+        "step_id": "3",
+        "agent": "analyst",
+        "task": {
+          "type": "calculate_price_change",
+          "description": "Calculate 24 hour price change of Bitcoin",
+          "current_price": "<price_from_step_1>",
+          "historical_price": "<price_from_step_2>"
+        },
+        "depends_on": [
+          "1",
+          "2"
+        ],
+        "estimated_time": "3s"
+      },
+      {
+        "step_id": "4",
+        "agent": "analyst",
+        "task": {
+          "type": "market_analysis",
+          "description": "Provide brief market analysis of Bitcoin",
+          "price_data": "<data_from_step_1>",
+          "change_data": "<result_from_step_3>"
+        },
+        "depends_on": [
+          "1",
+          "3"
+        ],
+        "estimated_time": "7s"
+      }
+    ],
+    "estimated_total_time": "18s"
+  },
+  "results": {
+    "task_0": {
+      "status": "completed",
+      "agent": "researcher",
+      "result": {
+        "status": "success",
+        "content_type": "api_response",
+        "data": {
+          "bitcoin": {
+            "usd": 77928
+          }
+        },
+        "source": {
+          "type": "api",
+          "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+          "method": "GET",
+          "timestamp": "2026-02-02T16:23:34.393871",
+          "status_code": 200
+        },
+        "statistics": {
+          "size_bytes": 25,
+          "row_count": 1
+        },
+        "schema": {
+          "columns": [
+            "bitcoin"
+          ],
+          "types": [
+            "object"
+          ]
+        },
+        "agent": "researcher"
+      }
+    }
+  },
+  "final_response": "**Researcher**: Получены данные типа 'api_response' (1 строк)\n\n**Researcher**: Задача выполнена\n\n**Analyst**: Задача выполнена\n\n**Analyst**: Задача выполнена",
+  "steps_executed": 4,
+  "session_metadata": {},
+  "error_message": null
+}

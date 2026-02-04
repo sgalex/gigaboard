@@ -1,0 +1,15 @@
+[
+  {
+    "test_id": "tc001",
+    "timestamp": "2026-02-02T14:25:26.942763",
+    "user_message": "Получи текущую цену Bitcoin в USD и построй график изменения цены за последнюю неделю",
+    "session_id": "5b6b71f3-3579-4ace-a9f6-942b9558c594",
+    "execution_plan": {},
+    "steps_executed": [],
+    "agent_results": {},
+    "validation_result": {},
+    "status": "error",
+    "error": "'AgentMessageBus' object has no attribute 'send_and_wait'",
+    "duration_ms": 1
+  }
+]

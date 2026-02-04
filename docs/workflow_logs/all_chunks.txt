@@ -1,0 +1,88 @@
+=== CHUNK 1 (30 chars) ===
+🔄 Начинаю обработку запроса...
+
+=== CHUNK 2 (52 chars) ===
+🧠 Planner Agent анализирует запрос и создаёт план...
+
+=== CHUNK 3 (22 chars) ===
+📋 План создан: 5 шагов
+
+=== CHUNK 4 (26 chars) ===
+1. [SEARCH] No description
+
+=== CHUNK 5 (15 chars) ===
+Тип: web_search
+
+=== CHUNK 6 (50 chars) ===
+2. [RESEARCHER] Parse data from web search results
+
+=== CHUNK 7 (15 chars) ===
+Тип: parse_data
+
+=== CHUNK 8 (63 chars) ===
+3. [ANALYST] Analyze viewership trends by genre and time period
+
+=== CHUNK 9 (17 chars) ===
+Тип: analyze_data
+
+=== CHUNK 10 (68 chars) ===
+4. [REPORTER] Create line charts showing viewership trends over time
+
+=== CHUNK 11 (25 chars) ===
+Тип: create_visualization
+
+=== CHUNK 12 (59 chars) ===
+5. [REPORTER] Create bar charts showing viewership by genre
+
+=== CHUNK 13 (25 chars) ===
+Тип: create_visualization
+
+=== CHUNK 14 (35 chars) ===
+⚙️ Шаг 1/5: unknown (Agent: search)
+
+=== CHUNK 15 (20 chars) ===
+✅ Задача 1 выполнена
+
+=== CHUNK 16 (66 chars) ===
+⚙️ Шаг 2/5: Parse data from web search results (Agent: researcher)
+
+=== CHUNK 17 (20 chars) ===
+✅ Задача 2 выполнена
+
+=== CHUNK 18 (79 chars) ===
+⚙️ Шаг 3/5: Analyze viewership trends by genre and time period (Agent: analyst)
+
+=== CHUNK 19 (20 chars) ===
+✅ Задача 3 выполнена
+
+=== CHUNK 20 (84 chars) ===
+⚙️ Шаг 4/5: Create line charts showing viewership trends over time (Agent: reporter)
+
+=== CHUNK 21 (20 chars) ===
+✅ Задача 4 выполнена
+
+=== CHUNK 22 (75 chars) ===
+⚙️ Шаг 5/5: Create bar charts showing viewership by genre (Agent: reporter)
+
+=== CHUNK 23 (20 chars) ===
+✅ Задача 5 выполнена
+
+=== CHUNK 24 (23 chars) ===
+🔗 Собираю результаты...
+
+=== CHUNK 25 (22 chars) ===
+✅ Обработка завершена!
+
+=== CHUNK 26 (365 chars) ===
+**Search**: Задача выполнена
+
+**Researcher**: Задача выполнена
+
+**Analyst**: Найдено 2 инсайтов:
+- Viewership is declining over time
+- Unexpected spike in 'Action' genre viewership
+
+**Reporter**: Создана визуализация типа 'chart': Line chart showing viewership trends over time
+
+**Reporter**: Создана визуализация типа 'chart': Bar chart showing viewership by genre
+

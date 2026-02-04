@@ -1,0 +1,74 @@
+[
+  {
+    "test_id": "tc001",
+    "timestamp": "2026-02-02T15:40:08.314989",
+    "user_message": "Получи текущую цену Bitcoin в USD и построй график изменения цены за последнюю неделю",
+    "session_id": "e2c4f9c1-98e5-4e76-984b-76cd143c49a5",
+    "execution_plan": {
+      "status": "success",
+      "result": {
+        "status": "success",
+        "plan": {
+          "plan_id": "7a9c2e6f-cb1d-472b-b765-f432109bcde1",
+          "user_request": "Получи текущую цену Bitcoin в USD и построй график изменения цены за последнюю неделю",
+          "steps": [
+            {
+              "step_id": "1",
+              "agent": "researcher",
+              "task": {
+                "type": "fetch_from_api",
+                "description": "Get current Bitcoin price in USD",
+                "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+              },
+              "depends_on": [],
+              "estimated_time": "2s"
+            },
+            {
+              "step_id": "2",
+              "agent": "researcher",
+              "task": {
+                "type": "fetch_from_api",
+                "description": "Get historical Bitcoin prices for last week",
+                "url": "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=7"
+              },
+              "depends_on": [],
+              "estimated_time": "2s"
+            },
+            {
+              "step_id": "3",
+              "agent": "reporter",
+              "task": {
+                "type": "create_visualization",
+                "description": "Build line chart of Bitcoin price change over last week",
+                "data_preview": "<historical_prices_from_step_2>",
+                "chart_type": "line"
+              },
+              "depends_on": [
+                "2"
+              ],
+              "estimated_time": "3s"
+            }
+          ],
+          "estimated_total_time": "7s"
+        },
+        "agent": "planner"
+      },
+      "execution_time": 7.313903,
+      "agent": "planner"
+    },
+    "steps_executed": [],
+    "agent_results": {},
+    "validation_result": {
+      "status": "success",
+      "result": {
+        "error": "Unknown task type: None",
+        "valid": false
+      },
+      "execution_time": 0.0,
+      "agent": "critic"
+    },
+    "status": "success",
+    "error": null,
+    "duration_ms": 7360
+  }
+]

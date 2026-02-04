@@ -1,0 +1,9 @@
+# File Storage - добавлено в .gitignore
+
+# Local file storage (не коммитить пользовательские файлы)
+data/
+uploads/
+*.uploaded
+
+# Temporary upload files
+temp_*
