@@ -55,6 +55,7 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
     // Cross-filter integration
     const activeFilters = useFilterStore((state) => state.activeFilters)
     const filteredNodeData = useFilterStore((state) => state.filteredNodeData)
+    const initiatorFullNodeData = useFilterStore((state) => state.initiatorFullNodeData)
     const handleWidgetClick = useFilterStore((state) => state.handleWidgetClick)
     const handleToggleFilter = useFilterStore((state) => state.handleWidgetToggleFilter)
     const handleRemoveFilter = useFilterStore((state) => state.handleWidgetRemoveFilter)
@@ -223,9 +224,10 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
         const filteredEntry = sourceContentNodeId && filteredNodeData ? filteredNodeData[sourceContentNodeId] : null
         const precomputedTables = filteredEntry?.tables || undefined
         const dataStack = getDataStack(node.id)
-        // Полные данные: из стека (верх) или текущие от бэкенда (для инициатора — полные). Отфильтрованное подмножество — для подсветки через сопоставление full vs filtered.
+        // Полные данные для highlight: стек виджета или initiator_full_data от бэкенда (для виджета-инициатора).
+        const fullEntry = sourceContentNodeId ? initiatorFullNodeData[sourceContentNodeId] : null
         const fullTablesForHighlight =
-            dataStack.length > 0 ? dataStack[dataStack.length - 1].tables : filteredEntry?.tables ?? []
+            dataStack.length > 0 ? dataStack[dataStack.length - 1].tables : (fullEntry?.tables ?? filteredEntry?.tables ?? [])
         const filteredTablesForHighlight =
             fullTablesForHighlight.length > 0 && activeFilters
                 ? applyFiltersToTables(fullTablesForHighlight, activeFilters)
@@ -293,8 +295,9 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
         const filteredEntry = sourceContentNodeId && filteredNodeData ? filteredNodeData[sourceContentNodeId] : null
         const precomputedTables = filteredEntry?.tables || undefined
         const dataStackFullscreen = getDataStack(node.id)
+        const fullEntryFullscreen = sourceContentNodeId ? initiatorFullNodeData[sourceContentNodeId] : null
         const fullTablesForHighlightFullscreen =
-            dataStackFullscreen.length > 0 ? dataStackFullscreen[dataStackFullscreen.length - 1].tables : filteredEntry?.tables ?? []
+            dataStackFullscreen.length > 0 ? dataStackFullscreen[dataStackFullscreen.length - 1].tables : (fullEntryFullscreen?.tables ?? filteredEntry?.tables ?? [])
         const filteredTablesForHighlightFullscreen =
             fullTablesForHighlightFullscreen.length > 0 && activeFilters
                 ? applyFiltersToTables(fullTablesForHighlightFullscreen, activeFilters)

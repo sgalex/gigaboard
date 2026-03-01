@@ -315,10 +315,11 @@ async def compute_filtered_board(
     ContentNode с ai_resolve_batch используют кэшированные данные.
 
     Request body: { "filters": FilterExpression | null, "initiator_content_node_ids": [str] | null }
-    Для нод из initiator_content_node_ids возвращаются полные (не отфильтрованные) данные,
-    чтобы виджет-инициатор мог показывать все элементы с выделением выбранного.
+    "nodes" всегда содержит отфильтрованные данные (для карточек ContentNode).
+    "initiator_full_data" — только для node_id из initiator_content_node_ids полные данные,
+    чтобы виджет-инициатор мог показывать highlight (full vs filtered).
 
-    Response: { "nodes": { [nodeId]: { tables, uses_ai, from_cache } } }
+    Response: { "nodes": { [nodeId]: { tables, uses_ai, from_cache } }, "initiator_full_data"?: { [nodeId]: { tables, ... } } }
     """
     raw_filters = body.get("filters")
     initiator_ids: list[str] = body.get("initiator_content_node_ids") or []
@@ -338,6 +339,7 @@ async def compute_filtered_board(
             user_id=str(current_user.id),
         )
 
+        initiator_full_data: dict[str, dict[str, Any]] = {}
         if initiator_ids:
             full_data = await _compute_filtered_pipeline(
                 db=db,
@@ -347,14 +349,15 @@ async def compute_filtered_board(
             )
             for nid in initiator_ids:
                 if nid in full_data:
-                    nodes_data[nid] = full_data[nid]
+                    initiator_full_data[nid] = full_data[nid]
 
         logger.info(
-            "compute-filtered board=%s result_nodes=%d",
+            "compute-filtered board=%s result_nodes=%d initiator_full=%d",
             board_id,
             len(nodes_data),
+            len(initiator_full_data),
         )
-        return {"nodes": nodes_data}
+        return {"nodes": nodes_data, "initiator_full_data": initiator_full_data}
     except Exception as e:
         logger.error("compute-filtered failed for board %s: %s", board_id, e, exc_info=True)
         raise HTTPException(
@@ -497,7 +500,8 @@ async def compute_filtered_dashboard(
             if nid in pipeline_results:
                 result[nid] = pipeline_results[nid]
 
-        # 6. Для виджетов-инициаторов подставляем полные (не отфильтрованные) данные
+        # 6. Для виджетов-инициаторов — полные данные только в initiator_full_data (result остаётся отфильтрованным)
+        initiator_full_data: dict[str, dict[str, Any]] = {}
         if initiator_ids:
             boards_with_initiators = set()
             for nid in initiator_ids:
@@ -514,10 +518,10 @@ async def compute_filtered_dashboard(
                 )
                 for nid in initiator_ids:
                     if nid in full_result:
-                        result[nid] = full_result[nid]
+                        initiator_full_data[nid] = full_result[nid]
 
-        logger.info("compute-filtered dashboard=%s result_nodes=%d", dashboard_id, len(result))
-        return {"nodes": result}
+        logger.info("compute-filtered dashboard=%s result_nodes=%d initiator_full=%d", dashboard_id, len(result), len(initiator_full_data))
+        return {"nodes": result, "initiator_full_data": initiator_full_data}
     except HTTPException:
         raise
     except Exception as e:

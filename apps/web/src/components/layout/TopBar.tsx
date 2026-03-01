@@ -3,10 +3,10 @@
  * The center area (#topbar-context) serves as a portal target for
  * context-specific toolbars rendered by BoardCanvas / DashboardPage.
  */
-import { Link } from 'react-router-dom'
 import { Menu, User, LogOut, Settings, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ThemeToggle } from '@/components/ThemeToggle'
+import { Logo } from '@/components/Logo'
 import { useAuthStore } from '@/store/authStore'
 import { useUIStore } from '@/store/uiStore'
 import {
@@ -23,7 +23,7 @@ export function TopBar() {
     const { toggleProjectExplorer, isAIPanelOpen, toggleAIPanel } = useUIStore()
 
     return (
-        <header className="border-b border-border bg-card">
+        <header className="border-b border-border bg-card select-none">
             <div className="flex h-12 items-center gap-3 px-3">
                 {/* Left: Menu toggle + Logo */}
                 <div className="flex items-center gap-2 shrink-0">
@@ -37,11 +37,7 @@ export function TopBar() {
                         <Menu className="h-4 w-4" />
                     </Button>
 
-                    <Link to="/" className="flex items-center gap-1.5">
-                        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground text-xs font-bold">
-                            GB
-                        </div>
-                    </Link>
+                    <Logo variant="light" size={28} className="[&_span:last-child]:text-base" />
                 </div>
 
                 <div className="w-px h-6 bg-border" />

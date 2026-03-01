@@ -64,7 +64,7 @@ export function AppLayout({ children, showExplorer = true, sidebar, rightPanel }
                     <>
                         <aside
                             className={cn(
-                                'border-r border-border bg-card transition-all duration-300',
+                                'border-r border-border bg-card transition-all duration-300 select-none',
                                 isProjectExplorerOpen ? 'opacity-100' : 'w-0 opacity-0'
                             )}
                             style={{

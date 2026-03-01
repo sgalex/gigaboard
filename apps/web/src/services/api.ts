@@ -696,6 +696,7 @@ export const filtersAPI = {
     ) =>
         api.post<{
             nodes: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
+            initiator_full_data?: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
         }>(`/api/v1/boards/${boardId}/filters/compute-filtered`, body),
 
     // Dashboard
@@ -713,6 +714,7 @@ export const filtersAPI = {
     ) =>
         api.post<{
             nodes: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
+            initiator_full_data?: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
         }>(`/api/v1/dashboards/${dashboardId}/filters/compute-filtered`, body),
 }
 

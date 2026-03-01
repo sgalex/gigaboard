@@ -14,11 +14,22 @@ import {
     BarChart3,
     Table2,
     Columns3,
+    Pencil,
 } from 'lucide-react'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { ProjectExplorer } from '@/components/ProjectExplorer'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+    Dialog,
+    DialogContent,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import {
     DropdownMenu,
@@ -44,13 +55,17 @@ const DASHBOARD_STATUS_LABELS: Record<string, string> = {
 export function ProjectOverviewPage() {
     const { projectId } = useParams<{ projectId: string }>()
     const navigate = useNavigate()
-    const { currentProject, fetchProject } = useProjectStore()
+    const { currentProject, fetchProject, updateProject } = useProjectStore()
     const { boards, fetchBoards, deleteBoard, isLoading: boardsLoading } = useBoardStore()
     const { dashboards, fetchDashboards, deleteDashboard, isLoading: dashboardsLoading } = useDashboardStore()
     const { openCreateBoardDialog, openCreateDashboardDialog } = useUIStore()
     const [boardToDelete, setBoardToDelete] = useState<BoardWithNodes | null>(null)
     const [dashboardToDelete, setDashboardToDelete] = useState<Dashboard | null>(null)
     const [isDeleting, setIsDeleting] = useState(false)
+    const [isEditProjectOpen, setIsEditProjectOpen] = useState(false)
+    const [editName, setEditName] = useState('')
+    const [editDescription, setEditDescription] = useState('')
+    const [isSavingProject, setIsSavingProject] = useState(false)
 
     useEffect(() => {
         if (projectId) {
@@ -96,6 +111,31 @@ export function ProjectOverviewPage() {
         }
     }
 
+    const openEditProject = () => {
+        if (currentProject) {
+            setEditName(currentProject.name)
+            setEditDescription(currentProject.description ?? '')
+            setIsEditProjectOpen(true)
+        }
+    }
+
+    const handleSaveProject = async () => {
+        if (!projectId || !editName.trim()) return
+        setIsSavingProject(true)
+        try {
+            await updateProject(projectId, {
+                name: editName.trim(),
+                description: editDescription.trim() || undefined,
+            })
+            await fetchProject(projectId)
+            setIsEditProjectOpen(false)
+        } catch (e) {
+            console.error('Failed to update project:', e)
+        } finally {
+            setIsSavingProject(false)
+        }
+    }
+
     if (!currentProject) {
         return (
             <AppLayout sidebar={<ProjectExplorer />}>
@@ -108,45 +148,51 @@ export function ProjectOverviewPage() {
 
     return (
         <AppLayout sidebar={<ProjectExplorer />}>
-            <div className="min-h-full overflow-y-auto bg-transparent">
-                {/* Thematic background */}
-                <div className="fixed inset-0 -z-10 overflow-hidden pointer-events-none">
-                    <div className="absolute -top-40 -right-40 h-80 w-80 rounded-full bg-primary/8 blur-3xl" />
-                    <div className="absolute top-1/2 -left-40 h-96 w-96 rounded-full bg-primary/6 blur-3xl" />
+            <div className="relative min-h-full overflow-y-auto bg-transparent">
+                {/* Градиент только в зоне контента проекта (не под шапкой и не под деревом) */}
+                <div
+                    className="absolute inset-0 z-0 overflow-hidden pointer-events-none"
+                    aria-hidden
+                >
                     <div
-                        className="absolute inset-0 opacity-[0.4] dark:opacity-[0.25]"
+                        className="absolute inset-0"
                         style={{
-                            backgroundImage: `
-                                linear-gradient(hsl(var(--foreground) / 0.03) 1px, transparent 1px),
-                                linear-gradient(90deg, hsl(var(--foreground) / 0.03) 1px, transparent 1px)
+                            background: `
+                                radial-gradient(ellipse 85% 55% at 50% 0%, hsl(var(--primary) / 0.04), transparent 52%),
+                                radial-gradient(ellipse 65% 45% at 100% 100%, hsl(var(--primary) / 0.03), transparent 55%),
+                                radial-gradient(ellipse 55% 35% at 0% 85%, hsl(var(--primary) / 0.025), transparent 50%)
                             `,
-                            backgroundSize: '24px 24px',
                         }}
                     />
-                    <div
-                        className="absolute inset-0 opacity-[0.5] dark:opacity-[0.35]"
-                        style={{
-                            backgroundImage: `
-                                linear-gradient(hsl(var(--primary) / 0.06) 1px, transparent 1px),
-                                linear-gradient(90deg, hsl(var(--primary) / 0.06) 1px, transparent 1px)
-                            `,
-                            backgroundSize: '96px 96px',
-                        }}
-                    />
+                    <div className="absolute -top-24 -right-24 h-80 w-80 rounded-full bg-primary/4 blur-3xl" />
+                    <div className="absolute top-1/2 -left-24 h-96 w-96 rounded-full bg-primary/3 blur-3xl" />
                 </div>
 
-                <div className="relative max-w-6xl mx-auto px-4 py-4 sm:py-5">
+                <div className="relative z-10 max-w-6xl mx-auto px-4 py-4 sm:py-5">
                     {/* Project header */}
                     <header className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                        <div className="min-w-0">
-                            <h1 className="text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
-                                {currentProject.name}
-                            </h1>
-                            {currentProject.description && (
-                                <p className="text-sm text-muted-foreground mt-0.5 line-clamp-1">
-                                    {currentProject.description}
-                                </p>
-                            )}
+                        <div className="min-w-0 flex items-start gap-2">
+                            <div className="min-w-0 flex-1">
+                                <h1 className="text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
+                                    {currentProject.name}
+                                </h1>
+                                {currentProject.description ? (
+                                    <p className="text-sm text-muted-foreground mt-0.5 line-clamp-1">
+                                        {currentProject.description}
+                                    </p>
+                                ) : (
+                                    <p className="text-sm text-muted-foreground/60 mt-0.5 italic">Без описания</p>
+                                )}
+                            </div>
+                            <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                                onClick={openEditProject}
+                                title="Изменить название и описание"
+                            >
+                                <Pencil className="h-4 w-4" />
+                            </Button>
                         </div>
                         <div className="flex flex-wrap gap-2 shrink-0">
                             <Button
@@ -169,10 +215,58 @@ export function ProjectOverviewPage() {
                         </div>
                     </header>
 
-                    {/* Boards + Dashboards: two columns on lg */}
-                    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:gap-8">
+                    {/* Edit project dialog */}
+                    <Dialog open={isEditProjectOpen} onOpenChange={setIsEditProjectOpen}>
+                        <DialogContent className="sm:max-w-md">
+                            <DialogHeader>
+                                <DialogTitle>Редактировать проект</DialogTitle>
+                            </DialogHeader>
+                            <div className="grid gap-4 py-2">
+                                <div className="grid gap-2">
+                                    <Label htmlFor="project-name">Название</Label>
+                                    <Input
+                                        id="project-name"
+                                        value={editName}
+                                        onChange={(e) => setEditName(e.target.value)}
+                                        placeholder="Название проекта"
+                                        disabled={isSavingProject}
+                                    />
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="project-description">Описание</Label>
+                                    <Textarea
+                                        id="project-description"
+                                        value={editDescription}
+                                        onChange={(e) => setEditDescription(e.target.value)}
+                                        placeholder="Краткое описание проекта (необязательно)"
+                                        rows={3}
+                                        className="resize-none"
+                                        disabled={isSavingProject}
+                                    />
+                                </div>
+                            </div>
+                            <DialogFooter>
+                                <Button
+                                    variant="outline"
+                                    onClick={() => setIsEditProjectOpen(false)}
+                                    disabled={isSavingProject}
+                                >
+                                    Отмена
+                                </Button>
+                                <Button
+                                    onClick={handleSaveProject}
+                                    disabled={isSavingProject || !editName.trim()}
+                                >
+                                    {isSavingProject ? 'Сохранение...' : 'Сохранить'}
+                                </Button>
+                            </DialogFooter>
+                        </DialogContent>
+                    </Dialog>
+
+                    {/* Boards + Dashboards: two columns on lg, divider between */}
+                    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_auto_1fr] lg:gap-0">
                     {/* Boards section */}
-                    <section className="min-w-0">
+                    <section className="min-w-0 lg:pr-8">
                         <h2 className="text-lg font-semibold text-foreground flex items-center gap-2 mb-2 sm:text-xl">
                             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
                                 <Workflow className="h-4 w-4" />
@@ -308,8 +402,11 @@ export function ProjectOverviewPage() {
                         )}
                     </section>
 
+                    {/* Vertical divider (visible on lg+) */}
+                    <div className="hidden lg:block w-px min-h-[200px] self-stretch bg-border mx-2" aria-hidden />
+
                     {/* Dashboards section */}
-                    <section className="min-w-0">
+                    <section className="min-w-0 lg:pl-8">
                         <h2 className="text-lg font-semibold text-foreground flex items-center gap-2 mb-2 sm:text-xl">
                             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
                                 <LayoutDashboard className="h-4 w-4" />

@@ -70,10 +70,14 @@ export function BoardPage() {
             sidebar={<ProjectExplorer context="board" />}
             rightPanel={boardId ? <AIAssistantPanel boardId={boardId} /> : undefined}
         >
-            <FilterBar />
-            <ReactFlowProvider>
-                <BoardCanvas />
-            </ReactFlowProvider>
+            <div className="flex flex-col h-full min-h-0">
+                <FilterBar />
+                <div className="flex-1 min-h-0 overflow-hidden">
+                    <ReactFlowProvider>
+                        <BoardCanvas />
+                    </ReactFlowProvider>
+                </div>
+            </div>
             <FilterPanel />
         </AppLayout>
     )

@@ -14,6 +14,7 @@ import {
     applyEdgeChanges,
     SelectionMode,
     useReactFlow,
+    useStore,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useBoardStore } from '@/store/boardStore'
@@ -49,6 +50,9 @@ import {
     Radio,
     ChevronDown,
     Camera,
+    Grid3X3,
+    Magnet,
+    Ruler,
 } from 'lucide-react'
 import {
     WidgetNode,
@@ -92,6 +96,318 @@ const edgeTypes = {
     transformation: TransformationEdge,
 }
 
+// Grid & smart guides (aligned with dashboard)
+const GRID_SIZE = 20
+const SNAP_THRESHOLD = 6
+
+type GuideLine = { axis: 'x' | 'y'; position: number; start: number; end: number }
+
+function snapValueToGrid(val: number, gridSize: number = GRID_SIZE): number {
+    return Math.round(val / gridSize) * gridSize
+}
+
+/** Build bounds for all nodes except excludeId from React Flow nodes (position + style). */
+function getOtherNodesBounds(
+    nodes: Node[],
+    excludeId: string
+): { x: number; y: number; width: number; height: number }[] {
+    return nodes
+        .filter((n) => n.id !== excludeId)
+        .map((n) => ({
+            x: n.position.x,
+            y: n.position.y,
+            width: (typeof n.style?.width === 'number' ? n.style.width : 320) as number,
+            height: (typeof n.style?.height === 'number' ? n.style.height : 200) as number,
+        }))
+}
+
+/** Smart guide snap: returns snapped { x, y } and guide lines to draw (dashboard logic). */
+function computeSmartGuideSnap(
+    movingRect: { x: number; y: number; width: number; height: number },
+    otherBounds: { x: number; y: number; width: number; height: number }[],
+    threshold: number = SNAP_THRESHOLD
+): { x: number; y: number; guides: GuideLine[] } {
+    const guides: GuideLine[] = []
+    let snapDx = 0
+    let snapDy = 0
+    let snappedX = false
+    let snappedY = false
+
+    const movingEdges = {
+        left: movingRect.x,
+        right: movingRect.x + movingRect.width,
+        centerX: movingRect.x + movingRect.width / 2,
+        top: movingRect.y,
+        bottom: movingRect.y + movingRect.height,
+        centerY: movingRect.y + movingRect.height / 2,
+    }
+
+    for (const other of otherBounds) {
+        const otherEdges = {
+            left: other.x,
+            right: other.x + other.width,
+            centerX: other.x + other.width / 2,
+            top: other.y,
+            bottom: other.y + other.height,
+            centerY: other.y + other.height / 2,
+        }
+
+        if (!snappedX) {
+            const xPairs: [number, number][] = [
+                [movingEdges.left, otherEdges.left],
+                [movingEdges.left, otherEdges.right],
+                [movingEdges.right, otherEdges.left],
+                [movingEdges.right, otherEdges.right],
+                [movingEdges.centerX, otherEdges.centerX],
+            ]
+            for (const [mv, ov] of xPairs) {
+                if (Math.abs(mv - ov) < threshold) {
+                    snapDx = ov - mv
+                    snappedX = true
+                    break
+                }
+            }
+        }
+        if (!snappedY) {
+            const yPairs: [number, number][] = [
+                [movingEdges.top, otherEdges.top],
+                [movingEdges.top, otherEdges.bottom],
+                [movingEdges.bottom, otherEdges.top],
+                [movingEdges.bottom, otherEdges.bottom],
+                [movingEdges.centerY, otherEdges.centerY],
+            ]
+            for (const [mv, ov] of yPairs) {
+                if (Math.abs(mv - ov) < threshold) {
+                    snapDy = ov - mv
+                    snappedY = true
+                    break
+                }
+            }
+        }
+    }
+
+    const correctedX = movingRect.x + snapDx
+    const correctedY = movingRect.y + snapDy
+    const correctedRect = { x: correctedX, y: correctedY, width: movingRect.width, height: movingRect.height }
+    const finalEdges = {
+        left: correctedRect.x,
+        right: correctedRect.x + correctedRect.width,
+        centerX: correctedRect.x + correctedRect.width / 2,
+        top: correctedRect.y,
+        bottom: correctedRect.y + correctedRect.height,
+        centerY: correctedRect.y + correctedRect.height / 2,
+    }
+
+    for (const other of otherBounds) {
+        const otherEdges = {
+            left: other.x,
+            right: other.x + other.width,
+            centerX: other.x + other.width / 2,
+            top: other.y,
+            bottom: other.y + other.height,
+            centerY: other.y + other.height / 2,
+        }
+        const xMatches: [number, number][] = [
+            [finalEdges.left, otherEdges.left],
+            [finalEdges.left, otherEdges.right],
+            [finalEdges.right, otherEdges.left],
+            [finalEdges.right, otherEdges.right],
+            [finalEdges.centerX, otherEdges.centerX],
+        ]
+        for (const [mv, ov] of xMatches) {
+            if (Math.abs(mv - ov) < 1) {
+                const minY = Math.min(correctedRect.y, other.y) - 10
+                const maxY = Math.max(correctedRect.y + correctedRect.height, other.y + other.height) + 10
+                guides.push({ axis: 'x', position: ov, start: minY, end: maxY })
+            }
+        }
+        const yMatches: [number, number][] = [
+            [finalEdges.top, otherEdges.top],
+            [finalEdges.top, otherEdges.bottom],
+            [finalEdges.bottom, otherEdges.top],
+            [finalEdges.bottom, otherEdges.bottom],
+            [finalEdges.centerY, otherEdges.centerY],
+        ]
+        for (const [mv, ov] of yMatches) {
+            if (Math.abs(mv - ov) < 1) {
+                const minX = Math.min(correctedRect.x, other.x) - 10
+                const maxX = Math.max(correctedRect.x + correctedRect.width, other.x + other.width) + 10
+                guides.push({ axis: 'y', position: ov, start: minX, end: maxX })
+            }
+        }
+    }
+
+    return { x: correctedX, y: correctedY, guides }
+}
+
+/** При ресайзе: привязка правого и нижнего краёв к краям других нод (умные направляющие). */
+function computeResizeSmartGuideSnap(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    otherBounds: { x: number; y: number; width: number; height: number }[],
+    threshold: number = SNAP_THRESHOLD
+): { width: number; height: number } {
+    let newWidth = width
+    let newHeight = height
+    const right = x + width
+    const bottom = y + height
+
+    for (const other of otherBounds) {
+        const oLeft = other.x
+        const oRight = other.x + other.width
+        const oTop = other.y
+        const oBottom = other.y + other.height
+
+        if (Math.abs(right - oLeft) < threshold) newWidth = oLeft - x
+        else if (Math.abs(right - oRight) < threshold) newWidth = oRight - x
+        if (Math.abs(bottom - oTop) < threshold) newHeight = oTop - y
+        else if (Math.abs(bottom - oBottom) < threshold) newHeight = oBottom - y
+    }
+
+    return {
+        width: Math.max(100, Math.min(2000, Math.round(newWidth))),
+        height: Math.max(100, Math.min(2000, Math.round(newHeight))),
+    }
+}
+
+/** Строит линии направляющих для прямоугольника (для отображения при ресайзе). */
+function getGuidesForRect(
+    rect: { x: number; y: number; width: number; height: number },
+    otherBounds: { x: number; y: number; width: number; height: number }[]
+): GuideLine[] {
+    const guides: GuideLine[] = []
+    const edges = {
+        left: rect.x,
+        right: rect.x + rect.width,
+        centerX: rect.x + rect.width / 2,
+        top: rect.y,
+        bottom: rect.y + rect.height,
+        centerY: rect.y + rect.height / 2,
+    }
+    for (const other of otherBounds) {
+        const o = {
+            left: other.x,
+            right: other.x + other.width,
+            centerX: other.x + other.width / 2,
+            top: other.y,
+            bottom: other.y + other.height,
+            centerY: other.y + other.height / 2,
+        }
+        const xPairs: [number, number][] = [
+            [edges.left, o.left], [edges.left, o.right], [edges.right, o.left], [edges.right, o.right], [edges.centerX, o.centerX],
+        ]
+        for (const [mv, ov] of xPairs) {
+            if (Math.abs(mv - ov) < 1) {
+                const minY = Math.min(rect.y, other.y) - 10
+                const maxY = Math.max(rect.y + rect.height, other.y + other.height) + 10
+                guides.push({ axis: 'x', position: ov, start: minY, end: maxY })
+            }
+        }
+        const yPairs: [number, number][] = [
+            [edges.top, o.top], [edges.top, o.bottom], [edges.bottom, o.top], [edges.bottom, o.bottom], [edges.centerY, o.centerY],
+        ]
+        for (const [mv, ov] of yPairs) {
+            if (Math.abs(mv - ov) < 1) {
+                const minX = Math.min(rect.x, other.x) - 10
+                const maxX = Math.max(rect.x + rect.width, other.x + other.width) + 10
+                guides.push({ axis: 'y', position: ov, start: minX, end: maxX })
+            }
+        }
+    }
+    return guides
+}
+
+const DIAMOND = 3
+
+/** flow → пиксели в системе контейнера: viewport transform [tx, ty, zoom]. */
+function flowToContainer(flow: { x: number; y: number }, [tx, ty, zoom]: [number, number, number]) {
+    return { x: flow.x * zoom + tx, y: flow.y * zoom + ty }
+}
+
+/** Оверлей направляющих в пикселях контейнера. Рисует поверх канваса. */
+function GuideLinesOverlayPixels({
+    guideLines,
+    transform,
+}: {
+    guideLines: GuideLine[]
+    transform: [number, number, number]
+}) {
+    const [tx, ty, zoom] = transform
+    return (
+        <div
+            className="absolute inset-0 pointer-events-none"
+            style={{ zIndex: 9999 }}
+        >
+            {guideLines.map((g, i) => {
+                if (g.axis === 'x') {
+                    const pStart = flowToContainer({ x: g.position, y: g.start }, transform)
+                    const pEnd = flowToContainer({ x: g.position, y: g.end }, transform)
+                    const left = pStart.x - DIAMOND
+                    const top = Math.min(pStart.y, pEnd.y)
+                    const height = Math.abs(pEnd.y - pStart.y)
+                    return (
+                        <div key={`g-${i}`} className="absolute" style={{ left, top, width: DIAMOND * 2 + 1, height }}>
+                            <div
+                                className="absolute rounded-sm"
+                                style={{ left: DIAMOND, top: 0, width: 0, height: '100%', borderLeft: '2px dashed #e846e8' }}
+                            />
+                            <div
+                                className="absolute bg-[#e846e8] rounded-sm rotate-45 opacity-95"
+                                style={{ left: 0, top: -DIAMOND, width: DIAMOND * 2 + 1, height: DIAMOND * 2 + 1 }}
+                            />
+                            <div
+                                className="absolute bg-[#e846e8] rounded-sm rotate-45 opacity-95"
+                                style={{ left: 0, bottom: -DIAMOND, width: DIAMOND * 2 + 1, height: DIAMOND * 2 + 1 }}
+                            />
+                        </div>
+                    )
+                }
+                const pStart = flowToContainer({ x: g.start, y: g.position }, transform)
+                const pEnd = flowToContainer({ x: g.end, y: g.position }, transform)
+                const left = Math.min(pStart.x, pEnd.x)
+                const top = pStart.y - DIAMOND
+                const width = Math.abs(pEnd.x - pStart.x)
+                return (
+                    <div key={`g-${i}`} className="absolute" style={{ left, top, width, height: DIAMOND * 2 + 1 }}>
+                        <div
+                            className="absolute rounded-sm"
+                            style={{ left: 0, top: DIAMOND, width: '100%', height: 0, borderTop: '2px dashed #e846e8' }}
+                        />
+                        <div
+                            className="absolute bg-[#e846e8] rounded-sm rotate-45 opacity-95"
+                            style={{ left: -DIAMOND, top: 0, width: DIAMOND * 2 + 1, height: DIAMOND * 2 + 1 }}
+                        />
+                        <div
+                            className="absolute bg-[#e846e8] rounded-sm rotate-45 opacity-95"
+                            style={{ right: -DIAMOND, top: 0, width: DIAMOND * 2 + 1, height: DIAMOND * 2 + 1 }}
+                        />
+                    </div>
+                )
+            })}
+        </div>
+    )
+}
+
+/**
+ * Мост: внутри ReactFlow есть доступ к store. Рендерим оверлей через createPortal
+ * в контейнер доски и рисуем направляющие в пикселях по transform из store.
+ */
+function GuideLinesBridge({
+    guideLines,
+    containerRef,
+}: {
+    guideLines: GuideLine[]
+    containerRef: React.RefObject<HTMLDivElement | null>
+}) {
+    const transform = useStore((s) => s.transform) as [number, number, number]
+    if (guideLines.length === 0 || !containerRef.current) return null
+    return createPortal(
+        <GuideLinesOverlayPixels guideLines={guideLines} transform={transform} />,
+        containerRef.current
+    )
+}
 
 // Convert WidgetNode to ReactFlow Node
 function widgetNodeToReactFlowNode(node: WidgetNode): Node {
@@ -285,6 +601,10 @@ export function BoardCanvas() {
     const [selectedContentNodeForVisualize, setSelectedContentNodeForVisualize] = useState<ContentNode | null>(null)
     const [selectedSourceNodeForVisualize, setSelectedSourceNodeForVisualize] = useState<SourceNode | null>(null)
     const [newNodePosition, setNewNodePosition] = useState({ x: 100, y: 100 })
+    const [guideLines, setGuideLines] = useState<GuideLine[]>([])
+    const [showGrid, setShowGrid] = useState(true)
+    const [snapToGrid, setSnapToGrid] = useState(false)
+    const [smartGuides, setSmartGuides] = useState(true)
     const flowContainerRef = useRef<HTMLDivElement>(null)
     const thumbnailCaptureScheduled = useRef(false)
     const initialLoadDone = useRef(false)
@@ -478,38 +798,128 @@ export function BoardCanvas() {
 
     const onNodesChange = useCallback(
         (changes: NodeChange[]) => {
-            setNodes((nds) => applyNodeChanges(changes, nds))
+            // Прилипание к сетке и умным направляющим: позиция (перетаскивание) и размеры (ресайз виджета/комментария)
+            const modifiedChanges: NodeChange[] = changes.map((change) => {
+                // Ресайз: привязка к сетке и к умным направляющим (края к краям других нод)
+                if (change.type === 'dimensions' && change.dimensions && 'id' in change && change.id) {
+                    const w = change.dimensions.width ?? 0
+                    const h = change.dimensions.height ?? 0
+                    let width = snapToGrid ? snapValueToGrid(w) : Math.round(w)
+                    let height = snapToGrid ? snapValueToGrid(h) : Math.round(h)
+                    width = Math.max(100, Math.min(2000, width))
+                    height = Math.max(100, Math.min(2000, height))
 
-            // Update node positions and dimensions in store
+                    if (smartGuides) {
+                        const node = nodes.find((n) => n.id === change.id)
+                        if (node) {
+                            const px = node.position?.x ?? 0
+                            const py = node.position?.y ?? 0
+                            const otherBounds = getOtherNodesBounds(nodes, change.id)
+                            const guideSnapped = computeResizeSmartGuideSnap(px, py, width, height, otherBounds)
+                            width = guideSnapped.width
+                            height = guideSnapped.height
+                        }
+                    }
+
+                    // setAttributes: true — чтобы React Flow применил наши размеры к ноде (иначе прилипание не отображается)
+                    return {
+                        ...change,
+                        dimensions: { ...change.dimensions, width, height },
+                        setAttributes: true,
+                    } as NodeChange
+                }
+                if (change.type !== 'position' || !change.position || !('id' in change) || !change.id) {
+                    return change
+                }
+                let x = snapToGrid ? snapValueToGrid(change.position.x) : Math.round(change.position.x)
+                let y = snapToGrid ? snapValueToGrid(change.position.y) : Math.round(change.position.y)
+
+                const widgetNode = widgetNodes.find((n) => n.id === change.id)
+                const commentNode = commentNodes.find((n) => n.id === change.id)
+                const sourceNode = sourceNodes.find((n) => n.id === change.id)
+                const contentNode = contentNodes.find((n) => n.id === change.id)
+                let nodeWidth = 320
+                let nodeHeight = 200
+                if (widgetNode) {
+                    nodeWidth = widgetNode.width || 400
+                    nodeHeight = widgetNode.height || 300
+                } else if (commentNode) {
+                    nodeWidth = commentNode.width || 300
+                    nodeHeight = commentNode.height || 180
+                } else if (sourceNode) {
+                    nodeWidth = sourceNode.width || 280
+                    nodeHeight = sourceNode.height || 150
+                } else if (contentNode) {
+                    nodeWidth = contentNode.width || 320
+                    nodeHeight = contentNode.height || 200
+                }
+
+                if (smartGuides) {
+                    const effectiveNodes = nodes.map((n) =>
+                        n.id === change.id ? { ...n, position: { x, y } } : n
+                    )
+                    const otherBounds = getOtherNodesBounds(effectiveNodes, change.id)
+                    const guideSnapped = computeSmartGuideSnap(
+                        { x, y, width: nodeWidth, height: nodeHeight },
+                        otherBounds
+                    )
+                    x = Math.round(guideSnapped.x)
+                    y = Math.round(guideSnapped.y)
+                }
+
+                return { ...change, position: { x, y } }
+            })
+
+            // Умные направляющие: сбрасывать при окончании перетаскивания или ресайза; показывать только во время ресайза
+            const dragEnd = changes.some((c) => c.type === 'position' && 'dragging' in c && c.dragging === false)
+            const resizeEnd = changes.some((c) => c.type === 'dimensions' && 'resizing' in c && c.resizing === false)
+            if (dragEnd || resizeEnd) {
+                setGuideLines([])
+            } else {
+                // Показывать направляющие при ресайзе только когда ресайз реально идёт (resizing === true), не при любом dimension change
+                const dimChangeResizing = changes.find((c): c is typeof c & { type: 'dimensions'; id: string; resizing?: boolean } => c.type === 'dimensions' && 'id' in c && !!c.id)
+                if (dimChangeResizing && smartGuides && dimChangeResizing.resizing === true) {
+                    const mod = modifiedChanges.find((c) => 'id' in c && c.id === dimChangeResizing.id && c.type === 'dimensions' && c.dimensions)
+                    const dims = mod?.type === 'dimensions' && mod.dimensions ? mod.dimensions : dimChangeResizing.dimensions
+                    if (dims) {
+                        const node = nodes.find((n) => n.id === dimChangeResizing.id)
+                        if (node) {
+                            const px = node.position?.x ?? 0
+                            const py = node.position?.y ?? 0
+                            const rect = { x: px, y: py, width: dims.width, height: dims.height }
+                            const otherBounds = getOtherNodesBounds(nodes, dimChangeResizing.id)
+                            const guides = getGuidesForRect(rect, otherBounds)
+                            setGuideLines(guides)
+                        }
+                    }
+                }
+            }
+
+            setNodes((nds) => applyNodeChanges(modifiedChanges, nds))
+
+            // Update store and handle remove/dimensions
             changes.forEach((change) => {
                 if (!('id' in change) || !change.id || !boardId) return
 
-                // Find node in any of the arrays
                 const widgetNode = widgetNodes.find((n) => n.id === change.id)
                 const commentNode = commentNodes.find((n) => n.id === change.id)
                 const sourceNode = sourceNodes.find((n) => n.id === change.id)
                 const contentNode = contentNodes.find((n) => n.id === change.id)
 
-                // Handle node removal (Delete key or context menu)
                 if (change.type === 'remove') {
-                    if (widgetNode) {
-                        deleteWidgetNode(boardId, widgetNode.id)
-                    } else if (commentNode) {
-                        deleteCommentNode(boardId, commentNode.id)
-                    } else if (sourceNode) {
-                        deleteSourceNode(sourceNode.id)
-                    } else if (contentNode) {
-                        deleteContentNode(contentNode.id)
-                    }
+                    if (widgetNode) deleteWidgetNode(boardId, widgetNode.id)
+                    else if (commentNode) deleteCommentNode(boardId, commentNode.id)
+                    else if (sourceNode) deleteSourceNode(sourceNode.id)
+                    else if (contentNode) deleteContentNode(contentNode.id)
                     return
                 }
 
-                // Update position when drag ends
                 if (change.type === 'position' && change.position && change.dragging === false) {
-                    let x = Math.round(change.position.x)
-                    let y = Math.round(change.position.y)
+                    const mod = modifiedChanges.find((c) => 'id' in c && c.id === change.id)
+                    const pos = (mod && mod.type === 'position' && mod.position) ? mod.position : change.position
+                    let x = Math.round(pos.x)
+                    let y = Math.round(pos.y)
 
-                    // Get current node dimensions
                     let nodeWidth = 320
                     let nodeHeight = 200
                     if (widgetNode) {
@@ -526,114 +936,38 @@ export function BoardCanvas() {
                         nodeHeight = contentNode.height || 200
                     }
 
-                    // Check collision with other nodes
                     const otherNodes: NodeBounds[] = []
+                    widgetNodes.forEach(n => { if (n.id !== change.id) otherNodes.push({ id: n.id, x: n.x || 0, y: n.y || 0, width: n.width || 400, height: n.height || 300 }) })
+                    commentNodes.forEach(n => { if (n.id !== change.id) otherNodes.push({ id: n.id, x: n.x || 0, y: n.y || 0, width: n.width || 300, height: n.height || 180 }) })
+                    sourceNodes.forEach(n => { if (n.id !== change.id) otherNodes.push({ id: n.id, x: n.position?.x || 0, y: n.position?.y || 0, width: n.width || 280, height: n.height || 150 }) })
+                    contentNodes.forEach(n => { if (n.id !== change.id) otherNodes.push({ id: n.id, x: n.position?.x || 0, y: n.position?.y || 0, width: n.width || 320, height: n.height || 200 }) })
 
-                    widgetNodes.forEach(n => {
-                        if (n.id !== change.id) {
-                            otherNodes.push({
-                                id: n.id,
-                                x: n.x || 0,
-                                y: n.y || 0,
-                                width: n.width || 400,
-                                height: n.height || 300
-                            })
-                        }
-                    })
-
-                    commentNodes.forEach(n => {
-                        if (n.id !== change.id) {
-                            otherNodes.push({
-                                id: n.id,
-                                x: n.x || 0,
-                                y: n.y || 0,
-                                width: n.width || 300,
-                                height: n.height || 180
-                            })
-                        }
-                    })
-
-                    sourceNodes.forEach(n => {
-                        if (n.id !== change.id) {
-                            otherNodes.push({
-                                id: n.id,
-                                x: n.position?.x || 0,
-                                y: n.position?.y || 0,
-                                width: n.width || 280,
-                                height: n.height || 150
-                            })
-                        }
-                    })
-
-                    contentNodes.forEach(n => {
-                        if (n.id !== change.id) {
-                            otherNodes.push({
-                                id: n.id,
-                                x: n.position?.x || 0,
-                                y: n.position?.y || 0,
-                                width: n.width || 320,
-                                height: n.height || 200
-                            })
-                        }
-                    })
-
-                    // Use collision detection from our positioning utility
-                    const checkCollision = (
-                        bounds1: { x: number; y: number; width: number; height: number },
-                        bounds2: { x: number; y: number; width: number; height: number },
-                        padding: number = 40
-                    ): boolean => {
-                        return !(
-                            bounds1.x + bounds1.width + padding < bounds2.x ||
-                            bounds1.x > bounds2.x + bounds2.width + padding ||
-                            bounds1.y + bounds1.height + padding < bounds2.y ||
-                            bounds1.y > bounds2.y + bounds2.height + padding
-                        )
-                    }
-
+                    const checkCollision = (a: { x: number; y: number; width: number; height: number }, b: NodeBounds, pad = 40) =>
+                        !(a.x + a.width + pad < b.x || a.x > b.x + b.width + pad || a.y + a.height + pad < b.y || a.y > b.y + b.height + pad)
                     const currentBounds = { x, y, width: nodeWidth, height: nodeHeight }
-                    const hasCollision = otherNodes.some(node => checkCollision(currentBounds, node))
+                    const hasCollision = otherNodes.some((node) => checkCollision(currentBounds, node))
 
                     if (hasCollision) {
-                        console.warn('⚠️ Node collision detected, finding nearest free space...')
-
-                        // Find NEAREST free position (minimal movement)
-                        const nearestFreePos = findNearestFreePosition(
-                            { x, y },
-                            nodeWidth,
-                            nodeHeight,
-                            otherNodes,
-                            40 // padding
-                        )
-
+                        const nearestFreePos = findNearestFreePosition({ x, y }, nodeWidth, nodeHeight, otherNodes, 40)
                         x = Math.round(nearestFreePos.x)
                         y = Math.round(nearestFreePos.y)
-
-                        // Update React Flow node position immediately
                         setNodes((nds) =>
-                            nds.map(n =>
-                                n.id === change.id
-                                    ? { ...n, position: { x, y } }
-                                    : n
-                            )
+                            nds.map((n) => (n.id === change.id ? { ...n, position: { x, y } } : n))
                         )
                     }
 
-                    if (widgetNode) {
-                        updateWidgetNode(boardId, widgetNode.id, { x, y })
-                    } else if (commentNode) {
-                        updateCommentNode(boardId, commentNode.id, { x, y })
-                    } else if (sourceNode) {
-                        updateSourceNode(sourceNode.id, { position: { x, y } })
-                    } else if (contentNode) {
-                        updateContentNode(contentNode.id, { position: { x, y } })
-                    }
+                    if (widgetNode) updateWidgetNode(boardId, widgetNode.id, { x, y })
+                    else if (commentNode) updateCommentNode(boardId, commentNode.id, { x, y })
+                    else if (sourceNode) updateSourceNode(sourceNode.id, { position: { x, y } })
+                    else if (contentNode) updateContentNode(contentNode.id, { position: { x, y } })
                 }
 
-                // Update dimensions when resize ends (only for WidgetNode and CommentNode)
+                // Update dimensions when resize ends (only for WidgetNode and CommentNode); используем уже привязанные к сетке значения из modifiedChanges
                 if (change.type === 'dimensions' && change.dimensions && change.resizing === false) {
-                    const width = Math.max(100, Math.min(2000, Math.round(change.dimensions.width)))
-                    const height = Math.max(100, Math.min(2000, Math.round(change.dimensions.height)))
+                    const mod = modifiedChanges.find((c) => 'id' in c && c.id === change.id && c.type === 'dimensions' && c.dimensions)
+                    const dims = mod?.type === 'dimensions' && mod.dimensions ? mod.dimensions : change.dimensions
+                    const width = Math.max(100, Math.min(2000, Math.round(dims.width)))
+                    const height = Math.max(100, Math.min(2000, Math.round(dims.height)))
 
                     if (widgetNode) {
                         updateWidgetNode(boardId, widgetNode.id, { width, height })
@@ -644,10 +978,14 @@ export function BoardCanvas() {
             })
         },
         [
+            nodes,
+            snapToGrid,
+            smartGuides,
             widgetNodes, commentNodes, sourceNodes, contentNodes,
             boardId,
             updateWidgetNode, updateCommentNode, updateSourceNode, updateContentNode,
-            deleteWidgetNode, deleteCommentNode, deleteSourceNode, deleteContentNode
+            deleteWidgetNode, deleteCommentNode, deleteSourceNode, deleteContentNode,
+            setGuideLines,
         ]
     )
 
@@ -710,6 +1048,31 @@ export function BoardCanvas() {
 
     const onPaneClick = useCallback(() => {
         // Pane clicked - can be used for deselection or other actions
+    }, [])
+
+    const onNodeDrag = useCallback(
+        (_: React.MouseEvent, node: Node, _draggedNodes: Node[]) => {
+            if (!smartGuides) {
+                setGuideLines([])
+                return
+            }
+            // React Flow передаёт в onNodeDrag только перетаскиваемые узлы. Для умных направляющих
+            // нужны ВСЕ узлы канваса — берём из локального state, подставляя текущую позицию перетаскиваемого.
+            const allNodesWithDragPosition = nodes.map((n) =>
+                n.id === node.id ? { ...n, position: node.position } : n
+            )
+            const w = typeof node.style?.width === 'number' ? node.style.width : 320
+            const h = typeof node.style?.height === 'number' ? node.style.height : 200
+            const rect = { x: node.position.x, y: node.position.y, width: w, height: h }
+            const otherBounds = getOtherNodesBounds(allNodesWithDragPosition, node.id)
+            const { guides } = computeSmartGuideSnap(rect, otherBounds)
+            setGuideLines(guides)
+        },
+        [smartGuides, nodes]
+    )
+
+    const onNodeDragStop = useCallback(() => {
+        setGuideLines([])
     }, [])
 
     // Handle node and edge deletion
@@ -1001,6 +1364,33 @@ export function BoardCanvas() {
                     )}
                     <span className="flex-1 min-w-2" aria-hidden />
                     <Button
+                        variant={showGrid ? 'default' : 'ghost'}
+                        size="icon"
+                        className="h-7 w-7 shrink-0"
+                        onClick={() => setShowGrid((g) => !g)}
+                        title="Сетка"
+                    >
+                        <Grid3X3 className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                        variant={snapToGrid ? 'default' : 'ghost'}
+                        size="icon"
+                        className="h-7 w-7 shrink-0"
+                        onClick={() => setSnapToGrid((s) => !s)}
+                        title="Привязка к сетке"
+                    >
+                        <Magnet className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                        variant={smartGuides ? 'default' : 'ghost'}
+                        size="icon"
+                        className="h-7 w-7 shrink-0"
+                        onClick={() => setSmartGuides((s) => !s)}
+                        title="Умные направляющие"
+                    >
+                        <Ruler className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
                         variant="outline"
                         size="sm"
                         className="h-8 w-8 p-0 shrink-0"
@@ -1015,12 +1405,14 @@ export function BoardCanvas() {
             )}
 
             {/* React Flow Canvas — ref для захвата превью доски */}
-            <div ref={flowContainerRef} className="w-full h-full">
+            <div ref={flowContainerRef} className="relative w-full h-full">
                 <ReactFlow
                     nodes={nodes}
                     edges={edges}
                     onNodesChange={onNodesChange}
                     onEdgesChange={onEdgesChange}
+                    onNodeDrag={onNodeDrag}
+                    onNodeDragStop={onNodeDragStop}
                     onPaneClick={onPaneClick}
                     onDrop={onDrop}
                     onDragOver={onDragOver}
@@ -1038,11 +1430,16 @@ export function BoardCanvas() {
                     selectionKeyCode="Shift"
                     connectionMode="loose"
                     connectOnClick={false}
+                    snapGrid={snapToGrid ? [GRID_SIZE, GRID_SIZE] : undefined}
                     proOptions={{ hideAttribution: true }}
                 >
-                    <Background gap={20} size={1} />
+                    {showGrid && <Background gap={GRID_SIZE} size={1} />}
                     <Controls />
                     <MiniMap nodeStrokeWidth={3} className="bg-background border border-border" />
+                    {/* Умные направляющие: мост внутри ReactFlow порталит оверлей в контейнер, пиксели по transform */}
+                    {guideLines.length > 0 && (
+                        <GuideLinesBridge guideLines={guideLines} containerRef={flowContainerRef} />
+                    )}
                 </ReactFlow>
             </div>
 

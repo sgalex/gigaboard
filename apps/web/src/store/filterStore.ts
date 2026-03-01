@@ -57,11 +57,13 @@ interface FilterState {
     isLoadingDimensions: boolean
     isLoadingPresets: boolean
 
-    // Пересчитанные данные нод (не сохраняются в БД, только для отображения)
+    // Пересчитанные данные нод (не сохраняются в БД, только для отображения). Всегда отфильтрованные — для карточек ContentNode.
     filteredNodeData: Record<string, FilteredNodeEntry> | null
+    /** Полные (не отфильтрованные) данные только для initiator ContentNode — для виджета (highlight full vs filtered). */
+    initiatorFullNodeData: Record<string, FilteredNodeEntry>
     isComputingFiltered: boolean
 
-    // Content node IDs, для которых возвращать полные (не отфильтрованные) данные — виджеты-инициаторы
+    // Content node IDs, для которых возвращать полные данные в initiatorFullNodeData — виджеты-инициаторы
     initiatorContentNodeIds: string[]
 
     // Стек предыдущих датасетов по виджету-инициатору (для отрисовки «предыдущее состояние + выделенный текущий»)
@@ -150,6 +152,7 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
     isLoadingDimensions: false,
     isLoadingPresets: false,
     filteredNodeData: null,
+    initiatorFullNodeData: {},
     isComputingFiltered: false,
     initiatorContentNodeIds: [],
     dataStackByWidgetId: {},
@@ -186,6 +189,7 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
                 activePresetId: null,
                 filterStats: [],
                 filteredNodeData: null,
+                initiatorFullNodeData: {},
                 initiatorContentNodeIds: [],
                 dataStackByWidgetId: {},
             })
@@ -259,6 +263,7 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
             activePresetId: null,
             filterStats: [],
             filteredNodeData: null,
+            initiatorFullNodeData: {},
             dataStackByWidgetId: {},
             initiatorContentNodeIds: [],
         })
@@ -539,10 +544,13 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
             const res = context.type === 'board'
                 ? await filtersAPI.computeFiltered(context.id, body)
                 : await filtersAPI.computeFilteredDashboard(context.id, body)
-            set({ filteredNodeData: res.data.nodes })
+            set({
+                filteredNodeData: res.data.nodes,
+                initiatorFullNodeData: res.data.initiator_full_data ?? {},
+            })
         } catch (e) {
             console.error('Failed to compute filtered pipeline', e)
-            set({ filteredNodeData: null })
+            set({ filteredNodeData: null, initiatorFullNodeData: {} })
         } finally {
             set({ isComputingFiltered: false })
         }

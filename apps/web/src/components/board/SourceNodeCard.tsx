@@ -179,6 +179,7 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
     const filteredEntry = useFilterStore((s) => s.filteredNodeData?.[sourceNode.id] ?? null)
     const isFiltered = filteredEntry !== null
     const tables = filteredEntry?.tables ?? content?.tables ?? []
+    /** Иконка фильтра: при активном фильтре данные ноды отфильтрованы, значит все таблицы в бейджах затронуты. */
     const tableCount = tables.length
     const totalRows = tables.reduce((sum: number, t: any) => sum + (t.row_count || 0), 0)
     const hasText = !!content?.text
@@ -634,30 +635,30 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                         </div>
                     )}
 
-                    {/* Data preview (tables as clickable badges) */}
+                    {/* Data preview (tables as clickable badges; filter icon inside badge when filter affects this table) */}
                     {tableCount > 0 && (
                         <div className="flex flex-wrap gap-1.5">
-                            {isFiltered && (
-                                <Filter
-                                    className="w-3 h-3 text-blue-600"
-                                    aria-label="Фильтр активен"
-                                />
-                            )}
                             {tables.map((table, idx: number) => (
                                 <Badge
                                     key={idx}
                                     variant="outline"
-                                    className="cursor-pointer hover:bg-primary hover:text-primary-foreground transition-colors text-xs"
+                                    className="group cursor-pointer hover:bg-primary hover:text-primary-foreground transition-colors text-xs gap-1"
                                     onClick={() => {
                                         setActiveTableIndex(idx)
                                         setShowPreviewModal(true)
                                     }}
                                 >
-                                    <Table2 className="h-3 w-3 mr-1" />
+                                    <Table2 className="h-3 w-3 shrink-0" />
                                     <span className="font-medium">{table.name}</span>
-                                    <span className="ml-1.5 px-1.5 py-0.5 bg-primary/10 rounded text-[10px] font-semibold">
+                                    <span className="ml-0.5 px-1.5 py-0.5 bg-primary/10 rounded text-[10px] font-semibold">
                                         {table.row_count || 0}
                                     </span>
+                                    {isFiltered && (
+                                        <Filter
+                                            className="h-3 w-3 shrink-0 text-blue-600 group-hover:text-primary-foreground ml-0.5 transition-colors"
+                                            aria-label="Фильтр затрагивает таблицу"
+                                        />
+                                    )}
                                 </Badge>
                             ))}
                         </div>

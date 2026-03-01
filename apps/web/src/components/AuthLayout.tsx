@@ -1,6 +1,6 @@
 import { ReactNode } from "react"
-import { Layout } from "lucide-react"
 import { ThemeToggle } from "./ThemeToggle"
+import { Logo } from "./Logo"
 
 interface AuthLayoutProps {
     title: string
@@ -22,9 +22,7 @@ export const AuthLayout = ({
             </div>
             <div className="w-full max-w-[440px] space-y-8">
                 <div className="flex flex-col items-center">
-                    <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary shadow-xl shadow-primary/20">
-                        <Layout className="h-10 w-10 text-primary-foreground" />
-                    </div>
+                    <Logo showName link variant="light" size={48} className="mb-2" />
                     <h2 className="mt-6 text-center text-4xl font-bold tracking-tight text-foreground">
                         {title}
                     </h2>

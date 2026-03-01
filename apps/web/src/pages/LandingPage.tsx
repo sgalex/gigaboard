@@ -1,7 +1,6 @@
 import { Link } from 'react-router-dom'
 import { useEffect } from 'react'
 import {
-    Layout,
     Sparkles,
     Users,
     Link2,
@@ -53,6 +52,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Logo } from '@/components/Logo'
 
 // Hero Section
 const HeroSection = () => (
@@ -94,8 +94,7 @@ const HeroSection = () => (
 
             {/* Description */}
             <p className="mx-auto max-w-3xl text-xl leading-relaxed text-gray-200 sm:text-2xl mb-14">
-                <strong className="text-white">GigaBoard</strong> — платформа для создания аналитических досок и data-driven дашбордов силой AI.
-                Задайте вопрос на естественном языке, AI построит полный анализ с визуализациями за минуты.
+                <strong className="text-white">GigaBoard</strong> — Data-Centric Canvas: бесконечное полотно, где вы строите аналитические пайплайны из источников, трансформаций и виджетов. Доски для анализа, дашборды для презентаций. AI в диалоге создаёт трансформации и визуализации за минуты.
             </p>
 
             {/* Buttons */}
@@ -116,9 +115,9 @@ const HeroSection = () => (
             {/* Feature highlights */}
             <div className="grid grid-cols-1 gap-6 sm:grid-cols-3 mx-auto max-w-4xl">
                 {[
-                    { icon: Zap, text: 'No-Code Analytics' },
-                    { icon: Bot, text: 'AI-Powered Insights' },
-                    { icon: Clock, text: 'Результат за минуты' },
+                    { icon: LayoutGrid, text: 'Доски и дашборды' },
+                    { icon: Bot, text: 'AI в диалоге' },
+                    { icon: MousePointerClick, text: 'Cross-Filter и click-to-filter' },
                 ].map(({ icon: Icon, text }) => (
                     <div key={text} className="flex items-center justify-center gap-3 rounded-xl border border-white/20 bg-white/5 p-5 backdrop-blur-sm transition-all duration-300 hover:bg-white/10 hover:border-white/40">
                         <Icon className="h-5 w-5 text-[#21A038]" />
@@ -134,31 +133,31 @@ const HeroSection = () => (
 const CoreFeaturesSection = () => {
     const features = [
         {
-            icon: MessageSquare,
-            title: 'Natural Language Interface',
-            description: 'Формулируйте запросы на естественном языке: "Проанализируй динамику продаж" или "Сравни конверсию по каналам". AI интерпретирует контекст и выполняет анализ.',
-            details: ['Естественный язык', 'Понимает контекст', 'Учится на ваших вопросах', 'Даёт рекомендации'],
+            icon: LayoutGrid,
+            title: 'Data-Centric Canvas',
+            description: 'Бесконечное полотно с узлами: источники данных (CSV, Excel, БД, API), трансформации и виджеты связаны стрелками. Весь пайплайн виден на одном холсте; при обновлении источника цепочка пересчитывается автоматически.',
+            details: ['Источники → трансформации → виджеты', 'Авто-replay при изменении данных', 'Доски для анализа', 'Прозрачный data lineage'],
             color: 'bg-[#21A038]/10 text-[#21A038]',
         },
         {
-            icon: Database,
-            title: 'Automated Data Pipeline',
-            description: 'AI автоматически строит data pipeline: подключается к источникам, извлекает и трансформирует данные, создаёт агрегации — от сырых данных до готовых метрик.',
-            details: ['Файлы любых форматов', 'Базы данных', 'Облачные сервисы', 'Публичные датасеты'],
+            icon: MessageSquare,
+            title: 'AI в диалоге',
+            description: 'Описываете задачу на естественном языке — AI генерирует трансформации (Python/pandas) и визуализации (HTML/CSS/JS). Transform Dialog и Widget Dialog с итеративным чатом, превью и подсказками.',
+            details: ['Естественный язык', 'Трансформации и виджеты за минуты', 'Итеративный чат и preview', 'Рекомендации и suggestions'],
             color: 'bg-purple-500/10 text-purple-500',
         },
         {
-            icon: Sparkles,
-            title: 'Smart Visualization',
-            description: 'AI анализирует данные и выбирает оптимальные типы визуализаций (charts, tables, KPI cards). Создаёт dashboard-ready виджеты с правильной агрегацией.',
-            details: ['Графики и диаграммы', 'Таблицы и карточки', 'Интерактивные элементы', 'Готово к презентации'],
+            icon: LayoutDashboard,
+            title: 'Дашборды',
+            description: 'Презентационный слой поверх досок: виджеты, текст, изображения, таблицы, линии. Редактор с drag/resize/rotate, смарт-направляющие и z-order. Просмотр и (скоро) публичная ссылка.',
+            details: ['Виджеты, текст, изображения', 'Snap и smart guides', 'Фильтры на дашборде', 'Готово к шарингу'],
             color: 'bg-[#21A038]/10 text-[#21A038]',
         },
         {
-            icon: Users,
-            title: 'Real-Time Collaboration',
-            description: 'Работайте над аналитикой совместно: real-time updates, комментарии к данным, shared boards. Обсуждайте инсайты с командой в контексте дашборда.',
-            details: ['Совместное редактирование', 'Комментарии и обсуждения', 'Общий доступ', 'История изменений'],
+            icon: MousePointerClick,
+            title: 'Cross-Filter и совместная работа',
+            description: 'Глобальные фильтры по измерениям: одна панель фильтров для всей доски или дашборда. Click-to-filter из виджетов, пресеты. Real-time обновления через Socket.IO — все видят изменения сразу.',
+            details: ['Глобальные фильтры и пресеты', 'Click-to-filter из виджетов', 'Real-time через Socket.IO', 'Командная работа'],
             color: 'bg-[#21A038]/10 text-[#21A038]',
         },
     ]
@@ -288,10 +287,10 @@ const BenefitsSection = () => {
     )
 }
 
-// Streaming & Real-time Section — NEW!
-const StreamingSection = () => {
+// Real-time Section
+const RealTimeSection = () => {
     return (
-        <section id="streaming" className="relative overflow-hidden px-6 py-24">
+        <section id="realtime" className="relative overflow-hidden px-6 py-24">
             {/* Background Image */}
             <div className="absolute inset-0 z-0">
                 <img
@@ -308,13 +307,13 @@ const StreamingSection = () => {
                 <div className="text-center">
                     <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-accent/20 bg-accent/10 px-4 py-2 text-sm font-medium text-accent-foreground">
                         <Radio className="h-4 w-4 text-accent animate-pulse" />
-                        Real-time Streaming
+                        Real-time
                     </div>
                     <h2 className="text-3xl font-bold text-foreground sm:text-4xl">
-                        Живые данные в реальном времени
+                        Обновления в реальном времени
                     </h2>
                     <p className="mx-auto mt-4 max-w-2xl text-muted-foreground">
-                        WebSocket, SSE, Kafka — GigaBoard поддерживает streaming источники с автоматической аккумуляцией и архивированием
+                        Socket.IO и Redis Pub/Sub — изменения на доске синхронизируются между всеми участниками. Обновили источник — pipeline пересчитался, виджеты обновились у всех.
                     </p>
                 </div>
 
@@ -326,18 +325,18 @@ const StreamingSection = () => {
                             <div className="relative mb-4 inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-accent/20 shadow-xl transition-all duration-500 group-hover:scale-125 group-hover:shadow-2xl group-hover:rotate-6">
                                 <Radio className="h-8 w-8 text-accent animate-pulse" />
                             </div>
-                            <CardTitle className="text-2xl">Подключение потоков</CardTitle>
+                            <CardTitle className="text-2xl">Совместная работа</CardTitle>
                             <CardDescription className="text-base leading-relaxed">
-                                Подключайте любые источники данных реального времени. Данные автоматически сохраняются и обрабатываются.
+                                Редактируйте доску вместе с коллегами: добавление узлов, изменение трансформаций и виджетов отображается у всех в реальном времени.
                             </CardDescription>
                         </CardHeader>
                         <CardContent>
                             <ul className="space-y-3">
                                 {[
-                                    'Аккумуляция в реальном времени',
-                                    'Автоматическое архивирование',
-                                    'Настраиваемые интервалы обновления',
-                                    'Replay всей истории данных',
+                                    'Socket.IO для синхронизации',
+                                    'Redis Message Bus на бэкенде',
+                                    'Мгновенное отображение изменений',
+                                    'Единый контекст для команды',
                                 ].map((item) => (
                                     <li key={item} className="flex items-center gap-2 text-sm text-muted-foreground transition-colors group-hover:text-foreground">
                                         <CheckCircle2 className="h-4 w-4 shrink-0 text-success transition-transform group-hover:scale-110" />
@@ -355,19 +354,18 @@ const StreamingSection = () => {
                             <div className="relative mb-4 inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/20 shadow-xl transition-all duration-500 group-hover:scale-125 group-hover:shadow-2xl group-hover:-rotate-6">
                                 <RefreshCw className="h-8 w-8 text-primary transition-transform duration-500 group-hover:rotate-180" />
                             </div>
-                            <CardTitle className="text-2xl">Умное обновление</CardTitle>
+                            <CardTitle className="text-2xl">Автообновление пайплайна</CardTitle>
                             <CardDescription className="text-base leading-relaxed">
-                                GigaBoard сам решает, когда и как обновлять ваши отчёты, чтобы не перегружать систему.
+                                Изменили источник данных — все зависимые трансформации и виджеты пересчитываются автоматически. Весь граф остаётся актуальным.
                             </CardDescription>
                         </CardHeader>
                         <CardContent>
                             <ul className="space-y-3">
                                 {[
-                                    'Throttled: обновление не чаще N секунд',
-                                    'Batched: накопление + batch обработка',
-                                    'Manual: только по команде пользователя',
-                                    'Intelligent: AI решает когда обновлять',
-                                    'Selective: только изменённые части',
+                                    'Replay от источника до виджетов',
+                                    'Только изменённые узлы',
+                                    'Предсказуемый порядок выполнения',
+                                    'Ошибки изолированы, не ломают граф',
                                 ].map((item) => (
                                     <li key={item} className="flex items-center gap-2 text-sm text-muted-foreground transition-colors group-hover:text-foreground">
                                         <Layers className="h-4 w-4 shrink-0 text-primary transition-transform group-hover:scale-110" />
@@ -387,24 +385,23 @@ const StreamingSection = () => {
                         </div>
                         <div>
                             <h3 className="text-lg font-semibold text-foreground mb-2">
-                                🔴 Данные обновляются на глазах
+                                Все видят одно и то же
                             </h3>
                             <p className="text-foreground/80 mb-4">
-                                Пример: датчики IoT отправляют данные → GigaBoard получает их в реальном времени →
-                                график обновляется мгновенно. Все видят изменения одновременно.
+                                Обновили данные в источнике или добавили виджет — коллеги видят изменения без перезагрузки. Идеально для стендапов и обсуждения метрик в команде.
                             </p>
                             <div className="flex flex-wrap gap-2">
                                 <span className="inline-flex items-center gap-1 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs text-accent-foreground">
                                     <Radio className="h-3 w-3" />
-                                    Реальное время
+                                    Socket.IO
                                 </span>
                                 <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary-foreground">
                                     <PlayCircle className="h-3 w-3" />
-                                    Автообновление
+                                    Авто-replay
                                 </span>
                                 <span className="inline-flex items-center gap-1 rounded-full border border-success/30 bg-success/10 px-3 py-1 text-xs text-success-foreground">
                                     <Workflow className="h-3 w-3" />
-                                    Для всех сразу
+                                    Для всей команды
                                 </span>
                             </div>
                         </div>
@@ -419,69 +416,15 @@ const StreamingSection = () => {
 // AI Agents Section — Multi-Agent System
 const AgentsSection = () => {
     const agents = [
-        {
-            icon: Brain,
-            name: 'Planner',
-            role: 'Orchestrator',
-            desc: 'Разбивает задачи на шаги, делегирует специализированным агентам, адаптирует план при ошибках',
-            capabilities: ['Parsing user intent', 'Task decomposition', 'Adaptive replanning']
-        },
-        {
-            icon: Search,
-            name: 'Researcher',
-            role: 'Data Fetcher',
-            desc: 'Получает данные из API, баз данных, веб-страниц. Загружает полное содержимое найденных URL',
-            capabilities: ['SQL queries', 'API calls', 'Web scraping (full content)']
-        },
-        {
-            icon: PieChart,
-            name: 'Analyst',
-            role: 'Pattern Finder',
-            desc: 'Анализирует данные из ContentNode, находит корреляции, тренды, аномалии и инсайты',
-            capabilities: ['Statistical analysis', 'Pattern detection', 'Insight generation']
-        },
-        {
-            icon: Terminal,
-            name: 'Developer',
-            role: 'Tool Builder',
-            desc: 'Пишет custom tools на Python/SQL/JS для уникальных задач и web scraping',
-            capabilities: ['Dynamic code generation', 'API integrations', 'Data parsers']
-        },
-        {
-            icon: RefreshCw,
-            name: 'Transformation',
-            role: 'Data Pipeline',
-            desc: 'Создаёт ContentNode трансформации с pandas: filter, groupby, merge, pivot',
-            capabilities: ['Pandas operations', 'Data joins', 'Auto-replay on update']
-        },
-        {
-            icon: Zap,
-            name: 'Executor',
-            role: 'Sandbox Runner',
-            desc: 'Выполняет код в изолированной среде с resource limits и timeout контролем',
-            capabilities: ['Isolated execution', 'Resource monitoring', 'Error handling']
-        },
-        {
-            icon: FileOutput,
-            name: 'Reporter',
-            role: 'Visualization Gen',
-            desc: 'Генерирует WidgetNode с полным HTML/CSS/JS кодом визуализации в iframe',
-            capabilities: ['Chart.js charts', 'Custom HTML', 'Dark mode support']
-        },
-        {
-            icon: FormInput,
-            name: 'Form Generator',
-            role: 'Input Builder',
-            desc: 'Создаёт динамические формы с auto-detect источников и умными подсказками',
-            capabilities: ['Schema inference', 'Validation rules', 'Conditional logic']
-        },
-        {
-            icon: Globe,
-            name: 'Data Discovery',
-            role: 'Dataset Finder',
-            desc: 'Находит публичные датасеты (Kaggle, OECD, World Bank) для пользователей без данных',
-            capabilities: ['Kaggle search', 'OECD data', 'Public APIs']
-        },
+        { icon: Brain, name: 'Planner', role: 'Orchestrator', desc: 'Разбивает задачи на шаги, делегирует агентам, адаптирует план при ошибках (replan)', capabilities: ['Intent detection', 'Task decomposition', 'Adaptive replanning'] },
+        { icon: Search, name: 'Discovery', role: 'Search', desc: 'Поиск в интернете (DuckDuckGo), поиск публичных датасетов', capabilities: ['Web search', 'Dataset discovery', 'Sources list'] },
+        { icon: Globe, name: 'Research', role: 'Content Fetcher', desc: 'Загрузка контента по URL, API-вызовы, извлечение текста', capabilities: ['Fetch URLs', 'API calls', 'Content extraction'] },
+        { icon: Table, name: 'Structurizer', role: 'Tables', desc: 'Извлечение структурированных данных из текста и HTML', capabilities: ['Text → tables', 'ContentTable format', 'Entities & metadata'] },
+        { icon: PieChart, name: 'Analyst', role: 'Insights', desc: 'Анализ данных, корреляции, тренды, аномалии, выводы и рекомендации', capabilities: ['Statistical analysis', 'Pattern detection', 'Findings'] },
+        { icon: Code2, name: 'TransformCodex', role: 'Code (Python)', desc: 'Генерация Python/pandas кода для трансформаций, syntax check', capabilities: ['Pandas code', 'Filter/groupby/merge', 'Auto-replay'] },
+        { icon: BarChart3, name: 'WidgetCodex', role: 'Code (HTML/JS)', desc: 'Генерация HTML/CSS/JS виджетов, ECharts, click-to-filter', capabilities: ['Charts & tables', 'Sandboxed iframe', 'Widget API'] },
+        { icon: FileOutput, name: 'Reporter', role: 'Response', desc: 'Формирует финальный ответ из результатов агентов (текст и код)', capabilities: ['Narrative', 'Code blocks', 'Unified output'] },
+        { icon: Shield, name: 'Validator', role: 'Gate-keeper', desc: 'Проверяет ответ на соответствие запросу, решает: выдать или replan', capabilities: ['Validation', 'Replan trigger', 'Max 3 iterations'] },
     ]
 
     return (
@@ -535,35 +478,30 @@ const AgentsSection = () => {
                     <div className="flex flex-col items-center justify-center space-y-4 rounded-xl bg-muted/50 p-12">
                         <Network className="h-16 w-16 text-[#21A038]/60" />
                         <div className="text-center">
-                            <p className="text-lg font-semibold text-foreground">🔄 Multi-Agent System Architecture</p>
+                            <p className="text-lg font-semibold text-foreground">🔄 Multi-Agent System V2</p>
                             <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
-                                Диаграмма архитектуры мультиагентной системы:<br />
-                                • Redis Message Bus в центре<br />
-                                • 9 агентов вокруг (Planner, Researcher, Analyst, Developer, Transformation, Executor, Reporter, Form Generator, Data Discovery)<br />
-                                • Стрелки показывают направление сообщений<br />
-                                • Цветовая кодировка по типам каналов (broadcast, direct, ui_events)<br />
-                                • В стиле Sber Green (#21A038)
+                                Orchestrator + Redis Message Bus. 9 core-агентов: Planner, Discovery, Research, Structurizer, Analyst, TransformCodex, WidgetCodex, Reporter, Validator. 5 satellite-контроллеров для Transform Dialog, Widget Dialog и AI Assistant.
                             </p>
                         </div>
                     </div>
                 </div>
 
-                {/* Critical Pattern: Search → Research → Analyze */}
+                {/* Research pipeline: Discovery → Research → Structurizer → Analyst */}
                 <div className="mt-12 rounded-2xl border-2 border-[#21A038]/30 bg-[#21A038]/5 p-8">
                     <div className="mb-6 flex items-center gap-3">
                         <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#21A038]/20">
                             <Zap className="h-5 w-5 text-[#21A038]" />
                         </div>
                         <h3 className="text-xl font-bold text-foreground">
-                            Критический паттерн: Search → Research → Analyze
+                            Паттерн: Discovery → Research → Structurizer → Analyst
                         </h3>
                     </div>
                     <div className="grid gap-4 lg:grid-cols-4">
                         {[
-                            { num: '1', agent: 'Search Agent', action: 'Находит 5 релевантных URL', output: 'Snippets (150 символов)' },
-                            { num: '2', agent: 'Researcher Agent', action: 'Загружает полный контент', output: '5000 символов на страницу' },
-                            { num: '3', agent: 'Analyst Agent', action: 'Анализирует 20KB данных', output: 'Инсайты и паттерны' },
-                            { num: '4', agent: 'Reporter Agent', action: 'Визуализирует результаты', output: 'WidgetNode графики' },
+                            { num: '1', agent: 'Discovery', action: 'Поиск URL и датасетов', output: 'Sources (fetched: false)' },
+                            { num: '2', agent: 'Research', action: 'Загрузка контента по URL', output: 'Sources с content' },
+                            { num: '3', agent: 'Structurizer', action: 'Текст → таблицы', output: 'ContentTable' },
+                            { num: '4', agent: 'Analyst + Reporter', action: 'Инсайты и ответ', output: 'Narrative, визуализации' },
                         ].map((step) => (
                             <div key={step.num} className="rounded-lg border border-[#21A038]/20 bg-card p-4">
                                 <div className="mb-2 flex items-center gap-2">
@@ -580,7 +518,7 @@ const AgentsSection = () => {
                         ))}
                     </div>
                     <p className="mt-4 text-center text-sm text-muted-foreground">
-                        <strong className="text-foreground">40x больше данных</strong> для анализа благодаря промежуточному шагу Researcher Agent
+                        От поиска в интернете до структурированных таблиц и выводов — без ручной выгрузки данных.
                     </p>
                 </div>
 
@@ -651,27 +589,27 @@ const AgentsSection = () => {
                             <div className="mt-5 space-y-2 text-sm text-foreground/80">
                                 <div className="flex items-center gap-2">
                                     <div className="h-2 w-2 rounded-full bg-[#21A038]" />
-                                    <strong className="text-[#21A038]">Planner</strong> разбивает на шаги (Search → Research → Transform → Visualize)
+                                    <strong className="text-[#21A038]">Planner</strong> строит план (Discovery → Research → Structurizer → Analyst или Transform/Widget)
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <div className="h-2 w-2 rounded-full bg-[#21A038]" />
-                                    <strong className="text-[#21A038]">Data Discovery</strong> находит датасеты Росстат, Eurostat
+                                    <strong className="text-[#21A038]">Discovery</strong> ищет датасеты и URL
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <div className="h-2 w-2 rounded-full bg-[#21A038]" />
-                                    <strong className="text-[#21A038]">Researcher</strong> загружает полные данные через API
+                                    <strong className="text-[#21A038]">Research</strong> загружает контент по ссылкам
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <div className="h-2 w-2 rounded-full bg-[#21A038]" />
-                                    <strong className="text-[#21A038]">Transformation</strong> объединяет два датасета pandas merge
+                                    <strong className="text-[#21A038]">TransformCodex</strong> пишет pandas-трансформации
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <div className="h-2 w-2 rounded-full bg-[#21A038]" />
-                                    <strong className="text-[#21A038]">Analyst</strong> вычисляет тренды и корреляции
+                                    <strong className="text-[#21A038]">Analyst</strong> считает тренды и корреляции
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <div className="h-2 w-2 rounded-full bg-[#21A038]" />
-                                    <strong className="text-[#21A038]">Reporter</strong> генерирует интерактивный line chart
+                                    <strong className="text-[#21A038]">WidgetCodex + Reporter</strong> — интерактивные графики
                                 </div>
                             </div>
                             <p className="mt-4 text-base font-semibold text-[#21A038]">
@@ -742,10 +680,10 @@ const WidgetsSection = () => {
                         AI-Generated Visualizations
                     </div>
                     <h2 className="text-3xl font-bold text-foreground sm:text-4xl">
-                        Reporter Agent создаёт виджеты
+                        AI создаёт виджеты (WidgetCodex)
                     </h2>
                     <p className="mx-auto mt-4 max-w-2xl text-lg text-muted-foreground">
-                        AI генерирует <strong className="text-foreground">полный HTML/CSS/JS код</strong> для каждой визуализации — от простых графиков до сложных интерактивных компонентов. Без шаблонов, всегда с нуля.
+                        <strong className="text-foreground">WidgetCodex</strong> генерирует HTML/CSS/JS для визуализаций — графики (ECharts, Chart.js), таблицы, KPI-карточки. Виджеты работают в sandboxed iframe с API для click-to-filter и доступа к данным.
                     </p>
                 </div>
 
@@ -779,14 +717,14 @@ const WidgetsSection = () => {
 
                 <div className="mt-12 rounded-2xl border border-[#21A038]/30 bg-[#21A038]/5 p-8">
                     <h3 className="mb-4 text-center text-xl font-bold text-foreground">
-                        Как Reporter Agent генерирует виджеты
+                        Как создаются виджеты
                     </h3>
                     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                         {[
-                            { step: '1', title: 'Анализ данных', desc: 'AI анализирует ContentNode: структура, типы, паттерны' },
-                            { step: '2', title: 'Генерация кода', desc: 'Пишет полный HTML/CSS/JS с Chart.js или Canvas API' },
-                            { step: '3', title: 'Валидация', desc: 'Проверка безопасности, размера, производительности' },
-                            { step: '4', title: 'Создание WidgetNode', desc: 'Связывается с ContentNode через VISUALIZATION edge' },
+                            { step: '1', title: 'Анализ данных', desc: 'Контекст ContentNode: структура, типы, паттерны' },
+                            { step: '2', title: 'WidgetCodex', desc: 'Генерация HTML/CSS/JS (ECharts и др.), syntax check' },
+                            { step: '3', title: 'Валидация', desc: 'Безопасность, размер, обязательный click-to-filter' },
+                            { step: '4', title: 'WidgetNode', desc: 'Рендер в iframe, связь с ContentNode, Filter API' },
                         ].map((item) => (
                             <div key={item.step} className="text-center">
                                 <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-[#21A038]/20 text-lg font-bold text-[#21A038]">
@@ -968,27 +906,27 @@ const AdvancedFeaturesSection = () => {
     const features = [
         {
             icon: MousePointerClick,
-            title: 'Interactive Drill-Down',
-            description: 'Кликайте на элементы графиков для детализации. Многоуровневая навигация с breadcrumbs.',
-            details: ['Click-to-Drill', 'Auto-Filter', 'Parent-Child Links', 'AI Suggestions'],
+            title: 'Click-to-Filter',
+            description: 'Клик по элементу графика добавляет фильтр в общую панель. Все виджеты на доске/дашборде обновляются по выбранному измерению.',
+            details: ['Глобальные фильтры', 'Пресеты', 'Widget API toggleFilter', 'Уже в продукте'],
         },
         {
             icon: GitBranch,
             title: 'Data Lineage',
-            description: 'Визуализация полного пути данных от источника до виджета. Impact Analysis.',
-            details: ['DAG-граф', 'Root Cause Analysis', 'Audit Trail', 'Change Alerts'],
+            description: 'Граф на холсте: источник → трансформации → виджет. Прозрачный путь данных, авто-replay при изменении источника.',
+            details: ['DAG на Canvas', 'Автообновление цепочки', 'Понятная зависимость', 'Уже в продукте'],
         },
         {
-            icon: MessageSquare,
-            title: 'Collaborative Annotations',
-            description: 'Комментарии и аннотации на виджетах. @Mentions, треды обсуждений, AI участие.',
-            details: ['Widget Comments', '@Mentions', 'Thread Discussions', 'Visual Markers'],
+            icon: MousePointerClick,
+            title: 'Drill-Down (в планах)',
+            description: 'Детализация по клику: переход в дочерний виджет, навигация по уровням с breadcrumbs.',
+            details: ['DRILL_DOWN edges', 'Parent-Child', 'Breadcrumbs', 'Phase 2'],
         },
         {
             icon: Share2,
-            title: 'Export & Embedding',
-            description: 'Экспорт в PDF, PowerPoint, PNG. Встраивание виджетов на внешние сайты.',
-            details: ['Multiple Formats', 'Public Share Links', 'Embed Snippets', 'Access Control'],
+            title: 'Публичные дашборды (скоро)',
+            description: 'Шаринг дашборда по ссылке без авторизации. Экспорт в PDF/PNG и встраивание на внешние сайты — в дорожной карте.',
+            details: ['Share link', 'Embed', 'Export', 'В разработке'],
         },
     ]
 
@@ -997,10 +935,10 @@ const AdvancedFeaturesSection = () => {
             <div className="mx-auto max-w-6xl">
                 <div className="text-center">
                     <h2 className="text-3xl font-bold text-foreground sm:text-4xl">
-                        Продвинутые возможности
+                        Фильтры, lineage и планы
                     </h2>
                     <p className="mx-auto mt-4 max-w-2xl text-muted-foreground">
-                        Enterprise-функции для глубокого анализа и командной работы
+                        Cross-Filter уже работает; Drill-Down и публичные дашборды — в разработке
                     </p>
                 </div>
 
@@ -1032,10 +970,10 @@ const AdvancedFeaturesSection = () => {
 // Upcoming Features Section
 const UpcomingFeaturesSection = () => {
     const features = [
-        { icon: Mic, title: 'Голосовой ввод', desc: 'Voice-to-Text для hands-free работы', status: 'Планируется' },
-        { icon: Calendar, title: 'Автоматические отчёты', desc: 'Отчёты по расписанию в Slack, Email, Teams', status: 'Планируется' },
-        { icon: Languages, title: 'Мультиязычность', desc: 'Русский, English, 中文, Español', status: 'Планируется' },
-        { icon: Download, title: 'Маркетплейс шаблонов', desc: 'Библиотека готовых виджетов и досок', status: 'Планируется' },
+        { icon: Share2, title: 'Публичные дашборды', desc: 'Ссылка на дашборд без логина, настройки доступа', status: 'В приоритете' },
+        { icon: Layers, title: 'Пресеты фильтров', desc: 'Сохранить и загрузить наборы фильтров, авто-применение по умолчанию', status: 'Скоро' },
+        { icon: MousePointerClick, title: 'Drill-Down', desc: 'Детализация по клику, навигация по уровням', status: 'Планируется' },
+        { icon: Mic, title: 'Голосовой ввод', desc: 'Voice-to-Text и NLQ для hands-free', status: 'Phase 3' },
     ]
 
     return (
@@ -1150,7 +1088,7 @@ const TechStackSection = () => {
         { category: 'Frontend', items: ['React + TypeScript', 'Vite', 'React Flow', 'Zustand', 'TanStack Query', 'Tailwind CSS', 'ShadCN UI'] },
         { category: 'Backend', items: ['FastAPI', 'Python 3.13', 'SQLAlchemy', 'Pydantic v2', 'Alembic', 'Socket.IO'] },
         { category: 'AI', items: ['GigaChat', 'LangChain', 'langchain-gigachat', 'Adaptive Planning'] },
-        { category: 'Real-time', items: ['Socket.IO', 'Redis Pub/Sub', 'WebSocket', 'SSE', 'Message Bus'] },
+        { category: 'Real-time', items: ['Socket.IO', 'Redis Pub/Sub', 'Message Bus'] },
         { category: 'Database', items: ['PostgreSQL', 'Redis Cache', 'Stream Archives'] },
     ]
 
@@ -1338,12 +1276,7 @@ const Footer = () => (
     <footer className="border-t border-border bg-card/50 px-6 py-12">
         <div className="mx-auto max-w-6xl">
             <div className="flex flex-col items-center justify-between gap-6 sm:flex-row">
-                <div className="flex items-center gap-2">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                        <Layout className="h-6 w-6" />
-                    </div>
-                    <span className="text-xl font-bold text-foreground">GigaBoard</span>
-                </div>
+                <Logo variant="dark" size={40} className="shrink-0" />
                 <p className="text-sm text-muted-foreground">
                     © {new Date().getFullYear()} GigaBoard Inc. Все права защищены.
                 </p>
@@ -1361,21 +1294,14 @@ const Footer = () => (
 const Header = () => (
     <header className="sticky top-0 z-50 border-b border-border/50 bg-background/80 backdrop-blur-xl shadow-sm">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-            <Link to="/" className="flex items-center gap-2 transition-transform hover:scale-105">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-accent shadow-lg text-primary-foreground transition-shadow hover:shadow-xl">
-                    <Layout className="h-6 w-6" />
-                </div>
-                <span className="bg-gradient-to-r from-primary to-accent bg-clip-text text-xl font-bold text-transparent">
-                    GigaBoard
-                </span>
-            </Link>
+            <Logo variant="dark" size={36} className="shrink-0" />
 
             <nav className="hidden items-center gap-6 lg:flex">
                 <a href="#features" className="text-sm font-medium text-muted-foreground transition-all hover:text-primary hover:scale-110">
-                    Архитектура
+                    Возможности
                 </a>
-                <a href="#streaming" className="text-sm font-medium text-muted-foreground transition-all hover:text-primary hover:scale-110">
-                    Streaming
+                <a href="#realtime" className="text-sm font-medium text-muted-foreground transition-all hover:text-primary hover:scale-110">
+                    Real-time
                 </a>
                 <a href="#agents" className="text-sm font-medium text-muted-foreground transition-all hover:text-primary hover:scale-110">
                     AI-агенты
@@ -1431,7 +1357,7 @@ export const LandingPage = () => {
                 <HeroSection />
                 <CoreFeaturesSection />
                 <BenefitsSection />
-                <StreamingSection />
+                <RealTimeSection />
                 <AgentsSection />
                 <WidgetsSection />
                 <UseCasesSection />

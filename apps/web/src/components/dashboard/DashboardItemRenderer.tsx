@@ -436,6 +436,7 @@ function WidgetContent({ item }: { item: DashboardItem }) {
 
     // Cross-filter integration (item.id = инициатор для стека датасетов на дашборде)
     const filteredNodeData = useFilterStore((s) => s.filteredNodeData)
+    const initiatorFullNodeData = useFilterStore((s) => s.initiatorFullNodeData)
     const activeFilters = useFilterStore((s) => s.activeFilters)
     const getFiltersQueryParam = useFilterStore((s) => s.getFiltersQueryParam)
     const getDataStack = useFilterStore((s) => s.getDataStack)
@@ -491,14 +492,15 @@ function WidgetContent({ item }: { item: DashboardItem }) {
         const sourceContentNodeId = widget.source_content_node_id || widget.config?.sourceContentNodeId
         const authToken = localStorage.getItem('token') || ''
 
-        // Use pipeline-precomputed tables from filteredNodeData when available
+        // Use pipeline-precomputed tables from filteredNodeData when available (всегда отфильтрованные)
         const filteredEntry = sourceContentNodeId && filteredNodeData
             ? filteredNodeData[sourceContentNodeId]
             : null
         const precomputedTables = filteredEntry?.tables
         const dataStack = getDataStack(item.id)
+        const fullEntry = sourceContentNodeId ? initiatorFullNodeData[sourceContentNodeId] : null
         const fullTablesForHighlight =
-            dataStack.length > 0 ? dataStack[dataStack.length - 1].tables : filteredEntry?.tables ?? []
+            dataStack.length > 0 ? dataStack[dataStack.length - 1].tables : (fullEntry?.tables ?? filteredEntry?.tables ?? [])
         const filteredTablesForHighlight =
             fullTablesForHighlight.length > 0 && activeFilters
                 ? applyFiltersToTables(fullTablesForHighlight, activeFilters)
