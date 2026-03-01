@@ -1,43 +1,37 @@
 """
-GigaBoard Multi-Agent System - Agents
-Phase 3: Agents Implementation
+GigaBoard Multi-Agent System V2 - Agents
 
-Exported agents:
+V2 Core Agents (используются через Orchestrator):
 - BaseAgent - базовый класс для всех агентов
-- PlannerAgent - оркестратор и декомпозиция задач
-- AnalystAgent - анализ данных и SQL генерация
-- TransformationAgent - генерация Python кода для трансформаций
-- ReporterAgent - генерация WidgetNode визуализаций
-- ResearcherAgent - получение данных из внешних источников
-- SearchAgent - поиск информации в интернете через DuckDuckGo
-- CriticAgent - валидация результатов Multi-Agent системы
-- DeveloperAgent - кастомные инструменты (TODO)
-- ExecutorAgent - выполнение кода в песочнице (TODO)
-- FormGeneratorAgent - динамические формы (TODO)
-- DataDiscoveryAgent - поиск публичных датасетов (TODO)
+- PlannerAgent - планирование и декомпозиция задач
+- DiscoveryAgent - обнаружение источников данных
+- ResearchAgent - исследование и сбор данных
+- StructurizerAgent - структуризация контента
+- AnalystAgent - анализ данных
+- TransformCodexAgent - генерация кода (трансформации)
+- WidgetCodexAgent - генерация HTML/CSS/JS виджетов (визуализации)
+- ReporterAgent - генерация отчётов и нарративов
+- QualityGateAgent - pipeline-level валидация результатов
+
+Утилитарные агенты:
+- ValidatorAgent (validator.py) - code-level валидация (синтаксис, безопасность)
+- ResolverAgent (resolver.py) - AI batch resolution
 """
 
 from .base import BaseAgent
 from .planner import PlannerAgent
 from .analyst import AnalystAgent
-from .transformation import TransformationAgent
 from .reporter import ReporterAgent
-from .researcher import ResearcherAgent
-from .search import SearchAgent
-from .error_analyzer import ErrorAnalyzerAgent, get_error_analyzer_agent
-from .critic import CriticAgent, determine_expected_outcome, ExpectedOutcome
+from .quality_gate import QualityGateAgent
+from .widget_codex import WidgetCodexAgent
+from .transform_codex import TransformCodexAgent
 
 __all__ = [
     "BaseAgent",
     "PlannerAgent",
     "AnalystAgent",
-    "TransformationAgent",
     "ReporterAgent",
-    "ResearcherAgent",
-    "SearchAgent",
-    "ErrorAnalyzerAgent",
-    "get_error_analyzer_agent",
-    "CriticAgent",
-    "determine_expected_outcome",
-    "ExpectedOutcome",
+    "QualityGateAgent",
+    "WidgetCodexAgent",
+    "TransformCodexAgent",
 ]

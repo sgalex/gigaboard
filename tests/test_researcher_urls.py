@@ -62,7 +62,7 @@ async def test_researcher_with_explicit_urls():
     context = {
         "session_id": "test-session-123",
         "task_index": 0,
-        "previous_results": {}
+        "agent_results": []
     }
     
     print("=" * 80)

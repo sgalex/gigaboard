@@ -27,7 +27,7 @@
    - ContentNode: через extract или transform
    - WidgetNode: визуализация ContentNode
    - CommentNode: аннотации
-3. Создать/удалить связи между узлами (EXTRACT, TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN)
+3. Создать/удалить связи между узлами (TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN)
 4. Создать/выполнить трансформацию (ContentNode(s) → ContentNode)
 5. Извлечь/обновить данные из SourceNode (extract/refresh)
 **Ожидаемый результат**: Данные сохраняются в БД; REST возвращает актуальное состояние борда/узлов/трансформаций с полным data lineage.
@@ -46,7 +46,7 @@
 **Описание**: Пользователь задаёт вопрос на естественном языке, система создаёт:
 - **SourceNode** с конфигурацией источника (если нужен новый источник данных)
 - **ContentNode** с данными (результат извлечения/анализа/трансформации)
-- **WidgetNode** с визуализацией (HTML/CSS/JS код, сгенерированный Reporter Agent)
+- **WidgetNode** с визуализацией (HTML/CSS/JS код, сгенерированный WidgetCodexAgent)
 - **CommentNode** с аналитическими инсайтами
 **Предусловия**: Доступ к GigaChat через langchain-gigachat.
 **Шаги**:
@@ -54,8 +54,8 @@
 2. Planner анализирует запрос, определяет нужны ли новые источники данных
 3. Researcher создаёт SourceNode (если нужно) и извлекает данные → ContentNode
 4. Transformation Agent выполняет трансформации → новые ContentNode
-5. Reporter Agent анализирует ContentNode, генерирует визуализацию → WidgetNode
-6. Узлы размещаются на борде со связями (EXTRACT, TRANSFORMATION, VISUALIZATION)
+5. WidgetCodexAgent анализирует ContentNode, генерирует визуализацию → WidgetNode
+6. Узлы размещаются на борде со связями (TRANSFORMATION, VISUALIZATION)
 **Ожидаемый результат**: Пользователь видит полный pipeline от источника до визуализации на доске с явным data lineage; события приходят всем участникам борда.
 
 ### FR-5: История и версии доски (минимум undo/redo локально)
@@ -74,7 +74,7 @@
 1. Открыть доску → AI Assistant Panel автоматически доступен в правой панели
 2. Ввести сообщение естественном языке (вопрос, команда, запрос)
 3. AI обрабатывает контекст доски (текущие узлы, данные, связи, граф трансформаций, история) и отвечает
-4. Пользователь может применить предложение (создать/обновить DataNode, WidgetNode или трансформацию) одной кнопкой
+4. Пользователь может применить предложение (создать/обновить SourceNode, ContentNode, WidgetNode или трансформацию) одной кнопкой
 5. История диалога сохраняется в сессии
 **Ожидаемый результат**: 
 - Быстрый доступ к AI-помощи без прерывания работы
@@ -82,20 +82,29 @@
 - Мгновенное создание/обновление узлов из предложений ассистента
 - История сообщений доступна в текущей сессии
 
-### FR-7: Multi-Agent System
-**Описание**: За AI Assistant Panel находится мультиагентная система, где различные специализированные AI агенты взаимодействуют друг с другом для решения сложных задач анализа данных.
-**Агенты**:
-- Planner: Разбивает запросы на подзадачи, маршрутизирует
-- Researcher: Получает данные из БД, API, веб-сайтов
-- Analyst: Анализирует, находит закономерности
-- Developer: Пишет код инструментов
-- Executor: Выполняет инструменты в sandbox
-- Reporter: Форматирует результаты, создает visualizations
-**Коммуникация**: Через Redis Message Bus (pub/sub)
+### FR-7: Multi-Agent System (V2)
+**Описание**: За AI Assistant Panel находится мультиагентная система (Orchestrator V2), где специализированные AI агенты решают сложные задачи анализа данных через Redis Message Bus.
+**Агенты** (9 core):
+- Planner: Разбивает запросы на подзадачи, маршрутизирует, адаптивный replan
+- Researcher: Получает данные из URL, API, веб-страниц
+- Analyst: Анализирует структурированные данные → insights
+- Reporter: Генерирует WidgetNode визуализации (HTML/CSS/JS)
+- Validator: Dry-run валидация сгенерированного кода
+- Quality Gate: Валидация результатов на соответствие требованиям
+- Discovery: Поиск и обнаружение данных
+- Resolver: Batch AI resolution (пол по имени, sentiment, категоризация)
+- Structurizer: Извлечение структуры из текста → таблицы, сущности
+**Контроллеры** (5 satellite):
+- AI Assistant: управление диалогом и контекстом доски
+- Transformation: генерация Python/pandas кода трансформаций
+- Transform Suggestions: предложения трансформаций
+- Widget: генерация визуализаций
+- Widget Suggestions: предложения визуализаций на основе данных
+**Коммуникация**: Orchestrator V2 через Redis Message Bus (`request_response()`)
 **Ожидаемый результат**:
 - Сложные многошаговые аналитические задачи решаются автоматически
 - Агенты показывают свой ход мышления в чате
-- Пользователь видит как агенты взаимодействуют
+- Пользователь видит прогресс выполнения
 
 ### FR-8: Dynamic Tool Development
 **Описание**: Developer Agent может динамически писать и выполнять инструменты (tools) для решения специфических задач. Инструменты выполняются в изолированной песочнице (sandbox) с ограничениями по ресурсам и безопасности.
@@ -168,7 +177,7 @@
 **Работа с ContentNode**:
 - Создание ContentNode (POST /api/v1/boards/{boardId}/content-nodes)
 - Загрузка контента (text + N таблиц) после extraction из SourceNode
-- Обновление ContentNode при изменении SourceNode (через EXTRACT edge)
+- Обновление ContentNode при изменении SourceNode (SourceNode наследует ContentNode)
 - Удаление ContentNode с каскадным удалением зависимых WidgetNode
 
 **Работа с WidgetNode**:
@@ -188,7 +197,7 @@
 - Управление графом зависимостей (data lineage)
 
 **Управление связями**:
-- Создание edges всех типов (EXTRACT, TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN)
+- Создание edges всех типов (TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN)
 - Валидация связей (проверка типов, циклические зависимости)
 - Визуализация графа зависимостей
 
@@ -213,27 +222,21 @@
 **Описание**: Узлы на доске связаны семантическими связями (edges), которые определяют отношения между данными, визуализациями и комментариями.
 
 **Правила создания узлов**:
-- **SourceNode** создаётся самостоятельно (загрузка файла, подключение к API, SQL, промпт, стрим, ручной ввод)
-- **ContentNode** является результатом extraction из SourceNode и создаётся только при наличии EXTRACT edge от SourceNode
+- **SourceNode** создаётся самостоятельно (загрузка файла, подключение к API, SQL, промпт, стрим, ручной ввод). SourceNode **наследует ContentNode** и содержит данные напрямую (text + tables)
+- **ContentNode** создаётся через TRANSFORMATION из SourceNode/ContentNode, или независимо (AI-генерация)
 - **WidgetNode** является производным от ContentNode и создаётся только при наличии `parent_content_node_id`; WidgetNode не может существовать отдельно от ContentNode. Удаление родительского ContentNode приводит к каскадному удалению/деактивации связанных WidgetNode.
 - **CommentNode** создаётся только с обязательным `target_node_id` и всегда привязан к существующему узлу: **SourceNode**, **ContentNode** или **WidgetNode**. При удалении родительского узла соответствующие комментарии удаляются/деактивируются каскадно.
 
-**Основные типы связей**:
+**Основные типы связей** (5 типов, EXTRACT удалён):
 
-**1. EXTRACT** (SourceNode → ContentNode):
-- Извлечение структурированных данных из источника
-- Один SourceNode может иметь несколько ContentNode (например, CSV → несколько таблиц)
-- ContentNode обновляется автоматически при refresh SourceNode
-- Метаданные: extraction_method, last_update, row_count
-
-**2. TRANSFORMATION** (ContentNode(s) → ContentNode):
+**1. TRANSFORMATION** (SourceNode/ContentNode(s) → ContentNode):
 - Преобразование одного или нескольких ContentNode в новый ContentNode
 - Содержит произвольный Python код трансформации
 - Поддерживает множественные входы (N источников → 1 результат)
 - Может автоматически переиспользоваться при обновлении источников
 - Метаданные: код, prompt, execution stats, версия
 
-**3. VISUALIZATION** (ContentNode → WidgetNode):
+**3. VISUALIZATION** (ContentNode/SourceNode → WidgetNode):
 - Визуализация ContentNode через WidgetNode
 - Один ContentNode может иметь множественные WidgetNode
 - При обновлении ContentNode, все WidgetNode автоматически обновляются
@@ -255,7 +258,6 @@
 - Клик на элемент показывает детализацию
 
 **Визуализация связей**:
-- **EXTRACT**: фиолетовая стрелка, сплошная линия, иконка извлечения
 - **TRANSFORMATION**: синяя стрелка, пунктирная линия, иконка кода
 - **VISUALIZATION**: зеленая стрелка, сплошная линия, иконка графика
 - **COMMENT**: желтая стрелка, точечная линия, иконка комментария
@@ -264,24 +266,26 @@
 
 **Граф зависимостей (Data Lineage)**:
 ```
-[SourceNode: CSV file]────EXTRACT────>[ContentNode: Raw]────TRANSFORMATION────>[ContentNode: Cleaned]
-                                              │                                        │
-                                              │                                        ├──VISUALIZATION──>[WidgetNode: Chart]
-       │                                      │
-       └──COMMENT──>[CommentNode: "Raw data has duplicates"]
-                                              │
-                                              └──TRANSFORMATION──>[DataNode: Aggregated]
-                                                      │
-                                                      └──VISUALIZATION──>[WidgetNode: Table]
+[SourceNode: CSV file]────TRANSFORMATION────>[ContentNode: Cleaned]
+        │                                            │
+        │                                            ├──VISUALIZATION──>[WidgetNode: Chart]
+        │                                            │
+        └──COMMENT──>[CommentNode: "Raw data has duplicates"]
+                                                     │
+                                                     └──TRANSFORMATION──>[ContentNode: Aggregated]
+                                                             │
+                                                             └──VISUALIZATION──>[WidgetNode: Table]
 ```
 
+> **Примечание**: SourceNode наследует ContentNode, поэтому EXTRACT edge не нужен — данные находятся в самом SourceNode.
+
 **Валидация связей**:
-- Проверка типов узлов (например, TRANSFORMATION только между DataNode)
+- Проверка типов узлов (например, TRANSFORMATION только между ContentNode)
 - Обнаружение циклических зависимостей
 - Проверка совместимости схем данных
 
 **Автоматизация**:
-- При обновлении source DataNode, автоматически триггерит:
+- При обновлении source ContentNode, автоматически триггерит:
   - Re-execute всех downstream TRANSFORMATION
   - Refresh всех связанных WidgetNode
   - Уведомления пользователей о изменениях
@@ -472,11 +476,11 @@ AI: "Строю аналитическую доску... 🎨
 
 **Граф зависимостей**:
 ```
-DataNode #1 (Raw) ──TRANSFORMATION──> DataNode #2 (Cleaned)
+ContentNode #1 (Raw) ──TRANSFORMATION──> ContentNode #2 (Cleaned)
                                             │
                                             ├──VISUALIZATION──> WidgetNode #4 (График)
                                             │
-                                            └──TRANSFORMATION──> DataNode #3 (Hemisphere)
+                                            └──TRANSFORMATION──> ContentNode #3 (Hemisphere)
                                                       │
                                                       └──VISUALIZATION──> WidgetNode #5 (Сравнение)
 ```
@@ -484,11 +488,11 @@ DataNode #1 (Raw) ──TRANSFORMATION──> DataNode #2 (Cleaned)
 📥 Вы можете:
 • Экспортировать доску в PDF для курсовой
 • Добавить свои комментарии через CommentNode
-• Загрузить любой DataNode в CSV
-• Создать новые трансформации из существующих DataNode
+• Загрузить любой ContentNode в CSV
+• Создать новые трансформации из существующих ContentNode
 • При обновлении NASA данных - все визуализации автоматически обновятся
 
-Хотите добавить корреляцию с CO2? Я создам новый DataNode с CO2 данными и трансформацию для корреляционного анализа."
+Хотите добавить корреляцию с CO2? Я создам новый SourceNode с CO2 данными и трансформацию для корреляционного анализа."
 ```
 
 **Сценарий (журналист)**:
@@ -727,7 +731,7 @@ AI: "Готово! ✅
 **Интеграция с агентами**:
 - **Transformation Agent** → генерирует операции
 - **Developer Agent** → пишет код трансформации
-- **Executor Agent** → выполняет код в песочнице
+- **Validator Agent** → проверяет корректность кода
 - **Analyst Agent** → валидирует результаты
 - **Reporter Agent** → создаёт виджет с результатом
 
@@ -1259,20 +1263,25 @@ AI: "Создаю embed код... 🌐
 ### FR-23: Source-Content Node Architecture (Архитектура Source-Content)
 **Описание**: Фундаментальная архитектура разделения источников данных (SourceNode) и обработанного контента (ContentNode). Эта концепция заменяет универсальный DataNode на явное разделение "откуда данные" (Source) и "что получилось" (Content), обеспечивая прозрачность происхождения данных, автоматическое обновление и поддержку потоковых данных.
 
-**📍 См. полную спецификацию**: [SOURCE_CONTENT_NODE_CONCEPT.md](SOURCE_CONTENT_NODE_CONCEPT.md)
+**📍 См. архитектуру**: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 **Ключевая идея**:
 ```
-SourceNode (источник) ──EXTRACT──> ContentNode (результат) ──VISUALIZATION──> WidgetNode (визуализация)
+SourceNode (источник, наследует ContentNode) ──TRANSFORMATION──> ContentNode (результат) ──VISUALIZATION──> WidgetNode (визуализация)
 ```
 
-**Типы SourceNode**:
-1. **prompt**: AI-генерация данных из текстового промпта
-2. **file**: Загруженные файлы (CSV, JSON, Excel, Parquet)
-3. **database**: SQL запросы (PostgreSQL, MySQL, SQLite)
-4. **api**: REST API endpoints с периодическим обновлением
-5. **stream**: WebSocket/SSE потоки данных в реальном времени
-6. **manual**: Ручной ввод данных пользователем
+> **Примечание**: SourceNode наследует ContentNode, поэтому EXTRACT edge удалён. Данные хранятся напрямую в SourceNode.
+
+**Типы SourceNode** (9 типов):
+1. **csv**: CSV файлы
+2. **json**: JSON файлы
+3. **excel**: Excel файлы
+4. **document**: PDF, Word, текстовые документы
+5. **api**: REST API endpoints
+6. **database**: SQL запросы (PostgreSQL, MySQL, SQLite)
+7. **research**: AI-генерация данных из текстового промпта
+8. **manual**: Ручной ввод данных
+9. **stream**: WebSocket/SSE потоки данных в реальном времени
 
 **Структура ContentNode**:
 - **text**: Текстовое описание (Markdown/HTML)
@@ -1281,7 +1290,7 @@ SourceNode (источник) ──EXTRACT──> ContentNode (результа
 - Один ContentNode может содержать N таблиц
 
 **Операции SourceNode**:
-- **extract**: Извлечь данные → создать/обновить ContentNode
+- **extract**: Извлечь данные из источника → сохранить в SourceNode (text + tables)
 - **validate**: Проверить подключение/валидность источника
 - **refresh**: Принудительно обновить данные
 - **archive**: Сохранить активные данные в архив (для stream)
@@ -1298,9 +1307,9 @@ SourceNode (источник) ──EXTRACT──> ContentNode (результа
   5. **selective**: Только ключевые изменения
 
 **Миграция от DataNode**:
-- Автоматическое разделение: DataNode → SourceNode + ContentNode
-- Если есть source_config → создать SourceNode + EXTRACT edge
-- Если нет source_config → только ContentNode (manual type)
+- ✅ Завершена: DataNode заменён на SourceNode + ContentNode
+- SourceNode наследует ContentNode (без EXTRACT edge)
+- Таблицы БД: `source_nodes`, `content_nodes`, `widget_nodes`, `comment_nodes`
 
 **Преимущества**:
 - **Прозрачность**: Всегда видно откуда данные (source traceability)
@@ -1315,24 +1324,22 @@ SourceNode (источник) ──EXTRACT──> ContentNode (результа
 
 2. AI создаёт:
    - SourceNode (type: stream, url: ws://sensor.example.com)
-   - ContentNode (text: "Temperature data", tables: [sensor_readings])
-   - Edge EXTRACT: SourceNode → ContentNode
+   - SourceNode наследует ContentNode → данные хранятся напрямую
 
 3. Данные поступают в реальном времени:
-   - Каждое новое измерение добавляется в ContentNode.tables[0]
+   - Каждое новое измерение добавляется в SourceNode.tables[0]
    - При достижении max_active_rows=1000 → старые строки в архив
-   - Update mode: interval (каждые 5 секунд)
 
 4. Пользователь: "Построй график температуры"
 
 5. AI создаёт WidgetNode (line chart) → VISUALIZATION edge
 
-6. При новых данных в ContentNode → WidgetNode автообновляется
+6. При новых данных в SourceNode → WidgetNode автообновляется
 
 7. Пользователь: "Рассчитай среднюю температуру за час"
 
 8. AI создаёт:
-   - Transformation (ContentNode → новый ContentNode с агрегацией)
+   - TRANSFORMATION (SourceNode → новый ContentNode с агрегацией)
    - Replay mode: intelligent (AI сам решает как часто пересчитывать)
 ```
 
@@ -1340,14 +1347,14 @@ SourceNode (источник) ──EXTRACT──> ContentNode (результа
 - FR-1: 4 типа узлов (Source, Content, Widget, Comment)
 - FR-2: CRUD операции для Source/Content
 - FR-3: Real-time streaming через SourceNode (type: stream)
-- FR-9: WidgetNode визуализирует ContentNode
+- FR-9: WidgetNode визуализирует ContentNode/SourceNode
 - FR-10: Агенты управляют Source/Content/Widget
-- FR-11: EXTRACT edge (Source → Content)
+- FR-11: TRANSFORMATION, VISUALIZATION, COMMENT edges (EXTRACT удалён)
 - FR-13: Public Data Discovery создаёт SourceNode для внешних источников
 
 **Технические требования**:
-- Database schema: `source_nodes`, `content_nodes` таблицы
-- API endpoints: `/source-nodes`, `/content-nodes`, `/extract`, `/refresh`
+- Database schema: `source_nodes` (наследует `content_nodes`), `content_nodes`, `widget_nodes`, `comment_nodes`
+- API endpoints: `/source-nodes`, `/content-nodes`, `/widget-nodes`, `/comment-nodes`
 - WebSocket: `source:updated`, `content:updated` events
 - Archive storage: S3/MinIO для хранения архивных данных
 - Replay engine: Background jobs для автоматического refresh
@@ -1391,5 +1398,4 @@ SourceNode (источник) ──EXTRACT──> ContentNode (результа
 
 ---
 
-**Состояние**: Draft  
-**Последнее обновление**: 2026-01-29 (актуализация FR с учётом Source-Content Node Architecture)
+**Состояние**: Актуализировано

@@ -5,29 +5,57 @@ import { AppLayout } from '@/components/layout/AppLayout'
 import { ProjectExplorer } from '@/components/ProjectExplorer'
 import { AIAssistantPanel } from '@/components/board/AIAssistantPanel'
 import { BoardCanvas } from '@/components/board/BoardCanvas'
+import { FilterBar } from '@/components/filters/FilterBar'
+import { FilterPanel } from '@/components/filters/FilterPanel'
 import { useProjectStore } from '@/store/projectStore'
 import { useBoardStore } from '@/store/boardStore'
 import { useAIAssistantStore } from '@/store/aiAssistantStore'
+import { useFilterStore } from '@/store/filterStore'
 
 export function BoardPage() {
     const { projectId, boardId } = useParams<{ projectId: string; boardId: string }>()
     const { fetchProject } = useProjectStore()
     const { currentBoard, fetchBoard, isLoading } = useBoardStore()
     const { setSocket } = useAIAssistantStore()
+    const { setContext, loadDimensions, loadPresets, activeFilters, setInitiatorContentNodeIds, getConditionsByInitiator } = useFilterStore()
+    const widgetNodes = useBoardStore((s) => s.widgetNodes)
+
+    // Виджеты-инициаторы получают полные данные (для подсветки выбранного сегмента)
+    useEffect(() => {
+        if (!boardId) return
+        const ids: string[] = []
+        for (const w of widgetNodes) {
+            const sourceId = (w.config as Record<string, unknown>)?.sourceContentNodeId
+            if (typeof sourceId === 'string' && getConditionsByInitiator(w.id).length > 0) {
+                ids.push(sourceId)
+            }
+        }
+        setInitiatorContentNodeIds(ids)
+    }, [boardId, widgetNodes, activeFilters, getConditionsByInitiator, setInitiatorContentNodeIds])
 
     useEffect(() => {
         if (projectId) {
             fetchProject(projectId)
+            loadDimensions(projectId)
+            loadPresets(projectId)
         }
         if (boardId) {
             fetchBoard(boardId)
         }
-    }, [projectId, boardId, fetchProject, fetchBoard])
+    }, [projectId, boardId, fetchProject, fetchBoard, loadDimensions, loadPresets])
+
+    // Set cross-filter context
+    useEffect(() => {
+        if (projectId && boardId) {
+            setContext({ type: 'board', id: boardId, projectId })
+        }
+        return () => setContext(null)
+    }, [projectId, boardId, setContext])
 
     if (isLoading || !currentBoard) {
         return (
             <AppLayout
-                sidebar={<ProjectExplorer />}
+                sidebar={<ProjectExplorer context="board" />}
                 rightPanel={boardId ? <AIAssistantPanel boardId={boardId} /> : undefined}
             >
                 <div className="h-full flex items-center justify-center">
@@ -39,12 +67,14 @@ export function BoardPage() {
 
     return (
         <AppLayout
-            sidebar={<ProjectExplorer />}
+            sidebar={<ProjectExplorer context="board" />}
             rightPanel={boardId ? <AIAssistantPanel boardId={boardId} /> : undefined}
         >
+            <FilterBar />
             <ReactFlowProvider>
                 <BoardCanvas />
             </ReactFlowProvider>
+            <FilterPanel />
         </AppLayout>
     )
 }

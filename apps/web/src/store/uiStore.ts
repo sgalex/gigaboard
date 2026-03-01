@@ -55,7 +55,8 @@ interface UIStore {
     // Dialog state
     isCreateProjectDialogOpen: boolean
     isCreateBoardDialogOpen: boolean
-    isCreateDataNodeDialogOpen: boolean
+    createDashboardDialogOpen: boolean
+    createDashboardProjectId: string | null
     contextProjectId: string | null
     contextBoardId: string | null
     canvasCenter: { x: number; y: number } | null
@@ -79,8 +80,8 @@ interface UIStore {
     closeCreateProjectDialog: () => void
     openCreateBoardDialog: (projectId?: string) => void
     closeCreateBoardDialog: () => void
-    openCreateDataNodeDialog: (boardId: string, x?: number, y?: number) => void
-    closeCreateDataNodeDialog: () => void
+    openCreateDashboardDialog: (projectId?: string) => void
+    closeCreateDashboardDialog: () => void
 }
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -97,7 +98,8 @@ export const useUIStore = create<UIStore>((set) => ({
 
     isCreateProjectDialogOpen: false,
     isCreateBoardDialogOpen: false,
-    isCreateDataNodeDialogOpen: false,
+    createDashboardDialogOpen: false,
+    createDashboardProjectId: null,
     contextProjectId: null,
     contextBoardId: null,
     canvasCenter: null,
@@ -153,17 +155,10 @@ export const useUIStore = create<UIStore>((set) => ({
     closeCreateBoardDialog: () =>
         set({ isCreateBoardDialogOpen: false, contextProjectId: null }),
 
-    openCreateDataNodeDialog: (boardId: string, x?: number, y?: number) =>
-        set({
-            isCreateDataNodeDialogOpen: true,
-            contextBoardId: boardId,
-            canvasCenter: x !== undefined && y !== undefined ? { x, y } : null
-        }),
+    openCreateDashboardDialog: (projectId?: string) =>
+        set({ createDashboardDialogOpen: true, createDashboardProjectId: projectId || null }),
 
-    closeCreateDataNodeDialog: () =>
-        set({
-            isCreateDataNodeDialogOpen: false,
-            contextBoardId: null,
-            canvasCenter: null
-        }),
+    closeCreateDashboardDialog: () =>
+        set({ createDashboardDialogOpen: false, createDashboardProjectId: null }),
+
 }))

@@ -37,9 +37,16 @@ class ProjectResponse(ProjectBase):
 
 
 class ProjectWithBoardsResponse(ProjectResponse):
-    """Schema for project with boards list."""
+    """Schema for project with boards and stats for welcome/list."""
     
     boards_count: int = 0
+    dashboards_count: int = 0
+    sources_count: int = 0
+    content_nodes_count: int = 0  # ContentNode (incl. sources) on boards
+    widgets_count: int = 0
+    tables_count: int = 0  # Sum of tables in content.tables across all ContentNodes
+    dimensions_count: int = 0  # Dimensions (cross-filter axes) in project
+    filters_count: int = 0  # Filter presets in project
     
     class Config:
         from_attributes = True

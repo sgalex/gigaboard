@@ -30,6 +30,15 @@ import type {
     AIChatResponse,
     AIChatHistoryResponse,
 } from '@/types'
+import type {
+    ProjectWidget, ProjectWidgetCreate, ProjectWidgetUpdate,
+    ProjectTable, ProjectTableCreate, ProjectTableUpdate,
+    Dashboard, DashboardCreate, DashboardUpdate, DashboardWithItems,
+    DashboardItem, DashboardItemCreate, DashboardItemUpdate,
+    BatchItemUpdate,
+    DashboardShare, DashboardShareCreate,
+    PublicDashboard,
+} from '@/types/dashboard'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -100,18 +109,7 @@ export const boardsAPI = {
     delete: (id: string) => api.delete(`/api/v1/boards/${id}`),
 }
 
-// DataNodes API (Legacy - для обратной совместимости)
-export const dataNodesAPI = {
-    list: (boardId: string) => api.get<DataNode[]>(`/api/v1/boards/${boardId}/data-nodes`),
-    create: (boardId: string, data: DataNodeCreate) =>
-        api.post<DataNode>(`/api/v1/boards/${boardId}/data-nodes`, data),
-    get: (boardId: string, dataNodeId: string) =>
-        api.get<DataNode>(`/api/v1/boards/${boardId}/data-nodes/${dataNodeId}`),
-    update: (boardId: string, dataNodeId: string, data: DataNodeUpdate) =>
-        api.patch<DataNode>(`/api/v1/boards/${boardId}/data-nodes/${dataNodeId}`, data),
-    delete: (boardId: string, dataNodeId: string) =>
-        api.delete(`/api/v1/boards/${boardId}/data-nodes/${dataNodeId}`),
-}
+
 
 // SourceNodes API (Source-Content Architecture) 🆕
 export const sourceNodesAPI = {
@@ -124,8 +122,8 @@ export const sourceNodesAPI = {
     validate: (sourceId: string) =>
         api.post<{ valid: boolean; errors: string[] }>(`/api/v1/source-nodes/${sourceId}/validate`),
     // Operations
-    extract: (sourceId: string, params?: { preview_rows?: number; position?: { x: number; y: number } }) =>
-        api.post(`/api/v1/source-nodes/extract`, { source_node_id: sourceId, extraction_params: params || {} }),
+    extract: (boardId: string, sourceId: string, params?: { preview_rows?: number; position?: { x: number; y: number } }) =>
+        api.post(`/api/v1/boards/${boardId}/source-nodes/${sourceId}/extract`, params || {}),
     refresh: (sourceId: string) =>
         api.post<SourceNode>(`/api/v1/source-nodes/${sourceId}/refresh`),
 }
@@ -156,8 +154,47 @@ export const contentNodesAPI = {
     // Two-step transformation workflow
     transformPreview: (boardId: string, contentId: string, params: { prompt: string }) =>
         api.post(`/api/v1/content-nodes/${contentId}/transform/preview`, params),
-    transformExecute: (boardId: string, contentId: string, params: { code: string; transformation_id?: string; description?: string; prompt?: string; target_node_id?: string }) =>
+    transformExecute: (boardId: string, contentId: string, params: {
+        code: string;
+        transformation_id?: string;
+        description?: string;
+        prompt?: string;
+        chat_history?: Array<{ role: string; content: string }>;
+        target_node_id?: string;
+        selected_node_ids?: string[];
+    }) =>
         api.post(`/api/v1/content-nodes/${contentId}/transform/execute`, params),
+    transformTest: (contentId: string, params: { code: string; transformation_id: string; selected_node_ids?: string[] }) =>
+        api.post<{
+            success: boolean;
+            tables: Array<any>;
+            execution_time_ms: number;
+            row_counts: Record<string, number>;
+            error?: string;
+        }>(`/api/v1/content-nodes/${contentId}/transform/test`, params),
+    // Transform via MultiAgent (with full validation workflow)
+    transformMultiagent: (contentId: string, params: {
+        user_prompt: string;
+        existing_code?: string;
+        transformation_id?: string;
+        chat_history?: Array<{ role: string; content: string }>;
+        selected_node_ids?: string[];
+        preview_only?: boolean;
+    }) =>
+        api.post<{
+            transformation_id: string;
+            code: string;
+            description: string;
+            preview_data?: {
+                tables: Array<any>;
+                execution_time_ms: number;
+            };
+            validation: {
+                is_valid: boolean;
+                errors: string[];
+            };
+            agent_plan: any;
+        }>(`/api/v1/content-nodes/${contentId}/transform-multiagent`, params),
     // Visualization
     visualize: (contentId: string, params: {
         user_prompt?: string;
@@ -184,6 +221,25 @@ export const contentNodesAPI = {
             status: string;
             error?: string;
         }>(`/api/v1/content-nodes/${contentId}/visualize-iterative`, params),
+    // Iterative visualization via MultiAgent (with full validation workflow)
+    visualizeMultiagent: (contentId: string, params: {
+        user_prompt: string;
+        existing_html?: string;
+        existing_css?: string;
+        existing_js?: string;
+        existing_widget_code?: string;
+        chat_history?: Array<{ role: string; content: string }>;
+    }) =>
+        api.post<{
+            html_code: string;
+            css_code: string;
+            js_code: string;
+            widget_code?: string;  // Full HTML widget code (new format)
+            widget_name?: string;  // Short widget name
+            description: string;
+            status: string;
+            error?: string;
+        }>(`/api/v1/content-nodes/${contentId}/visualize-multiagent`, params),
     // Widget suggestions
     analyzeSuggestions: (contentId: string, params: {
         chat_history: Array<{ role: string; content: string }>;
@@ -267,6 +323,15 @@ export const edgesAPI = {
         api.delete(`/api/v1/boards/${boardId}/edges/${edgeId}`),
 }
 
+/** Base URL for API (e.g. for building image URLs for dashboard thumbnails). */
+export const apiBaseURL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
+/** URL to display an uploaded image by file_id (used for dashboard splash/thumbnail). */
+export function getFileImageUrl(fileId: string): string {
+    const base = apiBaseURL.replace(/\/$/, '')
+    return `${base}/api/v1/files/image/${fileId}`
+}
+
 // Files API
 export const filesAPI = {
     upload: (file: File) => {
@@ -297,6 +362,102 @@ export const filesAPI = {
         }>
         preview_rows: Array<Record<string, any>>
     }>(`/api/v1/files/${fileId}/analyze-csv`),
+
+    analyzeExcel: (fileId: string) => api.post<{
+        sheet_names: string[]
+        sheets: Array<{
+            name: string
+            rows_count: number
+            columns: Array<{
+                name: string
+                type: string
+                sample_values: string[]
+            }>
+            preview_rows: Array<Record<string, any>>
+        }>
+        total_rows: number
+    }>(`/api/v1/files/${fileId}/analyze-excel`),
+
+    excelPreview: (fileId: string) => api.post<{
+        sheets: Array<{
+            name: string
+            max_row: number
+            max_col: number
+            cells: (string | number | null)[][]
+            visible_rows: number
+            visible_cols: number
+        }>
+    }>(`/api/v1/files/${fileId}/excel-preview`),
+
+    analyzeExcelSmart: (fileId: string, useAi: boolean = true) => api.post<{
+        sheet_names: string[]
+        sheets: Array<{
+            sheet_name: string
+            total_rows: number
+            total_cols: number
+            regions: Array<{
+                sheet_name: string
+                start_row: number
+                start_col: number
+                end_row: number
+                end_col: number
+                header_row: number | null
+                confidence: number
+                table_name: string
+                columns: Array<{ name: string; type: string }>
+                preview_rows: Array<Record<string, any>>
+                row_count: number
+                range_str: string
+                detection_method: string
+            }>
+            grid_map: string[][]
+            grid_rows: number
+            grid_cols: number
+        }>
+        total_tables_found: number
+        detection_method: string
+    }>(`/api/v1/files/${fileId}/analyze-excel-smart`, null, {
+        params: { use_ai: useAi },
+    }),
+
+    analyzeDocument: (fileId: string) => api.post<{
+        document_type: string
+        filename: string
+        text: string
+        text_length: number
+        page_count: number | null
+        tables: Array<{
+            name: string
+            columns: Array<{ name: string; type: string }>
+            rows: Array<Record<string, any>>
+            row_count: number
+        }>
+        table_count: number
+        total_rows: number
+        is_scanned: boolean
+    }>(`/api/v1/files/${fileId}/analyze-document`),
+
+    extractDocumentChat: (fileId: string, params: {
+        user_prompt: string
+        document_text: string
+        document_type: string
+        filename: string
+        page_count?: number | null
+        existing_tables?: Array<Record<string, any>>
+        chat_history?: Array<{ role: string; content: string }>
+    }) => api.post<{
+        narrative: string
+        tables: Array<{
+            name: string
+            columns: Array<{ name: string; type: string }>
+            rows: Array<Record<string, any>>
+            row_count?: number
+        }>
+        findings: Array<{ type?: string; text: string }>
+        status: string
+        mode: string
+        agent_plan: any
+    }>(`/api/v1/files/${fileId}/extract-document-chat`, params),
 }
 
 // AI Assistant API
@@ -313,6 +474,262 @@ export const aiAssistantAPI = {
         }),
     deleteSession: (boardId: string, sessionId: string) =>
         api.delete(`/api/v1/boards/${boardId}/ai/chat/session/${sessionId}`),
+}
+
+// Database API — connection testing, table introspection, preview
+export interface DatabaseTableInfo {
+    name: string
+    schema_name: string
+    row_count: number
+    column_count: number
+}
+
+export interface DatabaseSchemaInfo {
+    name: string
+    tables: DatabaseTableInfo[]
+    table_count: number
+}
+
+export interface DatabaseConnectionResponse {
+    success: boolean
+    database_type: string
+    schemas: DatabaseSchemaInfo[]
+    table_count: number
+    server_version: string
+}
+
+export interface DatabaseColumnInfo {
+    name: string
+    type: string
+    nullable: boolean
+}
+
+export interface DatabasePreviewResponse {
+    success: boolean
+    table_name: string
+    columns: DatabaseColumnInfo[]
+    rows: Record<string, any>[]
+    total_rows: number
+    preview_rows: number
+}
+
+export const databaseAPI = {
+    testConnection: (params: {
+        database_type: string
+        host?: string
+        port?: number
+        database?: string
+        user?: string
+        password?: string
+        uri?: string
+        path?: string
+    }) => api.post<DatabaseConnectionResponse>('/api/v1/database/test-connection', params),
+
+    preview: (params: {
+        database_type: string
+        host?: string
+        port?: number
+        database?: string
+        user?: string
+        password?: string
+        path?: string
+        table_name: string
+        schema_name?: string
+        where_clause?: string
+        limit?: number
+    }) => api.post<DatabasePreviewResponse>('/api/v1/database/preview', params),
+
+    tableColumns: (params: {
+        database_type: string
+        host?: string
+        port?: number
+        database?: string
+        user?: string
+        password?: string
+        path?: string
+        table_name: string
+        schema_name?: string
+    }) => api.post<{ success: boolean; table_name: string; columns: DatabaseColumnInfo[] }>(
+        '/api/v1/database/table-columns', params),
+}
+
+// Library API — project widgets & tables
+export const libraryAPI = {
+    // Widgets
+    listWidgets: (projectId: string) =>
+        api.get<ProjectWidget[]>(`/api/v1/projects/${projectId}/library/widgets`),
+    createWidget: (projectId: string, data: ProjectWidgetCreate) =>
+        api.post<ProjectWidget>(`/api/v1/projects/${projectId}/library/widgets`, data),
+    getWidget: (projectId: string, widgetId: string) =>
+        api.get<ProjectWidget>(`/api/v1/projects/${projectId}/library/widgets/${widgetId}`),
+    updateWidget: (projectId: string, widgetId: string, data: ProjectWidgetUpdate) =>
+        api.put<ProjectWidget>(`/api/v1/projects/${projectId}/library/widgets/${widgetId}`, data),
+    deleteWidget: (projectId: string, widgetId: string) =>
+        api.delete(`/api/v1/projects/${projectId}/library/widgets/${widgetId}`),
+
+    // Tables
+    listTables: (projectId: string) =>
+        api.get<ProjectTable[]>(`/api/v1/projects/${projectId}/library/tables`),
+    createTable: (projectId: string, data: ProjectTableCreate) =>
+        api.post<ProjectTable>(`/api/v1/projects/${projectId}/library/tables`, data),
+    getTable: (projectId: string, tableId: string) =>
+        api.get<ProjectTable>(`/api/v1/projects/${projectId}/library/tables/${tableId}`),
+    updateTable: (projectId: string, tableId: string, data: ProjectTableUpdate) =>
+        api.put<ProjectTable>(`/api/v1/projects/${projectId}/library/tables/${tableId}`, data),
+    deleteTable: (projectId: string, tableId: string) =>
+        api.delete(`/api/v1/projects/${projectId}/library/tables/${tableId}`),
+}
+
+// Dashboards API
+export const dashboardsAPI = {
+    list: (projectId: string) =>
+        api.get<Dashboard[]>('/api/v1/dashboards', { params: { project_id: projectId } }),
+    create: (data: DashboardCreate) =>
+        api.post<Dashboard>('/api/v1/dashboards', data),
+    get: (id: string) =>
+        api.get<DashboardWithItems>(`/api/v1/dashboards/${id}`),
+    update: (id: string, data: DashboardUpdate) =>
+        api.put<Dashboard>(`/api/v1/dashboards/${id}`, data),
+    delete: (id: string) =>
+        api.delete(`/api/v1/dashboards/${id}`),
+
+    // Items
+    addItem: (dashboardId: string, data: DashboardItemCreate) =>
+        api.post<DashboardItem>(`/api/v1/dashboards/${dashboardId}/items`, data),
+    updateItem: (dashboardId: string, itemId: string, data: DashboardItemUpdate) =>
+        api.put<DashboardItem>(`/api/v1/dashboards/${dashboardId}/items/${itemId}`, data),
+    removeItem: (dashboardId: string, itemId: string) =>
+        api.delete(`/api/v1/dashboards/${dashboardId}/items/${itemId}`),
+    batchUpdateItems: (dashboardId: string, items: BatchItemUpdate[]) =>
+        api.put<DashboardItem[]>(`/api/v1/dashboards/${dashboardId}/items`, { items }),
+    duplicateItem: (dashboardId: string, itemId: string) =>
+        api.post<DashboardItem>(`/api/v1/dashboards/${dashboardId}/items/${itemId}/duplicate`),
+
+    // Sharing
+    createShare: (dashboardId: string, data: DashboardShareCreate) =>
+        api.post<DashboardShare>(`/api/v1/dashboards/${dashboardId}/share`, data),
+    getShare: (dashboardId: string) =>
+        api.get<DashboardShare>(`/api/v1/dashboards/${dashboardId}/share`),
+    deleteShare: (dashboardId: string) =>
+        api.delete(`/api/v1/dashboards/${dashboardId}/share`),
+}
+
+// Public API — unauthenticated
+export const publicAPI = {
+    getDashboard: (token: string, password?: string) =>
+        api.get<PublicDashboard>(`/api/v1/public/dashboards/${token}`, {
+            params: password ? { password } : {},
+        }),
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Cross-Filter System API — see docs/CROSS_FILTER_SYSTEM.md
+// ══════════════════════════════════════════════════════════════════════
+
+import type {
+    Dimension, DimensionCreate, DimensionUpdate,
+    DimensionColumnMapping, DimensionColumnMappingCreate,
+    DimensionSuggestion,
+    FilterPreset, FilterPresetCreate, FilterPresetUpdate,
+    ActiveFiltersResponse, FilterExpression,
+} from '@/types/crossFilter'
+
+// Dimensions API
+export const dimensionsAPI = {
+    list: (projectId: string) =>
+        api.get<Dimension[]>(`/api/v1/projects/${projectId}/dimensions`),
+    create: (projectId: string, data: DimensionCreate) =>
+        api.post<Dimension>(`/api/v1/projects/${projectId}/dimensions`, data),
+    get: (projectId: string, dimId: string) =>
+        api.get<Dimension>(`/api/v1/projects/${projectId}/dimensions/${dimId}`),
+    update: (projectId: string, dimId: string, data: DimensionUpdate) =>
+        api.put<Dimension>(`/api/v1/projects/${projectId}/dimensions/${dimId}`, data),
+    delete: (projectId: string, dimId: string) =>
+        api.delete(`/api/v1/projects/${projectId}/dimensions/${dimId}`),
+
+    // Mappings
+    listMappings: (projectId: string, dimId: string) =>
+        api.get<DimensionColumnMapping[]>(`/api/v1/projects/${projectId}/dimensions/${dimId}/mappings`),
+    createMapping: (projectId: string, dimId: string, data: DimensionColumnMappingCreate) =>
+        api.post<DimensionColumnMapping>(`/api/v1/projects/${projectId}/dimensions/${dimId}/mappings`, data),
+    deleteMapping: (projectId: string, mappingId: string) =>
+        api.delete(`/api/v1/projects/${projectId}/dimensions/mappings/${mappingId}`),
+
+    // Values
+    getValues: (projectId: string, dimId: string) =>
+        api.get<{ values: any[]; total: number }>(`/api/v1/projects/${projectId}/dimensions/${dimId}/values`),
+
+    // Node-level mappings
+    getMappingsForNode: (nodeId: string) =>
+        api.get<{ mappings: DimensionColumnMapping[] }>(`/api/v1/content-nodes/${nodeId}/dimension-mappings`),
+
+    // Auto-detect dimensions from content node tables
+    detectDimensions: (nodeId: string) =>
+        api.post<{ suggestions: DimensionSuggestion[]; total_columns_scanned: number }>(`/api/v1/content-nodes/${nodeId}/detect-dimensions`),
+
+    // Merge two or more dimensions into a target
+    merge: (projectId: string, sourceIds: string[], targetId: string) =>
+        api.post<{ target_id: string; deleted_count: number; transferred_count: number }>(
+            `/api/v1/projects/${projectId}/dimensions/merge`,
+            { source_ids: sourceIds, target_id: targetId },
+        ),
+}
+
+// Filters API (board/dashboard active filters)
+export const filtersAPI = {
+    // Board
+    getBoardFilters: (boardId: string) =>
+        api.get<ActiveFiltersResponse>(`/api/v1/boards/${boardId}/filters`),
+    setBoardFilters: (boardId: string, filters: FilterExpression | null) =>
+        api.put<ActiveFiltersResponse>(`/api/v1/boards/${boardId}/filters`, { filters }),
+    clearBoardFilters: (boardId: string) =>
+        api.post<ActiveFiltersResponse>(`/api/v1/boards/${boardId}/filters/clear`),
+    applyBoardPreset: (boardId: string, presetId: string) =>
+        api.post<ActiveFiltersResponse>(`/api/v1/boards/${boardId}/filters/apply-preset/${presetId}`),
+    /**
+     * Пересчитать pandas-цепочку доски с фильтрами (без сохранения в БД).
+     * ContentNode с ai_resolve_batch используют кэш + row-level filter.
+     */
+    computeFiltered: (
+        boardId: string,
+        body: { filters: FilterExpression | null; initiator_content_node_ids?: string[] }
+    ) =>
+        api.post<{
+            nodes: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
+        }>(`/api/v1/boards/${boardId}/filters/compute-filtered`, body),
+
+    // Dashboard
+    getDashboardFilters: (dashboardId: string) =>
+        api.get<ActiveFiltersResponse>(`/api/v1/dashboards/${dashboardId}/filters`),
+    setDashboardFilters: (dashboardId: string, filters: FilterExpression | null) =>
+        api.put<ActiveFiltersResponse>(`/api/v1/dashboards/${dashboardId}/filters`, { filters }),
+    clearDashboardFilters: (dashboardId: string) =>
+        api.post<ActiveFiltersResponse>(`/api/v1/dashboards/${dashboardId}/filters/clear`),
+    applyDashboardPreset: (dashboardId: string, presetId: string) =>
+        api.post<ActiveFiltersResponse>(`/api/v1/dashboards/${dashboardId}/filters/apply-preset/${presetId}`),
+    computeFilteredDashboard: (
+        dashboardId: string,
+        body: { filters: FilterExpression | null; initiator_content_node_ids?: string[] }
+    ) =>
+        api.post<{
+            nodes: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
+        }>(`/api/v1/dashboards/${dashboardId}/filters/compute-filtered`, body),
+}
+
+// Filter Presets API (project-scoped)
+export const filterPresetsAPI = {
+    list: (projectId: string, scope?: string, targetId?: string) =>
+        api.get<FilterPreset[]>(`/api/v1/projects/${projectId}/filter-presets`, {
+            params: { ...(scope && { scope }), ...(targetId && { target_id: targetId }) },
+        }),
+    create: (projectId: string, data: FilterPresetCreate) =>
+        api.post<FilterPreset>(`/api/v1/projects/${projectId}/filter-presets`, data),
+    get: (projectId: string, presetId: string) =>
+        api.get<FilterPreset>(`/api/v1/projects/${projectId}/filter-presets/${presetId}`),
+    update: (projectId: string, presetId: string, data: FilterPresetUpdate) =>
+        api.put<FilterPreset>(`/api/v1/projects/${projectId}/filter-presets/${presetId}`, data),
+    delete: (projectId: string, presetId: string) =>
+        api.delete(`/api/v1/projects/${projectId}/filter-presets/${presetId}`),
 }
 
 export default api

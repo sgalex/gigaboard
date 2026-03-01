@@ -27,12 +27,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from app.models.user import User
 from app.models.project import Project
 from app.models.board import Board
-from app.models.node import Node
+from app.models.base_node import BaseNode
 from app.models.source_node import SourceNode
 from app.models.content_node import ContentNode
 from app.models.widget_node import WidgetNode
 from app.models.comment_node import CommentNode
 from app.models.edge import Edge
+from app.models.project_widget import ProjectWidget
+from app.models.project_table import ProjectTable
+from app.models.dashboard import Dashboard
+from app.models.dashboard_item import DashboardItem
+from app.models.dashboard_share import DashboardShare
 
 # this is the Alembic Config object
 config = context.config

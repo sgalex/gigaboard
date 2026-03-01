@@ -21,6 +21,7 @@ import { contentNodesAPI, widgetNodesAPI, edgesAPI } from '@/services/api'
 import { findOptimalNodePosition, convertNodesToBounds } from '@/lib/nodePositioning'
 import { useBoardStore } from '@/store/boardStore'
 import { SuggestionsPanel } from './SuggestionsPanel'
+import { buildWidgetApiScript, injectApiScript, unescapeWidgetHtml } from './widgetApiScript'
 
 interface WidgetDialogProps {
     open: boolean
@@ -54,6 +55,7 @@ interface VisualizationState {
     description: string
     widget_code?: string  // Full HTML from GigaChat
     widget_name?: string  // Short name for widget
+    widget_type?: string  // chart | table | metric | text | custom
 }
 
 export const WidgetDialog = ({
@@ -80,9 +82,21 @@ export const WidgetDialog = ({
     const [editedCode, setEditedCode] = useState<VisualizationState | null>(null)
     const [rightPanelTab, setRightPanelTab] = useState<'preview' | 'code'>('preview')
     const [iframeKey, setIframeKey] = useState(0)  // Key to force iframe recreation
+    const [selectedSourceTableIndex, setSelectedSourceTableIndex] = useState(0)
+    // Autocomplete state
+    const [showAutocomplete, setShowAutocomplete] = useState(false)
+    const [autocompleteSearch, setAutocompleteSearch] = useState('')
+    const [autocompleteIndex, setAutocompleteIndex] = useState(0)
     const messagesEndRef = useRef<HTMLDivElement>(null)
     const iframeRef = useRef<HTMLIFrameElement>(null)
     const textareaRef = useRef<HTMLTextAreaElement>(null)
+    const autocompleteRef = useRef<HTMLDivElement>(null)
+
+    // Tables from ContentNode for @ mention autocomplete
+    const allTables = contentNode.content?.tables || []
+    const filteredTables = allTables.filter(table =>
+        table.name.toLowerCase().includes(autocompleteSearch.toLowerCase())
+    )
 
     // Initialize or reset state when dialog opens
     useEffect(() => {
@@ -120,87 +134,109 @@ export const WidgetDialog = ({
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }, [chatMessages])
 
+    // Click outside to close autocomplete
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (showAutocomplete &&
+                autocompleteRef.current &&
+                !autocompleteRef.current.contains(event.target as Node) &&
+                textareaRef.current &&
+                !textareaRef.current.contains(event.target as Node)) {
+                setShowAutocomplete(false)
+                setAutocompleteSearch('')
+                setAutocompleteIndex(0)
+            }
+        }
+
+        if (showAutocomplete) {
+            document.addEventListener('mousedown', handleClickOutside)
+            return () => document.removeEventListener('mousedown', handleClickOutside)
+        }
+    }, [showAutocomplete])
+
+    // Scroll autocomplete selected item into view
+    useEffect(() => {
+        if (showAutocomplete && autocompleteRef.current) {
+            const selectedElement = autocompleteRef.current.children[autocompleteIndex] as HTMLElement
+            if (selectedElement) {
+                selectedElement.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+            }
+        }
+    }, [autocompleteIndex, showAutocomplete])
+
+    // Render message content with @table mention highlighting
+    const renderMessageContent = (content: string) => {
+        const pattern = /@(\w+)|\[\[([^\]]+)\]\]/g
+        const parts: (string | JSX.Element)[] = []
+        let lastIndex = 0
+        let match: RegExpExecArray | null
+
+        while ((match = pattern.exec(content)) !== null) {
+            const tableName = match[1] || match[2]
+            const tableIndex = allTables.findIndex(t => t.name === tableName)
+
+            // Add text before match (preserve newlines)
+            if (match.index > lastIndex) {
+                const textBefore = content.substring(lastIndex, match.index)
+                parts.push(...textBefore.split('\n').flatMap((line, i) =>
+                    i === 0 ? [line] : [<br key={`br-${lastIndex}-${i}`} />, line]
+                ))
+            }
+
+            // Add table badge
+            if (tableIndex !== -1) {
+                parts.push(
+                    <button
+                        key={`${match.index}-${tableName}`}
+                        onClick={(e) => {
+                            e.stopPropagation()
+                            setSelectedSourceTableIndex(tableIndex)
+                        }}
+                        className="inline-flex items-center px-2 py-0.5 mx-0.5 text-xs font-mono rounded bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900/50 transition-colors"
+                        title={`Перейти к таблице ${tableName}`}
+                    >
+                        {tableName}
+                    </button>
+                )
+            } else {
+                // Table not found, render as is
+                parts.push(match[0])
+            }
+
+            lastIndex = pattern.lastIndex
+        }
+
+        // Add remaining text
+        if (lastIndex < content.length) {
+            const remaining = content.substring(lastIndex)
+            parts.push(...remaining.split('\n').flatMap((line, i) =>
+                i === 0 ? [line] : [<br key={`br-end-${i}`} />, line]
+            ))
+        }
+
+        return parts.length > 0 ? <>{parts}</> : content
+    }
+
     // Update iframe when visualization changes
     useEffect(() => {
         if (!iframeRef.current || !currentVisualization) return
 
         const code = editedCode || currentVisualization
         const iframe = iframeRef.current
-        const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document
-        if (!iframeDoc) return
 
-        // Get auth token for iframe API calls
-        const authToken = localStorage.getItem('token') || ''
-        const contentNodeId = contentNode.id
-
-        // API script to inject into widget HTML
-        const apiScript = `
-        <script>
-            // API Client for dynamic data access (injected by GigaBoard)
-            window.CONTENT_NODE_ID = '${contentNodeId}';
-            window.AUTH_TOKEN = '${authToken}';
-            window.API_BASE = window.location.origin;
-            window.AUTO_REFRESH_ENABLED = ${autoRefresh};
-            window.REFRESH_INTERVAL = ${refreshInterval * 1000};
-            
-            window.fetchContentData = async function() {
-                try {
-                    const response = await fetch(\`\${window.API_BASE}/api/v1/content-nodes/\${window.CONTENT_NODE_ID}\`, {
-                        headers: {
-                            'Authorization': \`Bearer \${window.AUTH_TOKEN}\`,
-                            'Content-Type': 'application/json'
-                        }
-                    });
-                    if (!response.ok) throw new Error('Failed to fetch data');
-                    const contentNode = await response.json();
-                    return {
-                        tables: contentNode.content?.tables || [],
-                        text: contentNode.content?.text || '',
-                        metadata: contentNode.metadata || {}
-                    };
-                } catch (error) {
-                    console.error('Error fetching content data:', error);
-                    return { tables: [], text: '', metadata: {} };
-                }
-            };
-            
-            window.getTable = async function(nameOrIndex) {
-                const data = await window.fetchContentData();
-                if (typeof nameOrIndex === 'number') return data.tables[nameOrIndex];
-                return data.tables.find(t => t.name === nameOrIndex);
-            };
-            
-            window.startAutoRefresh = function(callback, intervalMs) {
-                if (!window.AUTO_REFRESH_ENABLED) {
-                    console.log('Auto-refresh disabled');
-                    return null;
-                }
-                const interval = intervalMs || window.REFRESH_INTERVAL || 5000;
-                return setInterval(async () => {
-                    const data = await window.fetchContentData();
-                    callback(data);
-                }, interval);
-            };
-            
-            window.stopAutoRefresh = function(intervalId) {
-                if (intervalId) clearInterval(intervalId);
-            };
-        </script>`;
+        // Build API injection script
+        const apiScript = buildWidgetApiScript({
+            contentNodeId: contentNode.id,
+            authToken: localStorage.getItem('token') || '',
+            autoRefresh,
+            refreshInterval: refreshInterval * 1000,
+        })
 
         let fullHtml: string;
 
         // Check if we have full HTML (widget_code) or separate parts
         if (code.widget_code) {
-            // GigaChat generated full HTML - inject API script after <head> or at start of <body>
-            fullHtml = code.widget_code;
-            if (fullHtml.includes('<head>')) {
-                fullHtml = fullHtml.replace('<head>', '<head>' + apiScript);
-            } else if (fullHtml.includes('<body>')) {
-                fullHtml = fullHtml.replace('<body>', '<body>' + apiScript);
-            } else {
-                // Fallback: prepend script
-                fullHtml = apiScript + fullHtml;
-            }
+            fullHtml = injectApiScript(unescapeWidgetHtml(code.widget_code), apiScript);
         } else {
             // Legacy format: separate html/css/js parts
             const jsScript = code.js ? `<script>${code.js}</script>` : '';
@@ -223,9 +259,7 @@ export const WidgetDialog = ({
 </html>`;
         }
 
-        iframeDoc.open()
-        iframeDoc.write(fullHtml)
-        iframeDoc.close()
+        iframe.srcdoc = fullHtml
     }, [currentVisualization, editedCode, autoRefresh, contentNode.id])
 
     // Handle send message
@@ -254,8 +288,8 @@ export const WidgetDialog = ({
                 { role: userMessage.role, content: userMessage.content }
             ]
 
-            // Call iterative visualization endpoint
-            const response = await contentNodesAPI.visualizeIterative(contentNode.id, {
+            // Call MultiAgent visualization endpoint (with full validation workflow)
+            const response = await contentNodesAPI.visualizeMultiagent(contentNode.id, {
                 user_prompt: userMessage.content,
                 existing_html: currentVisualization?.html,
                 existing_css: currentVisualization?.css,
@@ -265,6 +299,11 @@ export const WidgetDialog = ({
             })
 
             const data = response.data
+
+            console.log('🏷️ API response:', {
+                widget_name: data.widget_name,
+                description: data.description?.slice(0, 80),
+            })
 
             // Add AI response to chat
             const aiMessage: ChatMessage = {
@@ -282,7 +321,8 @@ export const WidgetDialog = ({
                 js: data.js_code || '',
                 description: data.description,
                 widget_code: data.widget_code,
-                widget_name: data.widget_name
+                widget_name: data.widget_name,
+                widget_type: data.widget_type,
             })
 
             // Force iframe recreation to kill old intervals/state
@@ -305,21 +345,94 @@ export const WidgetDialog = ({
         }
     }
 
+    // Handle autocomplete selection
+    const insertTableMention = (tableName: string) => {
+        const textarea = textareaRef.current
+        if (!textarea) return
+
+        const cursorPos = textarea.selectionStart
+        const textBefore = inputValue.substring(0, cursorPos)
+        const textAfter = inputValue.substring(cursorPos)
+
+        // Find @ position
+        const atIndex = textBefore.lastIndexOf('@')
+        if (atIndex === -1) return
+
+        // Replace @search with @tableName
+        const newValue = textBefore.substring(0, atIndex) + `@${tableName} ` + textAfter
+        setInputValue(newValue)
+
+        // Close autocomplete
+        setShowAutocomplete(false)
+        setAutocompleteSearch('')
+        setAutocompleteIndex(0)
+
+        // Focus back and set cursor
+        setTimeout(() => {
+            textarea.focus()
+            const newCursorPos = atIndex + tableName.length + 2 // @tableName + space
+            textarea.setSelectionRange(newCursorPos, newCursorPos)
+        }, 0)
+    }
+
     const handleKeyDown = (e: React.KeyboardEvent) => {
+        // Autocomplete navigation
+        if (showAutocomplete && filteredTables.length > 0) {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setAutocompleteIndex(prev => (prev + 1) % filteredTables.length)
+                return
+            }
+            if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setAutocompleteIndex(prev => (prev - 1 + filteredTables.length) % filteredTables.length)
+                return
+            }
+            if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault()
+                insertTableMention(filteredTables[autocompleteIndex].name)
+                return
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault()
+                setShowAutocomplete(false)
+                setAutocompleteSearch('')
+                setAutocompleteIndex(0)
+                return
+            }
+        }
+
+        // Normal enter to send
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault()
             handleSendMessage()
         }
     }
 
-    // Auto-resize textarea
+    // Auto-resize textarea and handle @ autocomplete
     const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-        setInputValue(e.target.value)
+        const newValue = e.target.value
+        setInputValue(newValue)
 
         // Auto-resize
         const textarea = e.target
         textarea.style.height = 'auto'
         textarea.style.height = `${Math.min(textarea.scrollHeight, 120)}px`
+
+        // Check for @ trigger
+        const cursorPos = textarea.selectionStart
+        const textBeforeCursor = newValue.substring(0, cursorPos)
+        const atMatch = textBeforeCursor.match(/@([\w]*)$/)
+
+        if (atMatch && allTables.length > 0) {
+            setShowAutocomplete(true)
+            setAutocompleteSearch(atMatch[1])
+            setAutocompleteIndex(0)
+        } else {
+            setShowAutocomplete(false)
+            setAutocompleteSearch('')
+            setAutocompleteIndex(0)
+        }
     }
 
     // Apply manual code edits
@@ -336,32 +449,26 @@ export const WidgetDialog = ({
         try {
             const code = editedCode || currentVisualization
 
+            // Открыт существующий виджет (Edit из карточки виджета) — обновляем его, новый не создаём
             if (widgetNodeId && boardId) {
-                // Update existing widget
                 await widgetNodesAPI.update(boardId, widgetNodeId, {
-                    html_code: code.widget_code || '',
+                    html_code: unescapeWidgetHtml(code.widget_code || ''),
                     css_code: code.css || '',
                     js_code: code.js || '',
                     config: {
                         sourceContentNodeId: contentNode.id,
-                        chatHistory: chatMessages
+                        chatHistory: chatMessages,
+                        widget_type: code.widget_type || 'custom',
                     },
                     auto_refresh: autoRefresh,
                     refresh_interval: autoRefresh ? refreshInterval * 1000 : undefined,
                 })
             } else {
-                // Create new WidgetNode with smart positioning
+                // Создание из ContentNode (Visualize): создаём новый WidgetNode и ребро (у одной ContentNode может быть несколько виджетов)
+                const { widgetNodes, contentNodes, sourceNodes, commentNodes } = useBoardStore.getState()
+
                 const targetWidth = 400
                 const targetHeight = 300
-
-                // Get all existing nodes for collision detection
-                const { widgetNodes, contentNodes, sourceNodes, commentNodes } = useBoardStore.getState()
-                console.log('🔍 Checking collision with existing nodes:', {
-                    widgetNodes: widgetNodes.length,
-                    contentNodes: contentNodes.length,
-                    sourceNodes: sourceNodes.length,
-                    commentNodes: commentNodes.length
-                })
 
                 const allExistingNodes = [
                     ...widgetNodes.map(n => ({
@@ -390,7 +497,6 @@ export const WidgetDialog = ({
                     }))
                 ]
 
-                // Find optimal position using smart algorithm
                 const optimalPosition = findOptimalNodePosition({
                     sourceNode: {
                         x: contentNode.position?.x || 0,
@@ -404,23 +510,21 @@ export const WidgetDialog = ({
                     connectionType: 'visualization'
                 })
 
-                console.log('📍 Optimal position calculated:', optimalPosition)
-
                 const response = await widgetNodesAPI.create(contentNode.board_id, {
                     name: code.widget_name || `Visualization ${contentNode.id.slice(0, 8)}`,
                     description: code.description || 'AI-generated visualization',
-                    html_code: code.widget_code || '',
+                    html_code: unescapeWidgetHtml(code.widget_code || ''),
                     css_code: code.css || '',
                     js_code: code.js || '',
                     config: {
-                        sourceContentNodeId: contentNode.id,  // Save source for data fetching
-                        chatHistory: chatMessages  // Save chat history for future editing
+                        sourceContentNodeId: contentNode.id,
+                        chatHistory: chatMessages,
+                        widget_type: code.widget_type || 'custom',
                     },
                     auto_refresh: autoRefresh,
                     refresh_interval: autoRefresh ? refreshInterval * 1000 : undefined,
                     generated_by: 'reporter_agent',
                     generation_prompt: chatMessages.length > 0 ? chatMessages[0].content : 'visualize data',
-                    // Use smart positioning algorithm
                     x: optimalPosition.x,
                     y: optimalPosition.y,
                     width: targetWidth,
@@ -457,33 +561,30 @@ export const WidgetDialog = ({
                 {table.name} <span className="text-muted-foreground">({table.row_count} строк)</span>
             </div>
             <div className="border rounded overflow-x-auto max-h-[120px] overflow-y-auto">
-                <table className="w-full text-[10px]">
+                <table className="min-w-full text-[10px]">
                     <thead className="sticky top-0 bg-muted">
                         <tr>
-                            {table.columns.slice(0, 4).map((col, idx) => {
-                                // Handle both old (string) and new (object) column formats
-                                const colName = typeof col === 'string' ? col : col.name || String(col)
+                            {table.columns.map((col, idx) => {
+                                const colName = col.name
                                 return (
-                                    <th key={idx} className="px-1 py-0.5 text-left font-medium">
+                                    <th key={idx} className="px-1 py-0.5 text-left font-medium whitespace-nowrap">
                                         {colName}
                                     </th>
                                 )
                             })}
-                            {table.columns.length > 4 && <th className="px-1 py-0.5">...</th>}
                         </tr>
                     </thead>
                     <tbody>
                         {table.rows.slice(0, 3).map((row, rowIdx) => {
-                            // Handle both old (array) and new (object) row formats
-                            const rowValues = Array.isArray(row) ? row : row.values || []
+                            const colNames = table.columns.map(c => c.name)
+                            const rowValues = colNames.map((cn: string) => row?.[cn] ?? '')
                             return (
                                 <tr key={rowIdx} className="border-t">
-                                    {rowValues.slice(0, 4).map((cell, cellIdx) => (
-                                        <td key={cellIdx} className="px-1 py-0.5">
-                                            {cell !== null && cell !== undefined ? String(cell).substring(0, 20) : '-'}
+                                    {rowValues.map((cell, cellIdx) => (
+                                        <td key={cellIdx} className="px-1 py-0.5 whitespace-nowrap">
+                                            {cell !== null && cell !== undefined ? String(cell).substring(0, 30) : '-'}
                                         </td>
                                     ))}
-                                    {rowValues.length > 4 && <td className="px-1 py-0.5">...</td>}
                                 </tr>
                             )
                         })}
@@ -512,13 +613,22 @@ export const WidgetDialog = ({
                         {/* Data Source Preview */}
                         <div className="flex-1 p-2 border-b overflow-y-auto max-h-[30%]">
                             <div className="text-xs font-medium mb-1">📊 Данные источника:</div>
-                            <div className="space-y-2">
-                                {contentNode.content?.tables && contentNode.content.tables.length > 0 ? (
-                                    contentNode.content.tables.map((table, index) => renderTable(table, index))
-                                ) : (
-                                    <div className="text-xs text-muted-foreground">Нет данных для отображения</div>
-                                )}
-                            </div>
+                            {contentNode.content?.tables && contentNode.content.tables.length > 0 ? (
+                                <Tabs value={selectedSourceTableIndex.toString()} onValueChange={(v) => setSelectedSourceTableIndex(Number(v))}>
+                                    <TabsList className="grid w-full h-7" style={{ gridTemplateColumns: `repeat(${Math.min(contentNode.content.tables.length, 3)}, 1fr)` }}>
+                                        {contentNode.content.tables.slice(0, 3).map((table, idx) => (
+                                            <TabsTrigger key={`${table.name}-${idx}`} value={idx.toString()} className="text-xs h-6 py-0">
+                                                {table.name} ({table.row_count})
+                                            </TabsTrigger>
+                                        ))}
+                                    </TabsList>
+                                    <TabsContent value={selectedSourceTableIndex.toString()} className="mt-1">
+                                        {renderTable(contentNode.content.tables[selectedSourceTableIndex], selectedSourceTableIndex)}
+                                    </TabsContent>
+                                </Tabs>
+                            ) : (
+                                <div className="text-xs text-muted-foreground">Нет данных для отображения</div>
+                            )}
                         </div>
 
                         {/* Chat Messages */}
@@ -569,7 +679,7 @@ export const WidgetDialog = ({
                                                     : 'bg-muted'
                                             )}
                                         >
-                                            {msg.content}
+                                            {renderMessageContent(msg.content)}
                                         </div>
                                     </div>
                                 ))
@@ -600,21 +710,46 @@ export const WidgetDialog = ({
                         </div>
 
                         {/* Chat Input */}
-                        <div className="p-2 border-t">
+                        <div className="p-2 border-t relative">
+                            {/* Autocomplete dropdown */}
+                            {showAutocomplete && filteredTables.length > 0 && (
+                                <div
+                                    ref={autocompleteRef}
+                                    className="absolute bottom-full left-2 right-2 mb-1 bg-popover border rounded-md shadow-lg max-h-[200px] overflow-y-auto z-50"
+                                >
+                                    {filteredTables.map((table, idx) => (
+                                        <button
+                                            key={table.name}
+                                            onClick={() => insertTableMention(table.name)}
+                                            onMouseEnter={() => setAutocompleteIndex(idx)}
+                                            className={cn(
+                                                'w-full px-3 py-2 text-left text-sm flex items-center justify-between hover:bg-accent transition-colors',
+                                                idx === autocompleteIndex && 'bg-accent'
+                                            )}
+                                        >
+                                            <span className="font-mono">{table.name}</span>
+                                            <span className="text-xs text-muted-foreground">
+                                                {table.row_count?.toLocaleString()} rows
+                                            </span>
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+
                             <div className="flex gap-2 items-end">
                                 <Textarea
                                     ref={textareaRef}
                                     value={inputValue}
                                     onChange={handleInputChange}
                                     onKeyDown={handleKeyDown}
-                                    placeholder="Опишите визуализацию или корректировку..."
+                                    placeholder={allTables.length > 0 ? `Опишите визуализацию (@ для ссылки на таблицу)...` : 'Опишите визуализацию или корректировку...'}
                                     className="min-h-[32px] py-1.5 px-2 resize-none text-sm overflow-hidden"
                                     style={{ height: '32px' }}
                                     disabled={isGenerating}
                                     rows={1}
                                 />
                                 <Button
-                                    onClick={handleSendMessage}
+                                    onClick={() => handleSendMessage()}
                                     disabled={!inputValue.trim() || isGenerating}
                                     size="icon"
                                     className="h-[32px] w-[32px] shrink-0 bg-purple-500 hover:bg-purple-600"
@@ -663,7 +798,6 @@ export const WidgetDialog = ({
                                             key={iframeKey}
                                             ref={iframeRef}
                                             className="w-full h-full border-0"
-                                            sandbox="allow-scripts allow-same-origin"
                                             title="Visualization Preview"
                                         />
                                     ) : (

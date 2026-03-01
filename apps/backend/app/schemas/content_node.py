@@ -51,7 +51,7 @@ class DataLineage(BaseModel):
 class ContentNodeBase(BaseModel):
     """Base ContentNode schema."""
     content: ContentData | dict[str, Any] = Field(..., description="Content data")
-    lineage: DataLineage | dict[str, Any] = Field(..., description="Data lineage")
+    lineage: dict[str, Any] = Field(..., description="Data lineage (dict to preserve all fields)")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
     position: dict[str, float] = Field(default_factory=lambda: {"x": 0, "y": 0}, description="Position on canvas")
 
@@ -64,7 +64,7 @@ class ContentNodeCreate(ContentNodeBase):
 class ContentNodeUpdate(BaseModel):
     """Update ContentNode schema."""
     content: ContentData | dict[str, Any] | None = None
-    lineage: DataLineage | dict[str, Any] | None = None
+    lineage: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
     position: dict[str, float] | None = None
 
@@ -155,6 +155,7 @@ class VisualizeIterativeResponse(BaseModel):
     js_code: str = Field("", description="Generated JavaScript code (legacy format)")
     widget_code: str | None = Field(None, description="Full HTML widget code (new format)")
     widget_name: str | None = Field(None, description="Short widget name (2-4 words)")
+    widget_type: str = Field("custom", description="Widget type: chart, table, metric, text, custom")
     description: str = Field(..., description="Description of the visualization")
     status: str = Field(..., description="Generation status")
     error: str | None = Field(None, description="Error message if failed")

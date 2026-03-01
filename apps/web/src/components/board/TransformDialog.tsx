@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import Editor from '@monaco-editor/react'
 import {
     Dialog,
@@ -13,16 +13,16 @@ import { Textarea } from '@/components/ui/textarea'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Code, Loader2, Send, Eye, Save, Trash2, Sparkles } from 'lucide-react'
 import { ContentNode } from '@/types'
-import { useAuthStore } from '@/store/authStore'
 import { cn } from '@/lib/utils'
 import { TransformSuggestionsPanel } from './TransformSuggestionsPanel'
+import { contentNodesAPI } from '@/services/api'
 
 interface TransformDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     sourceNode?: ContentNode
     sourceNodes?: ContentNode[]
-    onTransform: (code: string, transformationId: string, description?: string) => Promise<void>
+    onTransform: (code: string, transformationId: string, description?: string, chatHistory?: ChatMessage[]) => Promise<void>
     // Edit mode
     initialMessages?: ChatMessage[]
     initialCode?: string
@@ -33,6 +33,7 @@ interface ChatMessage {
     id: string
     role: 'user' | 'assistant'
     content: string
+    contentType?: 'text' | 'html' | 'markdown'
     timestamp: Date
 }
 
@@ -47,12 +48,20 @@ interface TransformationState {
 interface PreviewData {
     tables: Array<{
         name: string
-        columns: string[]
-        rows: Array<Array<any>>
+        columns: Array<{ name: string; type: string }>
+        rows: Array<Record<string, any>>
         row_count: number
         preview_row_count: number
     }>
     execution_time_ms: number
+}
+
+/** Item shown in the @mention autocomplete dropdown */
+interface MentionItem {
+    kind: 'source_table' | 'result_table' | 'column'
+    label: string      // shown left (table/column name)
+    hint: string       // shown right (rows count / column type)
+    insertText: string // inserted after @: "tableName" or "tableName.colName"
 }
 
 export function TransformDialog({
@@ -87,15 +96,223 @@ export function TransformDialog({
     const [editedCode, setEditedCode] = useState<string | null>(null)
     const [rightPanelTab, setRightPanelTab] = useState<'preview' | 'code'>('preview')
     const [selectedSourceTableIndex, setSelectedSourceTableIndex] = useState(0)
+    // Autocomplete state
+    const [showAutocomplete, setShowAutocomplete] = useState(false)
+    const [autocompleteKind, setAutocompleteKind] = useState<'table' | 'column'>('table')
+    const [autocompleteTableCtx, setAutocompleteTableCtx] = useState('')
+    const [autocompleteSearch, setAutocompleteSearch] = useState('')
+    const [autocompleteIndex, setAutocompleteIndex] = useState(0)
     const messagesEndRef = useRef<HTMLDivElement>(null)
     const textareaRef = useRef<HTMLTextAreaElement>(null)
     const previewLoadedRef = useRef<boolean>(false)
-    const token = useAuthStore((state) => state.token)
+    const autocompleteRef = useRef<HTMLDivElement>(null)
 
     // Calculate source data info
     const allTables = nodes.flatMap(n => n.content?.tables || [])
     const tableCount = allTables.length
     const totalRows = allTables.reduce((sum, t) => sum + (t.row_count || 0), 0)
+
+    // Result tables from the current transformation preview
+    const resultPreviewTables = currentTransformation?.previewData?.tables ?? []
+
+    // Combined pool: source tables + result tables (deduplicated by name)
+    const allTablePool = useMemo(() => {
+        const pool: Array<{ name: string; rowCount: number; isResult: boolean; columns: Array<{ name: string; type: string }> }> = []
+        allTables.forEach(t => pool.push({ name: t.name, rowCount: t.row_count || 0, isResult: false, columns: (t.columns as any[]) || [] }))
+        resultPreviewTables.forEach(t => {
+            if (!pool.find(p => p.name === t.name))
+                pool.push({ name: t.name, rowCount: t.row_count || 0, isResult: true, columns: t.columns || [] })
+        })
+        return pool
+    }, [allTables, resultPreviewTables])
+
+    // Items shown in the autocomplete dropdown
+    const autocompleteItems = useMemo((): MentionItem[] => {
+        if (autocompleteKind === 'column') {
+            const tbl = allTablePool.find(t => t.name === autocompleteTableCtx)
+            const filtered = (tbl?.columns ?? []).filter(c =>
+                !autocompleteSearch || c.name.toLowerCase().includes(autocompleteSearch.toLowerCase())
+            )
+            return filtered.map(c => ({
+                kind: 'column' as const,
+                label: c.name,
+                hint: c.type || '',
+                insertText: `${autocompleteTableCtx}.${c.name}`,
+            }))
+        }
+        // Table mode
+        const filtered = allTablePool.filter(t =>
+            !autocompleteSearch || t.name.toLowerCase().includes(autocompleteSearch.toLowerCase())
+        )
+        return filtered.map(t => ({
+            kind: (t.isResult ? 'result_table' : 'source_table') as const,
+            label: t.name,
+            hint: `${t.rowCount.toLocaleString()} rows`,
+            insertText: t.name,
+        }))
+    }, [autocompleteKind, autocompleteTableCtx, autocompleteSearch, allTablePool])
+
+    // Render message content with table references support
+    const renderMessageContent = (msg: ChatMessage) => {
+        const { content, contentType = 'text' } = msg
+
+        // Handle HTML content (with style isolation via wrapper)
+        if (contentType === 'html') {
+            return (
+                <div
+                    className="w-full border rounded bg-white p-3"
+                    style={{
+                        // Force consistent styling for all child elements
+                        fontFamily: 'system-ui, -apple-system, sans-serif',
+                        fontSize: '14px',
+                        lineHeight: '1.6',
+                        color: '#333',
+                    }}
+                >
+                    <style dangerouslySetInnerHTML={{
+                        __html: `
+                        /* CSS isolation for HTML content - override all inline styles */
+                        .html-content-wrapper * {
+                            font-family: system-ui, -apple-system, sans-serif !important;
+                            color: #333 !important;
+                            background: transparent !important;
+                        }
+                        .html-content-wrapper h1 { 
+                            font-size: 16px !important; 
+                            margin: 8px 0 !important; 
+                            font-weight: 600 !important; 
+                        }
+                        .html-content-wrapper h2 { 
+                            font-size: 14px !important; 
+                            margin: 6px 0 !important; 
+                            font-weight: 600 !important; 
+                        }
+                        .html-content-wrapper ul, .html-content-wrapper ol { 
+                            margin: 4px 0 !important; 
+                            padding-left: 20px !important; 
+                        }
+                        .html-content-wrapper li { 
+                            margin: 2px 0 !important;
+                            list-style-position: outside !important;
+                        }
+                        .html-content-wrapper p { 
+                            margin: 4px 0 !important; 
+                        }
+                    `}} />
+                    <div
+                        className="html-content-wrapper"
+                        dangerouslySetInnerHTML={{ __html: content }}
+                    />
+                </div>
+            )
+        }
+
+        // Handle Markdown content
+        if (contentType === 'markdown') {
+            // Simple markdown parser for common patterns
+            const lines = content.split('\n')
+            return (
+                <div className="space-y-1">
+                    {lines.map((line, i) => {
+                        // Headers
+                        if (line.startsWith('### ')) return <h3 key={i} className="text-sm font-semibold mt-2 mb-1">{line.substring(4)}</h3>
+                        if (line.startsWith('## ')) return <h2 key={i} className="text-base font-bold mt-2 mb-1">{line.substring(3)}</h2>
+                        if (line.startsWith('# ')) return <h1 key={i} className="text-base font-bold mt-2 mb-1">{line.substring(2)}</h1>
+
+                        // Lists
+                        if (line.match(/^[•\-*]\s/)) return <li key={i} className="ml-4 list-disc">{line.substring(2)}</li>
+                        if (line.match(/^\d+\.\s/)) return <li key={i} className="ml-4 list-decimal">{line.replace(/^\d+\.\s/, '')}</li>
+
+                        // Bold
+                        if (line.includes('**')) {
+                            const parts = line.split('**')
+                            return <p key={i} className="my-1">{parts.map((part, j) => j % 2 === 1 ? <strong key={j}>{part}</strong> : part)}</p>
+                        }
+
+                        // Empty line
+                        if (line.trim() === '') return <br key={i} />
+
+                        // Regular text
+                        return <p key={i} className="my-1">{line}</p>
+                    })}
+                </div>
+            )
+        }
+
+        // Handle text content with @table and @table.column mentions
+        const pattern = /@([\w]+(?:\.[\w]+)?)|\[\[([^\]]+)\]\]/g
+        const parts: (string | JSX.Element)[] = []
+        let lastIndex = 0
+        let match: RegExpExecArray | null
+
+        while ((match = pattern.exec(content)) !== null) {
+            const mentionText = match[1] || match[2]
+            const dotIdx = mentionText.indexOf('.')
+            const tName = dotIdx !== -1 ? mentionText.substring(0, dotIdx) : mentionText
+            const colName = dotIdx !== -1 ? mentionText.substring(dotIdx + 1) : null
+            const srcIdx = allTables.findIndex(t => t.name === tName)
+            const isKnown = srcIdx !== -1 || allTablePool.some(t => t.name === tName)
+
+            // Add text before match (preserve newlines)
+            if (match.index > lastIndex) {
+                const textBefore = content.substring(lastIndex, match.index)
+                parts.push(...textBefore.split('\n').flatMap((line, i) =>
+                    i === 0 ? [line] : [<br key={`br-${lastIndex}-${i}`} />, line]
+                ))
+            }
+
+            // Add mention badge
+            if (isKnown) {
+                if (colName) {
+                    // Column mention @tName.colName → muted pill
+                    parts.push(
+                        <span
+                            key={`${match.index}-${mentionText}`}
+                            className="inline-flex items-center px-2 py-0.5 mx-0.5 text-xs font-mono rounded bg-muted text-muted-foreground border"
+                            title={`Колонка ${colName} таблицы ${tName}`}
+                        >
+                            {mentionText}
+                        </span>
+                    )
+                } else {
+                    // Table mention → blue (source) or green (result) badge
+                    parts.push(
+                        <button
+                            key={`${match.index}-${mentionText}`}
+                            onClick={(e) => {
+                                e.stopPropagation()
+                                if (srcIdx !== -1) setSelectedSourceTableIndex(srcIdx)
+                            }}
+                            className={cn(
+                                'inline-flex items-center px-2 py-0.5 mx-0.5 text-xs font-mono rounded transition-colors',
+                                srcIdx !== -1
+                                    ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900/50'
+                                    : 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 cursor-default'
+                            )}
+                            title={srcIdx !== -1 ? `Перейти к таблице ${tName}` : `Результирующая таблица ${tName}`}
+                        >
+                            {tName}
+                        </button>
+                    )
+                }
+            } else {
+                // Unknown mention, render as is
+                parts.push(match[0])
+            }
+
+            lastIndex = pattern.lastIndex
+        }
+
+        // Add remaining text (preserve newlines)
+        if (lastIndex < content.length) {
+            const textAfter = content.substring(lastIndex)
+            parts.push(...textAfter.split('\n').flatMap((line, i) =>
+                i === 0 ? [line] : [<br key={`br-end-${i}`} />, line]
+            ))
+        }
+
+        return parts.length > 0 ? parts : content
+    }
 
     // Initialize or reset state when dialog opens
     useEffect(() => {
@@ -161,25 +378,13 @@ export function TransformDialog({
         const loadPreview = async () => {
             setIsGenerating(true)
             try {
-                const response = await fetch(`/api/v1/content-nodes/${primaryNode.id}/transform/test`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({
-                        code: initialCode,
-                        transformation_id: initialTransformationId,
-                    }),
+                const response = await contentNodesAPI.transformTest(primaryNode.id, {
+                    code: initialCode,
+                    transformation_id: initialTransformationId,
+                    selected_node_ids: nodes.map(n => n.id),
                 })
 
-                if (!response.ok) {
-                    const errorText = await response.text()
-                    console.error('❌ Preview request failed:', response.status, errorText)
-                    throw new Error(`Preview failed: ${response.statusText}`)
-                }
-
-                const result = await response.json()
+                const result = response.data
                 console.log('✅ Preview loaded:', {
                     tables: result.tables?.length,
                     executionTime: result.execution_time_ms
@@ -218,12 +423,42 @@ export function TransformDialog({
         }
 
         loadPreview()
-    }, [open, initialCode, initialTransformationId, primaryNode?.id, token])
+    }, [open, initialCode, initialTransformationId, primaryNode?.id])
 
     // Auto-scroll chat
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }, [chatMessages])
+
+    // Close autocomplete on click outside
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (showAutocomplete &&
+                autocompleteRef.current &&
+                !autocompleteRef.current.contains(event.target as Node) &&
+                textareaRef.current &&
+                !textareaRef.current.contains(event.target as Node)) {
+                setShowAutocomplete(false)
+                setAutocompleteSearch('')
+                setAutocompleteIndex(0)
+            }
+        }
+
+        if (showAutocomplete) {
+            document.addEventListener('mousedown', handleClickOutside)
+            return () => document.removeEventListener('mousedown', handleClickOutside)
+        }
+    }, [showAutocomplete])
+
+    // Scroll autocomplete selected item into view
+    useEffect(() => {
+        if (showAutocomplete && autocompleteRef.current) {
+            const selectedElement = autocompleteRef.current.children[autocompleteIndex] as HTMLElement
+            if (selectedElement) {
+                selectedElement.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+            }
+        }
+    }, [autocompleteIndex, showAutocomplete])
 
     console.log('primaryNode check:', primaryNode)
     if (!primaryNode) {
@@ -258,74 +493,82 @@ export function TransformDialog({
                 { role: userMessage.role, content: userMessage.content }
             ]
 
-            // Call iterative transform endpoint
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-            if (token) {
-                headers['Authorization'] = `Bearer ${token}`
-            }
-
-            const response = await fetch(`/api/v1/content-nodes/${primaryNode.id}/transform/iterative`, {
-                method: 'POST',
-                headers,
-                body: JSON.stringify({
-                    user_prompt: userMessage.content,
-                    existing_code: currentTransformation?.code,
-                    transformation_id: currentTransformation?.transformationId,
-                    chat_history: fullChatHistory,
-                    selected_node_ids: nodes.map(n => n.id),
-                    preview_only: true
-                }),
-                credentials: 'include'
+            // Call MultiAgent transform endpoint (with full validation workflow)
+            const response = await contentNodesAPI.transformMultiagent(primaryNode.id, {
+                user_prompt: userMessage.content,
+                existing_code: currentTransformation?.code,
+                transformation_id: currentTransformation?.transformationId,
+                chat_history: fullChatHistory,
+                selected_node_ids: nodes.map(n => n.id),
+                preview_only: true
             })
 
-            if (!response.ok) {
-                const errorData = await response.json()
-                throw new Error(errorData.detail || 'Ошибка генерации')
-            }
-
-            const data = await response.json()
+            const data = response.data
 
             console.log('🤖 AI response received:', data)
+            console.log('📄 Code length:', data.code?.length || 0, 'chars')
+            console.log('📄 First 100 chars:', data.code?.substring(0, 100) || 'NULL')
+            console.log('📊 Preview tables:', data.preview_data?.tables?.length || 0)
 
-            // Check if execution failed
-            const executionError = !data.preview_data
-                ? `Код не выполнился. ${data.validation?.errors?.[0] || 'Проверьте синтаксис.'}`
-                : undefined
+            // Check if this is discussion mode (no code generated)
+            const isDiscussionMode = data.code === null || data.mode === 'discussion'
 
-            // Add AI response
+            // Add AI response with content type
             const aiMessage: ChatMessage = {
                 id: crypto.randomUUID(),
                 role: 'assistant',
-                content: data.description || 'Трансформация создана',
+                content: data.description || 'Обработка создана',
+                contentType: data.content_type || 'text',
                 timestamp: new Date()
             }
             setChatMessages(prev => [...prev, aiMessage])
 
-            // Update transformation state
-            setCurrentTransformation({
-                code: data.code,
-                description: data.description,
-                transformationId: data.transformation_id,
-                previewData: data.preview_data,
-                error: executionError
-            })
+            if (isDiscussionMode) {
+                // Discussion mode: just show text response, no code/preview
+                console.log('💬 Discussion mode response received')
+            } else {
+                // Transformation mode: update code and preview
+                // Check if execution failed
+                const executionError = !data.preview_data
+                    ? `Код не выполнился. ${data.validation?.errors?.[0] || 'Проверьте синтаксис.'}`
+                    : undefined
 
-            if (executionError) {
-                console.error('❌ Execution failed:', executionError)
+                // Update transformation state
+                setCurrentTransformation({
+                    code: data.code,
+                    description: data.description,
+                    transformationId: data.transformation_id,
+                    previewData: data.preview_data,
+                    error: executionError
+                })
+
+                if (executionError) {
+                    console.error('❌ Execution failed:', executionError)
+                }
+
+                // Reset edited code
+                setEditedCode(null)
+
+                // Switch to preview tab to show results
+                setRightPanelTab('preview')
             }
-
-            // Reset edited code
-            setEditedCode(null)
-
-            // Switch to preview tab to show results
-            setRightPanelTab('preview')
 
         } catch (error) {
             console.error('Transform generation failed:', error)
+
+            // Extract error message from axios error or generic error
+            let errorText = 'Ошибка генерации кода'
+            if (error && typeof error === 'object' && 'response' in error) {
+                const axiosError = error as any
+                errorText = axiosError.response?.data?.detail || axiosError.message || errorText
+            } else if (error instanceof Error) {
+                errorText = error.message
+            }
+
             const errorMessage: ChatMessage = {
                 id: crypto.randomUUID(),
                 role: 'assistant',
-                content: `❌ ${error instanceof Error ? error.message : 'Ошибка генерации кода'}`,
+                content: `❌ ${errorText}`,
                 timestamp: new Date()
             }
             setChatMessages(prev => [...prev, errorMessage])
@@ -334,19 +577,115 @@ export function TransformDialog({
         }
     }
 
+    // Handle autocomplete selection
+    const insertMention = (item: MentionItem) => {
+        const textarea = textareaRef.current
+        if (!textarea) return
+
+        const cursorPos = textarea.selectionStart
+        const textBefore = inputValue.substring(0, cursorPos)
+        const textAfter = inputValue.substring(cursorPos)
+
+        const atIdx = textBefore.lastIndexOf('@')
+        if (atIdx === -1) return
+
+        const newValue = textBefore.substring(0, atIdx) + `@${item.insertText} ` + textAfter
+        setInputValue(newValue)
+
+        setShowAutocomplete(false)
+        setAutocompleteSearch('')
+        setAutocompleteIndex(0)
+        setAutocompleteTableCtx('')
+        setAutocompleteKind('table')
+
+        setTimeout(() => {
+            textarea.focus()
+            const newCursorPos = atIdx + item.insertText.length + 2
+            textarea.setSelectionRange(newCursorPos, newCursorPos)
+        }, 0)
+    }
+
     const handleKeyDown = (e: React.KeyboardEvent) => {
+        // Autocomplete navigation
+        if (showAutocomplete && autocompleteItems.length > 0) {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setAutocompleteIndex(prev => (prev + 1) % autocompleteItems.length)
+                return
+            }
+            if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setAutocompleteIndex(prev => (prev - 1 + autocompleteItems.length) % autocompleteItems.length)
+                return
+            }
+            if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault()
+                if (autocompleteItems[autocompleteIndex]) insertMention(autocompleteItems[autocompleteIndex])
+                return
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault()
+                setShowAutocomplete(false)
+                setAutocompleteSearch('')
+                setAutocompleteIndex(0)
+                setAutocompleteTableCtx('')
+                setAutocompleteKind('table')
+                return
+            }
+        }
+
+        // Normal enter to send
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault()
             handleSendMessage()
         }
     }
 
-    // Auto-resize textarea
+    // Auto-resize textarea and handle @-mention autocomplete
     const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-        setInputValue(e.target.value)
+        const newValue = e.target.value
+        setInputValue(newValue)
+
         const textarea = e.target
         textarea.style.height = 'auto'
         textarea.style.height = `${Math.min(textarea.scrollHeight, 120)}px`
+
+        const cursorPos = textarea.selectionStart
+        const textBeforeCursor = newValue.substring(0, cursorPos)
+
+        // Column mode: @tableName.searchTerm
+        const colMatch = textBeforeCursor.match(/@(\w+)\.(\w*)$/)
+        // Table mode: @searchTerm (no dot yet)
+        const atMatch = !colMatch ? textBeforeCursor.match(/@(\w*)$/) : null
+
+        if (colMatch) {
+            const tableName = colMatch[1]
+            const colSearch = colMatch[2]
+            const knownTable = allTablePool.find(t => t.name === tableName)
+            if (knownTable && knownTable.columns.length > 0) {
+                setShowAutocomplete(true)
+                setAutocompleteKind('column')
+                setAutocompleteTableCtx(tableName)
+                setAutocompleteSearch(colSearch)
+                setAutocompleteIndex(0)
+            } else {
+                setShowAutocomplete(false)
+                setAutocompleteTableCtx('')
+                setAutocompleteKind('table')
+            }
+        } else if (atMatch && allTablePool.length > 0) {
+            setShowAutocomplete(true)
+            setAutocompleteKind('table')
+            setAutocompleteTableCtx('')
+            setAutocompleteSearch(atMatch[1])
+            setAutocompleteIndex(0)
+        } else {
+            setShowAutocomplete(false)
+            setAutocompleteSearch('')
+            setAutocompleteIndex(0)
+            setAutocompleteTableCtx('')
+            setAutocompleteKind('table')
+        }
     }
 
     // Apply manual code edits
@@ -356,28 +695,18 @@ export function TransformDialog({
         setIsGenerating(true)
         try {
             // Test edited code
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-            if (token) {
-                headers['Authorization'] = `Bearer ${token}`
-            }
-
-            const response = await fetch(`/api/v1/content-nodes/${primaryNode.id}/transform/test`, {
-                method: 'POST',
-                headers,
-                body: JSON.stringify({
-                    code: editedCode,
-                    transformation_id: currentTransformation.transformationId,
-                    selected_node_ids: nodes.map(n => n.id)
-                }),
-                credentials: 'include'
+            const response = await contentNodesAPI.transformTest(primaryNode.id, {
+                code: editedCode,
+                transformation_id: currentTransformation.transformationId,
+                selected_node_ids: nodes.map(n => n.id)
             })
 
-            if (!response.ok) {
-                const errorData = await response.json()
-                throw new Error(errorData.detail || 'Ошибка выполнения кода')
-            }
+            const result = response.data
 
-            const result = await response.json()
+            // Check if execution was successful
+            if (!result.success) {
+                throw new Error(result.error || 'Код не выполнился')
+            }
 
             // Update transformation with tested code
             setCurrentTransformation({
@@ -386,14 +715,24 @@ export function TransformDialog({
                 previewData: {
                     tables: result.tables,
                     execution_time_ms: result.execution_time_ms
-                }
+                },
+                error: undefined
             })
 
             setEditedCode(null)
             setRightPanelTab('preview')
         } catch (error) {
             console.error('Code test failed:', error)
-            alert(`Ошибка: ${error instanceof Error ? error.message : 'Не удалось выполнить код'}`)
+
+            // Update transformation with error
+            setCurrentTransformation({
+                ...currentTransformation,
+                code: editedCode,
+                error: error instanceof Error ? error.message : 'Не удалось выполнить код'
+            })
+
+            // Stay on code tab to allow fixing
+            setRightPanelTab('code')
         } finally {
             setIsGenerating(false)
         }
@@ -406,7 +745,12 @@ export function TransformDialog({
         setIsSaving(true)
         try {
             const code = editedCode || currentTransformation.code
-            await onTransform(code, currentTransformation.transformationId, currentTransformation.description)
+            // Convert ChatMessage to simple format for API
+            const historyForAPI = chatMessages.map(msg => ({
+                role: msg.role,
+                content: msg.content
+            }))
+            await onTransform(code, currentTransformation.transformationId, currentTransformation.description, historyForAPI)
             onOpenChange(false)
         } catch (error) {
             console.error('Failed to save transformation:', error)
@@ -432,14 +776,13 @@ export function TransformDialog({
                 </div>
             </div>
             <div className="border rounded overflow-x-auto max-h-[300px] overflow-y-auto">
-                <table className="w-full text-xs">
+                <table className="min-w-full text-xs">
                     <thead className="sticky top-0 bg-muted">
                         <tr className="border-b">
                             {table.columns.map((col, idx) => {
-                                // Handle both old (string) and new (object) column formats
-                                const colName = typeof col === 'string' ? col : col.name || String(col)
+                                const colName = col.name
                                 return (
-                                    <th key={`col-${colName}-${idx}`} className="px-2 py-1.5 text-left font-medium">
+                                    <th key={`col-${colName}-${idx}`} className="px-2 py-1.5 text-left font-medium whitespace-nowrap">
                                         {colName}
                                     </th>
                                 )
@@ -448,12 +791,12 @@ export function TransformDialog({
                     </thead>
                     <tbody>
                         {table.rows.map((row, rowIdx) => {
-                            // Handle both old (array) and new (object) row formats
-                            const rowValues = Array.isArray(row) ? row : row.values || []
+                            const colNames = table.columns.map(c => c.name)
+                            const rowValues = colNames.map((cn: string) => row?.[cn] ?? '')
                             return (
                                 <tr key={`row-${rowIdx}`} className="border-b last:border-0 hover:bg-muted/50">
                                     {rowValues.map((cell, cellIdx) => (
-                                        <td key={`cell-${rowIdx}-${cellIdx}`} className="px-2 py-1.5">
+                                        <td key={`cell-${rowIdx}-${cellIdx}`} className="px-2 py-1.5 whitespace-nowrap">
                                             {cell !== null && cell !== undefined ? String(cell) : '-'}
                                         </td>
                                     ))}
@@ -473,33 +816,30 @@ export function TransformDialog({
                 {table.name} <span className="text-muted-foreground">({table.row_count} строк)</span>
             </div>
             <div className="border rounded overflow-x-auto max-h-[120px] overflow-y-auto">
-                <table className="w-full text-[10px]">
+                <table className="min-w-full text-[10px]">
                     <thead className="sticky top-0 bg-muted">
                         <tr>
-                            {table.columns.slice(0, 4).map((col, idx) => {
-                                // Handle both old (string) and new (object) column formats
-                                const colName = typeof col === 'string' ? col : col.name || String(col)
+                            {table.columns.map((col, idx) => {
+                                const colName = col.name
                                 return (
-                                    <th key={`stat-col-${colName}-${idx}`} className="px-1 py-0.5 text-left font-medium">
+                                    <th key={`stat-col-${colName}-${idx}`} className="px-1 py-0.5 text-left font-medium whitespace-nowrap">
                                         {colName}
                                     </th>
                                 )
                             })}
-                            {table.columns.length > 4 && <th className="px-1 py-0.5">...</th>}
                         </tr>
                     </thead>
                     <tbody>
                         {table.rows.slice(0, 3).map((row, rowIdx) => {
-                            // Handle both old (array) and new (object) row formats
-                            const rowValues = Array.isArray(row) ? row : row.values || []
+                            const colNames = table.columns.map(c => c.name)
+                            const rowValues = colNames.map((cn: string) => row?.[cn] ?? '')
                             return (
                                 <tr key={`stat-row-${rowIdx}`} className="border-t">
-                                    {rowValues.slice(0, 4).map((cell, cellIdx) => (
-                                        <td key={`stat-cell-${rowIdx}-${cellIdx}`} className="px-1 py-0.5">
-                                            {cell !== null && cell !== undefined ? String(cell).substring(0, 20) : '-'}
+                                    {rowValues.map((cell, cellIdx) => (
+                                        <td key={`stat-cell-${rowIdx}-${cellIdx}`} className="px-1 py-0.5 whitespace-nowrap">
+                                            {cell !== null && cell !== undefined ? String(cell).substring(0, 30) : '-'}
                                         </td>
                                     ))}
-                                    {rowValues.length > 4 && <td className="px-1 py-0.5">...</td>}
                                 </tr>
                             )
                         })}
@@ -575,6 +915,11 @@ export function TransformDialog({
                                     <p className="text-xs mt-2">
                                         Например: "Отфильтровать amount &gt; 100"
                                     </p>
+                                    {allTablePool.length > 0 && (
+                                        <p className="text-xs mt-2 opacity-70">
+                                            @ — таблицы, @{allTablePool[0]?.name}. — колонки
+                                        </p>
+                                    )}
                                 </div>
                             ) : (
                                 <div key="messages-container" className="space-y-2">
@@ -594,7 +939,7 @@ export function TransformDialog({
                                                         : 'bg-muted'
                                                 )}
                                             >
-                                                {msg.content}
+                                                {renderMessageContent(msg)}
                                             </div>
                                         </div>
                                     ))}
@@ -623,14 +968,47 @@ export function TransformDialog({
                         </div>
 
                         {/* Chat Input */}
-                        <div className="p-2 border-t">
+                        <div className="p-2 border-t relative">
+                            {/* Autocomplete dropdown */}
+                            {showAutocomplete && autocompleteItems.length > 0 && (
+                                <div
+                                    ref={autocompleteRef}
+                                    className="absolute bottom-full left-2 right-2 mb-1 bg-popover border rounded-md shadow-lg max-h-[200px] overflow-y-auto z-50"
+                                >
+                                    {autocompleteKind === 'column' && (
+                                        <div className="px-3 py-1 text-xs text-muted-foreground border-b bg-muted/50 font-medium select-none">
+                                            Колонки @{autocompleteTableCtx}
+                                        </div>
+                                    )}
+                                    {autocompleteItems.map((item, idx) => (
+                                        <button
+                                            key={item.insertText}
+                                            onClick={() => insertMention(item)}
+                                            onMouseEnter={() => setAutocompleteIndex(idx)}
+                                            className={cn(
+                                                'w-full px-3 py-2 text-left text-sm flex items-center justify-between hover:bg-accent transition-colors',
+                                                idx === autocompleteIndex && 'bg-accent'
+                                            )}
+                                        >
+                                            <span className="flex items-center gap-1.5 font-mono">
+                                                {item.kind === 'source_table' && <span className="text-blue-500 text-[10px]">📊</span>}
+                                                {item.kind === 'result_table' && <span className="text-green-500 text-[10px] font-bold">→</span>}
+                                                {item.kind === 'column' && <span className="text-muted-foreground text-[10px]">·</span>}
+                                                {item.label}
+                                            </span>
+                                            <span className="text-xs text-muted-foreground">{item.hint}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+
                             <div className="flex gap-2 items-end">
                                 <Textarea
                                     ref={textareaRef}
                                     value={inputValue}
                                     onChange={handleInputChange}
                                     onKeyDown={handleKeyDown}
-                                    placeholder="Опишите трансформацию..."
+                                    placeholder={allTablePool.length > 0 ? `Опишите трансформацию (@tableName для таблицы, @tableName.col для колонки)...` : "Опишите трансформацию..."}
                                     className="min-h-[32px] py-1.5 px-2 resize-none text-sm overflow-hidden"
                                     style={{ height: '32px' }}
                                     disabled={isGenerating}
@@ -744,12 +1122,16 @@ export function TransformDialog({
                             {/* Code Panel */}
                             <div className={cn("flex-1 flex flex-col", rightPanelTab !== 'code' && "hidden")}>
                                 {editedCode && (
-                                    <div className="flex items-center justify-end mb-2">
+                                    <div className="flex items-center justify-between mb-2 p-2 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-md">
+                                        <span className="text-xs text-amber-700 dark:text-amber-400">
+                                            ⚠️ Код изменён, нажмите "Применить" для проверки
+                                        </span>
                                         <Button
                                             variant="outline"
                                             size="sm"
                                             onClick={handleApplyCode}
                                             disabled={isGenerating}
+                                            className="ml-2 bg-white dark:bg-gray-900"
                                         >
                                             {isGenerating ? (
                                                 <><Loader2 className="w-3 h-3 mr-1 animate-spin" />Тестирование...</>
@@ -766,7 +1148,11 @@ export function TransformDialog({
                                             <Editor
                                                 height="100%"
                                                 language="python"
-                                                value={editedCode || currentTransformation.code}
+                                                value={(() => {
+                                                    const displayCode = editedCode || currentTransformation.code
+                                                    console.log('👁️ CodeEditor rendering:', displayCode ? `${displayCode.length} chars, using ${editedCode ? 'EDITED' : 'CURRENT'}, starts: ${displayCode.substring(0, 80)}` : 'no code')
+                                                    return displayCode
+                                                })()}
                                                 onChange={(value) => setEditedCode(value || null)}
                                                 options={{
                                                     minimap: { enabled: false },
@@ -776,6 +1162,16 @@ export function TransformDialog({
                                                 }}
                                             />
                                         </div>
+                                        {currentTransformation.error && (
+                                            <div className="mt-2 p-2 bg-destructive/10 border border-destructive/30 rounded-md">
+                                                <div className="text-xs font-medium text-destructive mb-1">
+                                                    ❌ Ошибка выполнения:
+                                                </div>
+                                                <div className="text-xs text-muted-foreground font-mono">
+                                                    {currentTransformation.error}
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                 ) : (
                                     <div className="flex-1 border rounded-lg flex items-center justify-center text-muted-foreground">
@@ -806,8 +1202,9 @@ export function TransformDialog({
                             </Button>
                             <Button
                                 onClick={handleSaveToBoard}
-                                disabled={!currentTransformation || isSaving}
+                                disabled={!currentTransformation || isSaving || !!currentTransformation?.error}
                                 className="bg-blue-500 hover:bg-blue-600"
+                                title={currentTransformation?.error ? 'Исправьте ошибки перед сохранением' : editedCode ? 'Сохранит отредактированный код' : undefined}
                             >
                                 {isSaving ? (
                                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />

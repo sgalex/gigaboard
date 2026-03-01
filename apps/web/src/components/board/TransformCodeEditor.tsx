@@ -32,7 +32,7 @@ export function TransformCodeEditor({
     initialPosition = { x: 100, y: 100 },
 }: TransformCodeEditorProps) {
     const { boardId } = useParams<{ boardId: string }>()
-    const { contentNodes, createContentNode } = useBoardStore()
+    const { contentNodes, transformContents } = useBoardStore()
 
     const [name, setName] = useState('')
     const [code, setCode] = useState('')
@@ -91,37 +91,14 @@ result = result.drop_duplicates()`
         setError(null)
 
         try {
-            // Call transform API
-            const response = await fetch(
-                `${import.meta.env.VITE_API_URL}/api/v1/content-nodes/transform`,
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        board_id: boardId,
-                        source_content_ids: sourceContentIds,
-                        code: code,
-                        metadata: {
-                            name: name,
-                        },
-                        position: initialPosition,
-                    }),
-                }
-            )
+            // Execute transform via boardStore (handles ContentNode fetch, edges, dimensions, tables)
+            const result = await transformContents(sourceContentIds, code, name, initialPosition)
 
-            if (!response.ok) {
-                const errorData = await response.json()
-                throw new Error(errorData.detail || 'Transformation failed')
+            if (!result) {
+                // Error notification already shown by transformContents
+                setError('Transformation failed')
+                return
             }
-
-            const newContentNode = await response.json()
-
-            // Add to store
-            await createContentNode(boardId, newContentNode)
-
-            notify.success('Transformation executed successfully')
 
             // Reset and close
             setName('')

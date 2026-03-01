@@ -12,12 +12,11 @@ import socketio
 # Fix Windows console encoding for emoji support
 if sys.platform == "win32":
     try:
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
+        sys.stdout.reconfigure(encoding='utf-8', write_through=True)
+        sys.stderr.reconfigure(encoding='utf-8', write_through=True)
     except AttributeError:
-        # Python < 3.7 fallback
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', write_through=True)
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', write_through=True)
 
 from .core import settings, init_db, close_db, init_redis, close_redis, sio, register_socketio_events
 from .routes import (
@@ -35,12 +34,19 @@ from .routes import (
     files_router,
     extraction_router,
     ai_resolver_router,
+    library_router,
+    dashboards_router,
+    public_router,
+    dimensions_router,
+    board_filter_router,
+    dashboard_filter_router,
+    preset_router,
 )
 from .services.gigachat_service import initialize_gigachat_service, get_gigachat_service
-from .services.multi_agent.engine import MultiAgentEngine
+from .services.multi_agent.orchestrator import Orchestrator
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+# Setup logging (force=True ensures handler is added even if uvicorn pre-configured root)
+logging.basicConfig(level=logging.INFO, force=True, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 # Отключаем излишнее логирование SQLAlchemy
@@ -60,12 +66,13 @@ logging.getLogger('engineio.server').setLevel(logging.WARNING)
 # Отключаем успешные GET запросы uvicorn (200 OK)
 logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
 
-# Global MultiAgentEngine singleton
-_multi_agent_engine: MultiAgentEngine | None = None
+# Global Orchestrator V2 singleton
+_orchestrator: Orchestrator | None = None
 
-def get_multi_agent_engine() -> MultiAgentEngine | None:
-    """Get the global MultiAgentEngine instance."""
-    return _multi_agent_engine
+
+def get_orchestrator() -> Orchestrator | None:
+    """Get the global Orchestrator V2 instance."""
+    return _orchestrator
 
 # FastAPI app initialization
 @asynccontextmanager
@@ -111,23 +118,28 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("⚠️  GIGACHAT_API_KEY not set - AI features will be disabled")
     
-    # Initialize MultiAgentEngine (requires both Redis and GigaChat)
-    global _multi_agent_engine
+    # Initialize Orchestrator V2 (requires both Redis and GigaChat)
+    global _orchestrator
     if redis_ok and gigachat_ok:
         try:
-            _multi_agent_engine = MultiAgentEngine(
+            _orchestrator = Orchestrator(
                 gigachat_api_key=settings.GIGACHAT_API_KEY,
-                enable_agents=["planner", "search", "analyst", "reporter", "researcher", "transformation", "suggestions"],
-                adaptive_planning=True
+                enable_agents=[
+                    # V2 core agents (Phase 3)
+                    "planner", "discovery", "research",
+                    "structurizer", "analyst", "transform_codex",
+                    "widget_codex", "reporter", "validator",
+                ],
+                adaptive_planning=True,
             )
-            await _multi_agent_engine.initialize()
-            logger.info("✅ MultiAgentEngine initialized with suggestions agent")
+            await _orchestrator.initialize()
+            logger.info("✅ Orchestrator V2 initialized with all agents")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize MultiAgentEngine: {e}", exc_info=True)
-            logger.warning("⚠️  Widget Suggestions and Multi-Agent features will not be available")
-            _multi_agent_engine = None
+            logger.error(f"❌ Failed to initialize Orchestrator V2: {e}", exc_info=True)
+            logger.warning("⚠️  Multi-Agent features will not be available")
+            _orchestrator = None
     else:
-        logger.warning("⚠️  MultiAgentEngine disabled (requires Redis and GigaChat)")
+        logger.warning("⚠️  Orchestrator V2 disabled (requires Redis and GigaChat)")
         if not redis_ok:
             logger.warning("   - Redis: ❌ Not connected")
         if not gigachat_ok:
@@ -138,13 +150,13 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("🛑 Shutting down...")
     try:
-        # Shutdown MultiAgentEngine first
-        if _multi_agent_engine:
+        # Shutdown Orchestrator V2
+        if _orchestrator:
             try:
-                await _multi_agent_engine.shutdown()
-                logger.info("✅ MultiAgentEngine shut down")
+                await _orchestrator.shutdown()
+                logger.info("✅ Orchestrator V2 shut down")
             except Exception as e:
-                logger.error(f"❌ Failed to shutdown MultiAgentEngine: {e}")
+                logger.error(f"❌ Failed to shutdown Orchestrator V2: {e}")
         
         try:
             await close_db()
@@ -204,6 +216,17 @@ fastapi_app.include_router(database_router)
 # File upload routes
 fastapi_app.include_router(files_router)
 
+# Dashboard system routes
+fastapi_app.include_router(library_router)
+fastapi_app.include_router(dashboards_router)
+fastapi_app.include_router(public_router)
+
+# Cross-filter system routes
+fastapi_app.include_router(dimensions_router)
+fastapi_app.include_router(board_filter_router)
+fastapi_app.include_router(dashboard_filter_router)
+fastapi_app.include_router(preset_router)
+
 # Register Socket.IO event handlers
 register_socketio_events(sio)
 
@@ -222,7 +245,6 @@ class CombinedASGI:
         Route requests to Socket.IO or FastAPI based on path.
         Socket.IO handles /socket.io/* paths, everything else goes to FastAPI.
         """
-        # Debug logging
         if scope["type"] in ("http", "websocket"):
             logger.info(f"[ROUTER] {scope['type'].upper()} {scope['path']}")
         

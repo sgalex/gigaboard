@@ -309,12 +309,25 @@ class FileExtractor(BaseExtractor):
         name: str,
         metadata: dict | None = None
     ) -> dict[str, Any]:
-        """Convert pandas DataFrame to table structure."""
-        # Convert DataFrame to list of lists (handle NaN values)
-        rows = df.fillna("").values.tolist()
+        """Convert pandas DataFrame to unified table structure."""
+        # Convert DataFrame to dict rows
+        rows = df.fillna("").to_dict(orient='records')
         
-        # Convert column names to strings
-        columns = [str(col) for col in df.columns]
+        # Typed columns from dtypes
+        columns = []
+        for col in df.columns:
+            dtype = str(df[col].dtype)
+            if 'int' in dtype:
+                col_type = "int"
+            elif 'float' in dtype:
+                col_type = "float"
+            elif 'bool' in dtype:
+                col_type = "bool"
+            elif 'datetime' in dtype:
+                col_type = "date"
+            else:
+                col_type = "string"
+            columns.append({"name": str(col), "type": col_type})
         
         return self._create_table(
             name=name,

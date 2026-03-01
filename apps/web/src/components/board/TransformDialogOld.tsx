@@ -137,8 +137,8 @@ export function TransformDialog({
                     </thead>
                     <tbody>
                         {table.rows.map((row: any, rowIdx: number) => {
-                            // Handle both old (array) and new (object) row formats
-                            const rowValues = Array.isArray(row) ? row : row.values || []
+                            const colNames = table.columns.map((c: any) => typeof c === 'string' ? c : c.name || String(c))
+                            const rowValues = colNames.map((cn: string) => row?.[cn] ?? '')
                             return (
                                 <tr key={rowIdx} className="border-b last:border-0 hover:bg-muted/50">
                                     {rowValues.map((cell: any, cellIdx: number) => (
@@ -304,7 +304,7 @@ export function TransformDialog({
                                     {nodes.map((node, nodeIdx) => (
                                         <span key={nodeIdx} className="inline-flex items-center gap-1.5 text-muted-foreground font-normal">
                                             <span className="text-xs">•</span>
-                                            <span>{node.metadata?.name || `Content Node ${node.id.slice(0, 8)}`}</span>
+                                            <span>{node.metadata?.name || `Узел данных ${node.id.slice(0, 8)}`}</span>
                                         </span>
                                     ))}
                                     <span className="text-xs text-muted-foreground font-normal">
@@ -350,15 +350,19 @@ export function TransformDialog({
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody>
-                                                                    {table.rows.slice(0, 3).map((row: any, rowIdx: number) => (
-                                                                        <tr key={rowIdx} className="border-b last:border-0">
-                                                                            {Array.isArray(row) ? row.map((cell: any, cellIdx: number) => (
-                                                                                <td key={cellIdx} className="px-2 py-1">
-                                                                                    {cell !== null && cell !== undefined ? String(cell) : '-'}
-                                                                                </td>
-                                                                            )) : null}
-                                                                        </tr>
-                                                                    ))}
+                                                                    {table.rows.slice(0, 3).map((row: any, rowIdx: number) => {
+                                                                        const colNames2 = table.columns?.map((c: any) => typeof c === 'string' ? c : c.name || String(c)) || []
+                                                                        const cells = colNames2.map((cn: string) => row?.[cn] ?? '')
+                                                                        return (
+                                                                            <tr key={rowIdx} className="border-b last:border-0">
+                                                                                {cells.map((cell: any, cellIdx: number) => (
+                                                                                    <td key={cellIdx} className="px-2 py-1">
+                                                                                        {cell !== null && cell !== undefined ? String(cell) : '-'}
+                                                                                    </td>
+                                                                                ))}
+                                                                            </tr>
+                                                                        )
+                                                                    })}
                                                                 </tbody>
                                                             </table>
                                                         </div>

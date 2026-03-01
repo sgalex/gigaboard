@@ -29,6 +29,30 @@ from .comment_node import CommentNodeCreate, CommentNodeUpdate, CommentNodeRespo
 # Data preview and execution
 from .data_preview import DataPreviewResponse, ExecuteDataNodeRequest, DataNodeExecutionResult
 
+# Dashboard system
+from .library import (
+    ProjectWidgetCreate, ProjectWidgetUpdate, ProjectWidgetResponse,
+    ProjectTableCreate, ProjectTableUpdate, ProjectTableResponse,
+)
+from .dashboard import (
+    DashboardCreate, DashboardUpdate, DashboardResponse, DashboardWithItemsResponse,
+    DashboardItemCreate, DashboardItemUpdate, DashboardItemResponse,
+    BatchItemUpdate, BatchItemUpdateRequest,
+    DashboardShareCreate, DashboardShareResponse,
+    PublicDashboardResponse,
+)
+
+# Cross-filter system
+from .cross_filter import (
+    FilterOperator, FilterCondition, FilterGroup, FilterExpression,
+    DimensionType, DimensionCreate, DimensionUpdate, DimensionResponse,
+    MappingSource, DimensionColumnMappingCreate, DimensionColumnMappingResponse,
+    FilterPresetScope, FilterPresetCreate, FilterPresetUpdate, FilterPresetResponse,
+    ActiveFiltersUpdate, ActiveFiltersResponse,
+    TableFilterStats, FilterStatsResponse,
+    DimensionSuggestion, DetectDimensionsResponse,
+)
+
 __all__ = [
     "UserCreate", "UserLogin", "UserResponse", "TokenResponse", "ErrorResponse",
     "ProjectCreate", "ProjectUpdate", "ProjectResponse", "ProjectWithBoardsResponse",
@@ -50,4 +74,20 @@ __all__ = [
     # Other nodes
     "WidgetNodeCreate", "WidgetNodeUpdate", "WidgetNodeResponse",
     "CommentNodeCreate", "CommentNodeUpdate", "CommentNodeResponse",
+    # Dashboard system
+    "ProjectWidgetCreate", "ProjectWidgetUpdate", "ProjectWidgetResponse",
+    "ProjectTableCreate", "ProjectTableUpdate", "ProjectTableResponse",
+    "DashboardCreate", "DashboardUpdate", "DashboardResponse", "DashboardWithItemsResponse",
+    "DashboardItemCreate", "DashboardItemUpdate", "DashboardItemResponse",
+    "BatchItemUpdate", "BatchItemUpdateRequest",
+    "DashboardShareCreate", "DashboardShareResponse",
+    "PublicDashboardResponse",
+    # Cross-filter system
+    "FilterOperator", "FilterCondition", "FilterGroup", "FilterExpression",
+    "DimensionType", "DimensionCreate", "DimensionUpdate", "DimensionResponse",
+    "MappingSource", "DimensionColumnMappingCreate", "DimensionColumnMappingResponse",
+    "FilterPresetScope", "FilterPresetCreate", "FilterPresetUpdate", "FilterPresetResponse",
+    "ActiveFiltersUpdate", "ActiveFiltersResponse",
+    "TableFilterStats", "FilterStatsResponse",
+    "DimensionSuggestion", "DetectDimensionsResponse",
 ]

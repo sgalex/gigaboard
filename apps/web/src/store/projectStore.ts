@@ -52,7 +52,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
             // Add to projects list
             set((state) => ({
-                projects: [{ ...newProject, boards_count: 0 }, ...state.projects],
+                projects: [{
+                ...newProject,
+                boards_count: 0,
+                dashboards_count: 0,
+                sources_count: 0,
+                content_nodes_count: 0,
+                widgets_count: 0,
+                tables_count: 0,
+                dimensions_count: 0,
+                filters_count: 0,
+            }, ...state.projects],
                 isLoading: false,
             }))
 

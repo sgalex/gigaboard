@@ -1,221 +1,231 @@
-"""Database extractor - handles SQL queries."""
-import logging
-from typing import Any
-from urllib.parse import urlparse
+"""Database extractor — extracts selected tables from a connected DB.
 
-import asyncpg
-import aiomysql
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy import text
+Works with the config format produced by DatabaseSourceDialog:
+  {
+    db_type: "postgresql" | "mysql" | "sqlite",
+    host, port, database, username, password,   # for pg/mysql
+    path,                                        # for sqlite
+    tables: [{name, schema, limit?, where?, columns?: [{name,selected,alias}]}],
+    row_limit: int   # fallback per-table limit
+  }
+
+Uses sync drivers (psycopg2, pymysql, sqlite3) via asyncio.to_thread.
+"""
+import asyncio
+import logging
+import sqlite3
+from typing import Any
 
 from .base import BaseExtractor, ExtractionResult
 
 logger = logging.getLogger(__name__)
 
 
+def _serialise_value(val: Any) -> Any:
+    """Make a DB cell JSON-safe."""
+    if val is None or isinstance(val, (int, float, str, bool)):
+        return val
+    return str(val)
+
+
 class DatabaseExtractor(BaseExtractor):
-    """Extractor for database sources."""
-    
+    """Extractor for database sources (PostgreSQL, MySQL, SQLite)."""
+
     SUPPORTED_DATABASES = {"postgresql", "mysql", "sqlite"}
-    MAX_ROWS = 10000
-    
+    MAX_ROWS = 10_000
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     async def extract(
         self,
         config: dict[str, Any],
-        params: dict[str, Any] | None = None
+        params: dict[str, Any] | None = None,
     ) -> ExtractionResult:
-        """Extract data from database.
-        
-        Config format:
-            {
-                "connection_string": str,  # Database URL
-                "query": str,  # SQL query to execute
-                "database_type": str  # postgresql, mysql, sqlite
-            }
-        
-        Params format:
-            {
-                "limit": int  # optional, limit rows
-            }
-        """
+        """Extract data from one or more tables specified in *config*."""
+        return await asyncio.to_thread(self._extract_sync, config, params or {})
+
+    def validate_config(self, config: dict[str, Any]) -> tuple[bool, list[str]]:
+        errors: list[str] = []
+        db_type = config.get("db_type", config.get("database_type", ""))
+        if db_type not in self.SUPPORTED_DATABASES:
+            errors.append(f"Unsupported db_type: {db_type}")
+        if db_type == "sqlite":
+            if not config.get("path"):
+                errors.append("path is required for SQLite")
+        else:
+            if not config.get("host"):
+                errors.append("host is required")
+            if not config.get("database"):
+                errors.append("database is required")
+        if not config.get("tables"):
+            errors.append("At least one table must be selected")
+        return len(errors) == 0, errors
+
+    # ------------------------------------------------------------------
+    # Sync extraction (runs in thread)
+    # ------------------------------------------------------------------
+
+    def _extract_sync(self, config: dict[str, Any], params: dict[str, Any]) -> ExtractionResult:
         result = ExtractionResult()
-        params = params or {}
-        
+        db_type = config.get("db_type", config.get("database_type", "postgresql"))
+        tables_cfg: list[dict] = config.get("tables", [])
+        default_limit = config.get("row_limit", self.MAX_ROWS)
+
+        if not tables_cfg:
+            result.errors.append("No tables specified in config")
+            return result
+
         try:
-            connection_string = config.get("connection_string")
-            query = config.get("query")
-            db_type = config.get("database_type", "postgresql")
-            
-            if not connection_string:
-                result.errors.append("connection_string is required")
-                return result
-            
-            if not query:
-                result.errors.append("query is required")
-                return result
-            
-            # Add limit if specified
-            limit = params.get("limit", self.MAX_ROWS)
-            if limit and "limit" not in query.lower():
-                query = f"{query.rstrip(';')} LIMIT {limit}"
-            
-            # Execute query based on database type
-            if db_type == "postgresql":
-                await self._extract_postgresql(connection_string, query, result)
-            elif db_type == "mysql":
-                await self._extract_mysql(connection_string, query, result)
-            elif db_type == "sqlite":
-                await self._extract_sqlite(connection_string, query, result)
-            else:
-                result.errors.append(f"Unsupported database type: {db_type}")
-                return result
-            
-            result.metadata.update({
-                "database_type": db_type,
-                "query": query[:500]  # Truncate long queries
-            })
-            
-            logger.info(f"Executed database query: {db_type} ({len(result.tables)} tables)")
-            
+            conn = self._connect(config, db_type)
         except Exception as e:
-            logger.exception(f"Database extraction failed: {e}")
-            result.errors.append(f"Database error: {str(e)}")
-        
-        return result
-    
-    async def _extract_postgresql(
-        self,
-        connection_string: str,
-        query: str,
-        result: ExtractionResult
-    ):
-        """Extract from PostgreSQL."""
-        conn = await asyncpg.connect(connection_string)
+            result.errors.append(f"Connection failed: {e}")
+            return result
+
         try:
-            rows = await conn.fetch(query)
-            
-            if rows:
-                # Get column names from first row
-                columns = list(rows[0].keys())
-                
-                # Convert rows to list of lists
-                data_rows = [list(row.values()) for row in rows]
-                
-                table = self._create_table(
-                    name="query_result",
-                    columns=columns,
-                    rows=data_rows,
-                    metadata={"database": "postgresql", "row_count": len(rows)}
-                )
-                result.tables.append(table)
-                
-                result.text = f"PostgreSQL query returned {len(rows)} rows with {len(columns)} columns"
-            else:
-                result.text = "Query returned no rows"
-        
-        finally:
-            await conn.close()
-    
-    async def _extract_mysql(
-        self,
-        connection_string: str,
-        query: str,
-        result: ExtractionResult
-    ):
-        """Extract from MySQL."""
-        # Parse connection string
-        parsed = urlparse(connection_string)
-        
-        conn = await aiomysql.connect(
-            host=parsed.hostname,
-            port=parsed.port or 3306,
-            user=parsed.username,
-            password=parsed.password,
-            db=parsed.path.lstrip('/'),
-            autocommit=True
-        )
-        
-        try:
-            async with conn.cursor() as cursor:
-                await cursor.execute(query)
-                rows = await cursor.fetchall()
-                
-                if rows:
-                    # Get column names from cursor description
-                    columns = [desc[0] for desc in cursor.description]
-                    
-                    # Convert rows to list of lists
-                    data_rows = [list(row) for row in rows]
-                    
-                    table = self._create_table(
-                        name="query_result",
-                        columns=columns,
-                        rows=data_rows,
-                        metadata={"database": "mysql", "row_count": len(rows)}
-                    )
-                    result.tables.append(table)
-                    
-                    result.text = f"MySQL query returned {len(rows)} rows with {len(columns)} columns"
-                else:
-                    result.text = "Query returned no rows"
-        
+            for tbl in tables_cfg:
+                self._extract_table(conn, db_type, tbl, default_limit, result)
         finally:
             conn.close()
-    
-    async def _extract_sqlite(
+
+        total_rows = sum(t.get("row_count", 0) for t in result.tables)
+        result.text = (
+            f"Extracted {len(result.tables)} table(s), {total_rows} rows total "
+            f"from {db_type} database"
+        )
+        result.metadata.update({
+            "database_type": db_type,
+            "table_count": len(result.tables),
+            "total_rows": total_rows,
+        })
+        return result
+
+    # ------------------------------------------------------------------
+    # Connection helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _connect(config: dict[str, Any], db_type: str):
+        if db_type == "postgresql":
+            import psycopg2
+            return psycopg2.connect(
+                host=config.get("host", "localhost"),
+                port=int(config.get("port", 5432)),
+                dbname=config.get("database"),
+                user=config.get("username"),
+                password=config.get("password"),
+                connect_timeout=10,
+            )
+        elif db_type == "mysql":
+            import pymysql
+            return pymysql.connect(
+                host=config.get("host", "localhost"),
+                port=int(config.get("port", 3306)),
+                database=config.get("database"),
+                user=config.get("username"),
+                password=config.get("password"),
+                connect_timeout=10,
+            )
+        elif db_type == "sqlite":
+            return sqlite3.connect(config["path"], timeout=10)
+        else:
+            raise ValueError(f"Unsupported db_type: {db_type}")
+
+    # ------------------------------------------------------------------
+    # Per-table extraction
+    # ------------------------------------------------------------------
+
+    def _extract_table(
         self,
-        connection_string: str,
-        query: str,
-        result: ExtractionResult
+        conn,
+        db_type: str,
+        tbl: dict,
+        default_limit: int,
+        result: ExtractionResult,
     ):
-        """Extract from SQLite using SQLAlchemy."""
-        engine = create_async_engine(connection_string)
-        
+        table_name = tbl["name"]
+        schema_name = tbl.get("schema", "public")
+        limit = min(tbl.get("limit", default_limit), self.MAX_ROWS)
+        where = tbl.get("where", "").strip()
+
+        # Build column list (respecting selected/alias)
+        columns_cfg: list[dict] | None = tbl.get("columns")
+        selected_cols: list[str] | None = None
+        alias_map: dict[str, str] = {}
+        if columns_cfg:
+            selected = [c for c in columns_cfg if c.get("selected", True)]
+            if selected:
+                parts: list[str] = []
+                for c in selected:
+                    col_name = c["name"]
+                    alias = c.get("alias", "").strip()
+                    if alias and alias != col_name:
+                        alias_map[col_name] = alias
+                    parts.append(col_name)
+                selected_cols = parts
+
+        # Build qualified table name
+        if db_type == "postgresql":
+            q = '"'
+            qualified = f'{q}{schema_name}{q}.{q}{table_name}{q}'
+            col_wrap = lambda c: f'{q}{c}{q}'  # noqa: E731
+        elif db_type == "mysql":
+            qualified = f'`{table_name}`'
+            col_wrap = lambda c: f'`{c}`'  # noqa: E731
+        else:
+            qualified = f'"{table_name}"'
+            col_wrap = lambda c: f'"{c}"'  # noqa: E731
+
+        # Column selector
+        if selected_cols:
+            col_expr = ", ".join(col_wrap(c) for c in selected_cols)
+        else:
+            col_expr = "*"
+
+        sql = f"SELECT {col_expr} FROM {qualified}"
+        if where:
+            sql += f" WHERE {where}"
+        sql += f" LIMIT {limit}"
+
+        cursor = conn.cursor()
         try:
-            async with engine.connect() as conn:
-                cursor_result = await conn.execute(text(query))
-                rows = cursor_result.fetchall()
-                
-                if rows:
-                    # Get column names
-                    columns = list(cursor_result.keys())
-                    
-                    # Convert rows to list of lists
-                    data_rows = [list(row) for row in rows]
-                    
-                    table = self._create_table(
-                        name="query_result",
-                        columns=columns,
-                        rows=data_rows,
-                        metadata={"database": "sqlite", "row_count": len(rows)}
-                    )
-                    result.tables.append(table)
-                    
-                    result.text = f"SQLite query returned {len(rows)} rows with {len(columns)} columns"
-                else:
-                    result.text = "Query returned no rows"
-        
+            cursor.execute(sql)
+            raw_rows = cursor.fetchall()
+            col_names = (
+                [d[0] for d in cursor.description]
+                if cursor.description
+                else (selected_cols or [])
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract table {qualified}: {e}")
+            result.errors.append(f"Table {schema_name}.{table_name}: {e}")
+            cursor.close()
+            return
         finally:
-            await engine.dispose()
-    
-    def validate_config(self, config: dict[str, Any]) -> tuple[bool, list[str]]:
-        """Validate database source configuration."""
-        errors = []
-        
-        if not config.get("connection_string"):
-            errors.append("connection_string is required")
-        
-        if not config.get("query"):
-            errors.append("query is required")
-        
-        db_type = config.get("database_type", "postgresql")
-        if db_type not in self.SUPPORTED_DATABASES:
-            errors.append(f"Unsupported database: {db_type}. Supported: {self.SUPPORTED_DATABASES}")
-        
-        # Basic SQL injection check
-        query = config.get("query", "").lower()
-        dangerous_keywords = ["drop", "delete", "truncate", "alter", "create"]
-        if any(keyword in query for keyword in dangerous_keywords):
-            errors.append("Query contains potentially dangerous keywords (DROP, DELETE, etc.)")
-        
-        return len(errors) == 0, errors
+            cursor.close()
+
+        # Apply aliases
+        display_names = [alias_map.get(c, c) for c in col_names]
+
+        # Convert to dicts
+        dict_rows = []
+        for row in raw_rows:
+            d = {}
+            for i, val in enumerate(row):
+                d[display_names[i]] = _serialise_value(val)
+            dict_rows.append(d)
+
+        table = self._create_table(
+            name=table_name,
+            columns=display_names,
+            rows=dict_rows,
+            metadata={
+                "database": db_type,
+                "schema": schema_name,
+                "row_count": len(dict_rows),
+                "where": where or None,
+            },
+        )
+        result.tables.append(table)
+

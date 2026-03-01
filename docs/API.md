@@ -5,870 +5,586 @@
 **GigaBoard REST API** — FastAPI-основанный API для управления аналитическими досками с AI-агентами и real-time событиями (Socket.IO).
 
 **Ключевые концепции:**
-- **Source-Content архитектура**: SourceNode (источники данных) → ContentNode (извлечённые данные) → WidgetNode (визуализации)
+- **Source-Content архитектура**: SourceNode (источники + данные) → ContentNode (трансформированные данные) → WidgetNode (визуализации)
+- **SourceNode наследует ContentNode** — хранит и конфигурацию источника, и извлечённые данные
 - **4 типа узлов**: SourceNode, ContentNode, WidgetNode, CommentNode
-- **6 типов связей**: EXTRACT, TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
-- **Multi-Agent System**: Planner, SourceNode Manager, Transformation Agent, Reporter Agent, Developer Agent
-- **Real-time**: Socket.IO для коллаборативных обновлений досок
+- **5 типов связей**: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
+- **Multi-Agent System V2**: Orchestrator → PlannerAgent, StructurizerAgent, AnalystAgent, TransformCodexAgent, WidgetCodexAgent, ReporterAgent, DiscoveryAgent, ResearchAgent, ValidatorAgent + 5 Controllers
+- **Real-time**: Socket.IO для коллаборативных обновлений
 
-**Версионирование**: Все endpoints под `/api/v1`
-
-**Endpoints по категориям:**
-- ✅ **Authentication** — реализовано
-- ⏳ **Boards & Nodes** — в разработке (FR-2, FR-14, FR-23)
-- ⏳ **Edges & Transformations** — в разработке (FR-11, FR-5)
-- ⏳ **AI Agents & Tools** — в разработке (FR-6, FR-7, FR-8)
+**Версионирование**: Все endpoints под `/api/v1` (кроме `/health` и `/ai/resolve`)
 
 ---
 
 ## Общее описание
 
-REST API на FastAPI для работы с бордами и узлами с интеграцией AI. Real-time события через Socket.IO (ws). Все ответы в JSON. Валидация — Pydantic v2. Версионирование API: `/api/v1`.
+REST API на FastAPI для работы с проектами, бордами и узлами с AI-интеграцией. Real-time события через Socket.IO. Все ответы в JSON. Валидация — Pydantic v2.
 
-**Архитектура Source-Content (FR-14, FR-23)**:
-- **SourceNode**: Источники данных (file, database, api, prompt, stream, manual) без извлечённого контента
-- **ContentNode**: Результаты extraction из SourceNode или transformation (text + N tables)
-- **WidgetNode**: Визуализации ContentNode с HTML/CSS/JS кодом
-- **CommentNode**: Комментарии к любым узлам
+**Статусы:**
+- ✅ — реализовано и работает
+- ⚠️ — реализовано, но prefix/формат могут отличаться от идеала
 
-**Статус реализации**: 🚧 В разработке
-- ✅ **Реализовано**: Authentication endpoints (`/api/v1/auth/*`), Health check (`/health`)
-- ⏳ **В планах**: Boards, SourceNodes, ContentNodes, WidgetNodes, CommentNodes, Edges (EXTRACT/TRANSFORMATION/VISUALIZATION/COMMENT), AI Agents
+---
 
 ## Аутентификация
 
 - JWT (Bearer) для REST
-- Socket.IO handshake: передача токена в query/header, верификация на сервере
-- Refresh-токены — отдельный endpoint
+- Socket.IO handshake: передача токена в query/header
+- Refresh-токены через отдельный endpoint
 
 ---
 
-## Реализованные Endpoints
+## 1. Health Check
 
-### POST /api/v1/auth/register
-**Статус**: ✅ Реализовано  
-**Описание**: Регистрация нового пользователя.
-**Request Body**:
-```json
-{
-  "email": "user@example.com",
-  "username": "john_doe",
-  "password": "secure_password"
-}
-```
-**Ответ**:
-```json
-{
-  "id": "uuid",
-  "email": "user@example.com",
-  "username": "john_doe",
-  "created_at": "2026-01-24T10:30:00Z"
-}
-```
-
-### POST /api/v1/auth/login
-**Статус**: ✅ Реализовано  
-**Описание**: Получение access/refresh токенов.
-**Request Body**:
-```json
-{ "email": "user@example.com", "password": "string" }
-```
-**Ответ**:
-```json
-{ "access_token": "...", "refresh_token": "...", "token_type": "bearer" }
-```
-
-### POST /api/v1/auth/logout
-**Статус**: ✅ Реализовано  
-**Описание**: Выход из системы (инвалидация токена).
-
-### GET /health
-**Статус**: ✅ Реализовано  
-**Описание**: Проверка состояния сервера, БД и Redis.
+| Method | Path             | Описание                                 | Статус |
+| ------ | ---------------- | ---------------------------------------- | ------ |
+| GET    | `/health`        | Базовая проверка                         | ✅      |
+| GET    | `/api/v1/health` | Детальная проверка (DB, Redis, GigaChat) | ✅      |
 
 ---
 
-## Планируемые Endpoints (будут реализованы в следующих фичах)
+## 2. Authentication (`/api/v1/auth`)
 
-> **Примечание**: Все перечисленные ниже endpoints находятся в стадии проектирования и будут реализованы поэтапно согласно [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md):
-> - **FR-2**: Boards & Nodes (DataNode/WidgetNode/CommentNode) CRUD
-> - **FR-3**: Real-time Socket.IO events
-> - **FR-11**: Edges (TRANSFORMATION/VISUALIZATION/COMMENT/DRILL_DOWN/REFERENCE)
-> - **FR-5**: Transformation Agent (генерация Python кода для трансформаций)
-> - **FR-6**: Reporter Agent (генерация WidgetNode из DataNode)
-> - **FR-7/FR-8**: Multi-Agent System & Dynamic Tools
-> - **FR-12**: Dynamic Form Generation
+| Method | Path                    | Request Body | Response        | Status Code | Описание             |
+| ------ | ----------------------- | ------------ | --------------- | ----------- | -------------------- |
+| POST   | `/api/v1/auth/register` | `UserCreate` | `TokenResponse` | 201         | Регистрация          |
+| POST   | `/api/v1/auth/login`    | `UserLogin`  | `TokenResponse` | 200         | Логин                |
+| POST   | `/api/v1/auth/logout`   | —            | `{message}`     | 200         | Выход                |
+| GET    | `/api/v1/auth/me`       | —            | `UserResponse`  | 200         | Текущий пользователь |
 
-### Управление досками (Boards Management)
+<details>
+<summary>📄 Schemas (развернуть)</summary>
 
-### GET /api/v1/boards
-**Статус**: ⏳ FR-2  
-**Описание**: Список бордов пользователя.
-**Параметры**: `limit`, `offset` (optional)
-
-### POST /api/v1/boards
-**Статус**: ⏳ FR-2  
-**Описание**: Создать борд.
-**Параметры**: `limit`, `offset` (optional)
-
-### POST /api/v1/boards
-**Описание**: Создать борд.
-**Request Body**:
-```json
-{ "title": "Analytics space", "description": "optional" }
 ```
-**Ответ**: объект борда с `id`, `created_at`, `updated_at`.
+UserCreate { email: EmailStr, username: str (3-255), password: str (8-255) }
+UserLogin { email: EmailStr, password: str }
+UserResponse { id: UUID, email: str, username: str, created_at, updated_at }
+TokenResponse { access_token: str, token_type: "bearer", user: UserResponse, expires_in: int }
+```
 
-### GET /api/v1/boards/{boardId}
-**Описание**: Получить борд с виджетами и связями.
-
-### PATCH /api/v1/boards/{boardId}
-**Описание**: Обновить метаданные борда.
-
-### DELETE /api/v1/boards/{boardId}
-**Описание**: Удалить борд (soft delete опционально).
+</details>
 
 ---
 
-## Node Management Endpoints
+## 3. Projects (`/api/v1/projects`)
 
-### SourceNode Endpoints
+| Method | Path                            | Request Body    | Response                          | Status Code | Описание         |
+| ------ | ------------------------------- | --------------- | --------------------------------- | ----------- | ---------------- |
+| POST   | `/api/v1/projects`              | `ProjectCreate` | `ProjectResponse`                 | 201         | Создать проект   |
+| GET    | `/api/v1/projects`              | —               | `list[ProjectWithBoardsResponse]` | 200         | Список проектов  |
+| GET    | `/api/v1/projects/{project_id}` | —               | `ProjectResponse`                 | 200         | Получить проект  |
+| PUT    | `/api/v1/projects/{project_id}` | `ProjectUpdate` | `ProjectResponse`                 | 200         | Обновить         |
+| DELETE | `/api/v1/projects/{project_id}` | —               | —                                 | 204         | Удалить (каскад) |
 
-### POST /api/v1/boards/{boardId}/source-nodes
-**Статус**: ⏳ FR-14, FR-23
-**Описание**: Создать SourceNode (источник данных).
-**Request Body**:
-```json
-{
-  "source_type": "database",
-  "source_config": {
-    "query": "SELECT region, SUM(sales) as total FROM sales GROUP BY region",
-    "database": "analytics_db",
-    "connection_id": "conn_123"
-  },
-  "refresh_config": {
-    "auto_refresh": true,
-    "schedule": "0 */6 * * *"
-  },
-  "position": { "x": 100, "y": 100, "width": 300, "height": 200 },
-  "title": "Sales Data Source"
-}
+<details>
+<summary>📄 Schemas</summary>
+
 ```
-**Ответ**:
-```json
-{
-  "id": "source_123",
-  "type": "source_node",
-  "source_type": "database",
-  "source_config": {...},
-  "refresh_config": {...},
-  "position": { "x": 100, "y": 100, "width": 300, "height": 200 },
-  "created_at": "2026-01-30T10:30:00Z"
-}
+ProjectCreate { name: str (1-200), description: str? }
+ProjectUpdate { name: str? (1-200), description: str? }
+ProjectResponse { id, user_id, name, description?, created_at, updated_at }
+ProjectWithBoardsResponse extends ProjectResponse { boards_count: int }
 ```
 
-### GET /api/v1/boards/{boardId}/source-nodes
-**Описание**: Получить все SourceNode доски.
-
-### GET /api/v1/boards/{boardId}/source-nodes/{nodeId}
-**Описание**: Получить конкретный SourceNode с конфигурацией.
-
-### PATCH /api/v1/boards/{boardId}/source-nodes/{nodeId}
-**Описание**: Обновить SourceNode (позиция, конфигурация источника).
-
-### DELETE /api/v1/boards/{boardId}/source-nodes/{nodeId}
-**Описание**: Удалить SourceNode (каскадное удаление ContentNode, WidgetNode).
-
-### POST /api/v1/boards/{boardId}/source-nodes/{nodeId}/extract
-**Описание**: Извлечь данные из SourceNode → создать ContentNode с EXTRACT edge.
-**Ответ**:
-```json
-{
-  "content_node_id": "content_456",
-  "edge_id": "edge_789",
-  "extraction_metadata": {
-    "rows_extracted": 1000,
-    "tables_count": 1,
-    "extraction_time_ms": 234
-  }
-}
-```
+</details>
 
 ---
 
-### ContentNode Endpoints
+## 4. Boards (`/api/v1/boards`)
 
-### POST /api/v1/boards/{boardId}/content-nodes
-**Статус**: ⏳ FR-14, FR-23
-**Описание**: Создать ContentNode (результат extraction или transformation).
-**Request Body**:
-```json
-{
-  "content": {
-    "text": "Extracted sales data",
-    "tables": [
-      {
-        "name": "sales_by_region",
-        "schema": [
-          {"name": "region", "type": "string"},
-          {"name": "total", "type": "number"}
-        ],
-        "data": [
-          {"region": "North", "total": 450000},
-          {"region": "South", "total": 380000}
-        ]
-      }
-    ]
-  },
-  "content_type": "extracted",
-  "source_node_id": "source_123",
-  "position": { "x": 450, "y": 100, "width": 300, "height": 250 }
-}
+| Method | Path                        | Request Body         | Response                       | Status Code | Описание         |
+| ------ | --------------------------- | -------------------- | ------------------------------ | ----------- | ---------------- |
+| POST   | `/api/v1/boards`            | `BoardCreate`        | `BoardResponse`                | 201         | Создать борд     |
+| GET    | `/api/v1/boards`            | query: `project_id?` | `list[BoardWithNodesResponse]` | 200         | Список бордов    |
+| GET    | `/api/v1/boards/{board_id}` | —                    | `BoardResponse`                | 200         | Получить борд    |
+| PUT    | `/api/v1/boards/{board_id}` | `BoardUpdate`        | `BoardResponse`                | 200         | Обновить         |
+| DELETE | `/api/v1/boards/{board_id}` | —                    | —                              | 204         | Удалить (каскад) |
+
+<details>
+<summary>📄 Schemas</summary>
+
 ```
-**Ответ**:
-```json
-{
-  "id": "content_456",
-  "type": "content_node",
-  "content": {...},
-  "content_type": "extracted",
-  "source_node_id": "source_123",
-  "statistics": {
-    "size_bytes": 15420,
-    "row_count": 2,
-    "table_count": 1
-  },
-  "position": { "x": 450, "y": 100, "width": 300, "height": 250 },
-  "created_at": "2026-01-30T10:30:00Z"
-}
+BoardCreate { name: str (1-200), description: str?, project_id: UUID }
+BoardUpdate { name: str?, description: str? }
+BoardResponse { id, project_id, user_id, name, description?, created_at, updated_at }
+BoardWithNodesResponse extends BoardResponse { widget_nodes_count, comment_nodes_count }
 ```
 
-### GET /api/v1/boards/{boardId}/content-nodes
-**Описание**: Получить все ContentNode доски.
-
-### GET /api/v1/boards/{boardId}/content-nodes/{nodeId}
-**Описание**: Получить конкретный ContentNode с данными и схемой.
-
-### PATCH /api/v1/boards/{boardId}/content-nodes/{nodeId}
-**Описание**: Обновить ContentNode (позиция, данные).
-
-### DELETE /api/v1/boards/{boardId}/content-nodes/{nodeId}
-**Описание**: Удалить ContentNode (каскадное удаление WidgetNode).
-
-### POST /api/v1/content-nodes/{nodeId}/visualize
-**Статус**: ✅ Реализовано (01.02.2026)
-**Описание**: Создать WidgetNode визуализацию из ContentNode с помощью Reporter Agent.
-
-**Workflow**:
-1. Reporter Agent анализирует ContentNode (text + tables)
-2. AI генерирует HTML/CSS/JS код для визуализации
-3. Код валидируется (безопасность, производительность)
-4. Создаётся WidgetNode с VISUALIZATION edge к ContentNode
-
-**Request Body**:
-```json
-{
-  "user_prompt": "create bar chart showing sales by region",
-  "widget_name": "Sales Overview",
-  "auto_refresh": true,
-  "position": { "x": 800, "y": 100 }
-}
-```
-
-**Параметры**:
-- `user_prompt` (optional): Инструкция для визуализации (например, "create bar chart")
-- `widget_name` (optional): Пользовательское имя виджета
-- `auto_refresh` (default: true): Автообновление при изменении ContentNode
-- `position` (optional): Позиция виджета, по умолчанию offset от ContentNode
-
-**Ответ**:
-```json
-{
-  "widget_node_id": "widget_789",
-  "edge_id": "edge_abc",
-  "status": "success",
-  "error": null
-}
-```
-
-**Примеры использования**:
-- `POST /api/v1/content-nodes/{id}/visualize` + `{"user_prompt": "bar chart"}` → Bar chart
-- `POST /api/v1/content-nodes/{id}/visualize` + `{}` → Auto-generated visualization
-- `POST /api/v1/content-nodes/{id}/visualize` + `{"user_prompt": "table with search"}` → Searchable table
-
-### POST /api/v1/content-nodes/{nodeId}/visualize-iterative
-**Статус**: ✅ Реализовано (02.2026)
-**Описание**: Итеративная генерация визуализации через чат. Используется в WidgetDialog для уточнения виджетов.
-
-**Request Body**:
-```json
-{
-  "user_prompt": "добавь легенду к графику",
-  "existing_widget_code": "<!DOCTYPE html>...",
-  "chat_history": [
-    {"role": "user", "content": "создай bar chart"},
-    {"role": "assistant", "content": "Создан bar chart..."}
-  ]
-}
-```
-
-**Параметры**:
-- `user_prompt` (required): Инструкция/уточнение для AI
-- `existing_widget_code` (optional): Текущий HTML код виджета для итерации
-- `chat_history` (optional): История чата для контекста
-
-**Ответ**:
-```json
-{
-  "widget_code": "<!DOCTYPE html>...",
-  "widget_name": "Sales Chart",
-  "description": "Добавлена легенда к графику продаж",
-  "html_code": "",
-  "css_code": "",
-  "js_code": "",
-  "status": "success",
-  "error": null
-}
-```
-
-**Отличия от /visualize**:
-- Не создаёт WidgetNode — только генерирует код
-- Поддерживает итерацию (existing_widget_code)
-- Возвращает `widget_code` (полный HTML) вместо отдельных html/css/js
-- Используется Frontend'ом для preview перед сохранением
+</details>
 
 ---
 
-### DataNode Endpoints (устаревшие, будут заменены)
+## 5. Source Nodes (`/api/v1/source-nodes`)
 
-> **⚠️ Примечание**: DataNode endpoints устарели и будут заменены на SourceNode + ContentNode endpoints. Используйте новые endpoints выше.
+> **⚠️ URL-структура**: Flat URLs без `{boardId}` в пути. `board_id` передаётся в теле запроса при создании.
 
-### POST /api/v1/boards/{boardId}/data-nodes
-**Статус**: ⏳ FR-2
-**Описание**: Создать DataNode (узел с данными).
-**Request Body**:
-```json
-{
-  "data_source_type": "sql_query",
-  "data_source_config": {
-    "query": "SELECT region, SUM(sales) as total FROM sales GROUP BY region",
-    "database": "analytics_db"
-  },
-  "position": { "x": 100, "y": 100, "width": 300, "height": 200 },
-  "title": "Sales by Region"
-}
+| Method | Path                                        | Request Body       | Response                   | Status Code | Описание                          |
+| ------ | ------------------------------------------- | ------------------ | -------------------------- | ----------- | --------------------------------- |
+| GET    | `/api/v1/source-nodes/vitrina`              | —                  | `SourceVitrinaResponse`    | 200         | Каталог типов источников (public) |
+| POST   | `/api/v1/source-nodes/`                     | `SourceNodeCreate` | `SourceNodeResponse`       | 201         | Создать SourceNode                |
+| GET    | `/api/v1/source-nodes/{source_id}`          | —                  | `SourceNodeResponse`       | 200         | Получить SourceNode               |
+| GET    | `/api/v1/source-nodes/board/{board_id}`     | —                  | `list[SourceNodeResponse]` | 200         | Все SourceNode доски              |
+| PUT    | `/api/v1/source-nodes/{source_id}`          | `SourceNodeUpdate` | `SourceNodeResponse`       | 200         | Обновить                          |
+| DELETE | `/api/v1/source-nodes/{source_id}`          | —                  | —                          | 204         | Удалить                           |
+| POST   | `/api/v1/source-nodes/{source_id}/refresh`  | —                  | `SourceNodeResponse`       | 200         | Перезагрузить данные              |
+| POST   | `/api/v1/source-nodes/{source_id}/validate` | —                  | `dict`                     | 200         | Валидировать конфигурацию         |
+
+<details>
+<summary>📄 Schemas</summary>
+
 ```
-**Ответ**:
-```json
-{
-  "id": "datanode_123",
-  "type": "data_node",
-  "data_source_type": "sql_query",
-  "schema": {
-    "columns": [
-      {"name": "region", "type": "string"},
-      {"name": "total", "type": "number"}
-    ],
-    "row_count": 4
-  },
-  "data": [...],
-  "position": { "x": 100, "y": 100, "width": 300, "height": 200 },
-  "created_at": "2026-01-24T10:30:00Z"
+SourceTypeEnum = "csv" | "json" | "excel" | "document" | "api" | "database" | "research" | "manual" | "stream"
+
+SourceNodeCreate {
+    source_type: SourceTypeEnum
+    config: dict              // Source-specific config
+    metadata: dict = {}
+    position: dict = {"x": 0, "y": 0}
+    board_id: UUID
+    created_by: UUID
+    data: dict?               // Initial data
 }
+
+SourceNodeUpdate { config?, metadata?, position?, data? }
+
+SourceNodeResponse {
+    id, board_id, created_by, created_at, updated_at,
+    node_type: "source_node",
+    source_type: SourceTypeEnum,
+    config: dict,
+    content: dict?,           // {text, tables} — inherited from ContentNode
+    lineage: dict?,
+    metadata: dict,
+    position: dict
+}
+
+SourceVitrinaResponse { items: list[SourceVitrinaItem] }
+SourceVitrinaItem { source_type, display_name, icon, description }
 ```
 
-### GET /api/v1/boards/{boardId}/data-nodes
-**Описание**: Получить все DataNode доски.
+</details>
 
-### GET /api/v1/boards/{boardId}/data-nodes/{nodeId}
-**Описание**: Получить конкретный DataNode с данными и схемой.
+### Конфигурации по типам источников
 
-### PATCH /api/v1/boards/{boardId}/data-nodes/{nodeId}
-**Описание**: Обновить DataNode (позиция, конфигурация источника данных).
+<details>
+<summary>📄 Source Config Schemas (развернуть)</summary>
 
-### DELETE /api/v1/boards/{boardId}/data-nodes/{nodeId}
-**Описание**: Удалить DataNode.
+```
+CSVSourceConfig      { file_id, delimiter?, encoding?, has_header=true, skip_rows=0, max_rows? }
+JSONSourceConfig     { file_id, max_rows?, json_path="$", extraction_code? }
+ExcelSourceConfig    { file_id, filename, has_header, analysis_mode="smart", max_rows?, detected_regions: [{sheet_name, start_row, start_col, end_row, end_col, header_row, table_name, column_overrides, selected_columns}] }
+DocumentSourceConfig { file_id, extraction_prompt?, extraction_code? }
+APISourceConfig      { url, method="GET", headers={}, params={}, body?, timeout_seconds=30, pagination? }
+DatabaseSourceConfig { db_type, host?, port?, database?, username?, password?, path?, tables }
+ResearchSourceConfig { initial_prompt, context={} }
+ManualSourceConfig   { columns: [{name, type}], data=[] }
+StreamSourceConfig   { stream_type: "websocket"|"sse"|"kafka", url, buffer_strategy="accumulate" }
+```
 
-### POST /api/v1/boards/{boardId}/data-nodes/{nodeId}/refresh
-**Описание**: Принудительно обновить данные DataNode из источника.
+</details>
 
 ---
 
-### WidgetNode Endpoints
+## 6. Content Nodes (`/api/v1/content-nodes`)
 
-### POST /api/v1/boards/{boardId}/widget-nodes
-**Статус**: ⏳ FR-6
-**Описание**: Создать WidgetNode (визуализация из ContentNode). Reporter Agent генерирует HTML/CSS/JS код.
-**Request Body**:
-```json
-{
-  "parent_content_node_id": "content_123",
-  "user_prompt": "Create bar chart showing sales by region with color-coded bars",
-  "position": { "x": 450, "y": 100, "width": 400, "height": 300 }
-}
+> **⚠️ URL-структура**: Flat URLs без `{boardId}` в пути. `board_id` передаётся в теле запроса при создании.
+
+### CRUD
+
+| Method | Path                                     | Request Body        | Response                    | Status Code | Описание              |
+| ------ | ---------------------------------------- | ------------------- | --------------------------- | ----------- | --------------------- |
+| POST   | `/api/v1/content-nodes/`                 | `ContentNodeCreate` | `ContentNodeResponse`       | 201         | Создать ContentNode   |
+| GET    | `/api/v1/content-nodes/{content_id}`     | —                   | `ContentNodeResponse`       | 200         | Получить ContentNode  |
+| GET    | `/api/v1/content-nodes/board/{board_id}` | —                   | `list[ContentNodeResponse]` | 200         | Все ContentNode доски |
+| PUT    | `/api/v1/content-nodes/{content_id}`     | `ContentNodeUpdate` | `ContentNodeResponse`       | 200         | Обновить              |
+| DELETE | `/api/v1/content-nodes/{content_id}`     | —                   | —                           | 204         | Удалить               |
+
+### Трансформации
+
+| Method | Path                                 | Request Body                                                                            | Response                     | Описание                                                  |
+| ------ | ------------------------------------ | --------------------------------------------------------------------------------------- | ---------------------------- | --------------------------------------------------------- |
+| POST   | `/{content_id}/transform/preview`    | `{prompt, selected_node_ids?}`                                                          | `dict`                       | Генерация кода трансформации (без выполнения)             |
+| POST   | `/{content_id}/transform/test`       | `{code, transformation_id, selected_node_ids?}`                                         | `dict`                       | Тестирование кода, возврат результатов без создания ноды  |
+| POST   | `/{content_id}/transform/iterative`  | `TransformIterativeRequest`                                                             | `TransformIterativeResponse` | Итеративная трансформация через AI-чат                    |
+| POST   | `/{content_id}/transform/execute`    | `{code, transformation_id?, description?, prompt?, selected_node_ids, target_node_id?}` | `dict`                       | Выполнение кода и создание/обновление ContentNode + edge  |
+| POST   | `/{content_id}/transform`            | `{prompt}`                                                                              | `dict`                       | Трансформация через TransformationController (V2)         |
+| POST   | `/content-nodes/transform`           | `TransformRequest`                                                                      | `TransformResponse`          | Трансформация через прямой Python код                     |
+| POST   | `/{content_id}/transform-multiagent` | `{user_prompt, existing_code?, ...}`                                                    | `dict`                       | Трансформация через Orchestrator V2 (TransformCodexAgent) |
+
+### Визуализации
+
+| Method | Path                                 | Request Body                | Response                     | Описание                                                |
+| ------ | ------------------------------------ | --------------------------- | ---------------------------- | ------------------------------------------------------- |
+| POST   | `/{content_id}/visualize`            | `VisualizeRequest`          | `VisualizeResponse`          | Создать WidgetNode из ContentNode (WidgetController V2) |
+| POST   | `/{content_id}/visualize-iterative`  | `VisualizeIterativeRequest` | `VisualizeIterativeResponse` | Итеративная генерация виджета (чат)                     |
+| POST   | `/{content_id}/visualize-multiagent` | `VisualizeIterativeRequest` | `VisualizeIterativeResponse` | Визуализация через Orchestrator V2 (WidgetCodexAgent)   |
+
+### Data Lineage и утилиты
+
+| Method | Path                       | Response                    | Описание                        |
+| ------ | -------------------------- | --------------------------- | ------------------------------- |
+| GET    | `/{content_id}/lineage`    | `list[dict]`                | Полная цепочка data lineage     |
+| GET    | `/{content_id}/downstream` | `list[ContentNodeResponse]` | Downstream ContentNodes         |
+| POST   | `/content-nodes/get-table` | `GetTableResponse`          | Получить таблицу из ContentNode |
+
+### AI-рекомендации
+
+| Method | Path                                          | Request Body                     | Response                     | Описание                         |
+| ------ | --------------------------------------------- | -------------------------------- | ---------------------------- | -------------------------------- |
+| POST   | `/{content_id}/analyze-suggestions`           | `SuggestionAnalysisRequest`      | `SuggestionAnalysisResponse` | AI-рекомендации по виджету       |
+| POST   | `/{content_id}/analyze-transform-suggestions` | `{chat_history?, current_code?}` | `dict`                       | AI-рекомендации по трансформации |
+
+<details>
+<summary>📄 Schemas</summary>
+
 ```
-**Ответ**:
-```json
-{
-  "id": "widget_456",
-  "type": "widget_node",
-  "parent_content_node_id": "content_123",
-  "description": "Bar chart showing sales by region",
-  "html_code": "<div class='chart'>...</div>",
-  "css_code": ".chart { ... }",
-  "js_code": "const chart = ...",
-  "position": { "x": 450, "y": 100, "width": 400, "height": 300 },
-  "created_at": "2026-01-30T10:31:00Z"
-}
+ContentTable { id, name, columns: [{name, type}], rows: [dict], row_count, column_count, preview_row_count }
+ContentData { text: str = "", tables: list[ContentTable] = [] }
+DataLineage { source_node_id?, transformation_id?, operation, parent_content_ids, timestamp, agent? }
+
+ContentNodeCreate { content, lineage, metadata={}, position={"x":0,"y":0}, board_id: UUID }
+ContentNodeUpdate { content?, lineage?, metadata?, position? }
+ContentNodeResponse { id, board_id, created_at, updated_at, node_type, content, lineage, metadata, position }
+
+VisualizeRequest { user_prompt?, widget_name? (max 200), auto_refresh=true, position? }
+VisualizeResponse { widget_node_id: UUID, edge_id: UUID, status, error? }
+
+VisualizeIterativeRequest { user_prompt, existing_widget_code?, chat_history? }
+VisualizeIterativeResponse { widget_code?, widget_name?, description, status, error?, html_code, css_code, js_code }
+
+TransformRequest { source_content_ids: [UUID], transformation_code, output_description? }
+TransformResponse { content_node_id: UUID, status, execution_time_ms?, error? }
+
+SuggestionAnalysisRequest { chat_history=[], current_widget_code?, max_suggestions=5 }
+SuggestionAnalysisResponse { suggestions: [Suggestion], analysis_summary }
+Suggestion { id, type, priority, title, description, prompt, reasoning }
 ```
 
-### GET /api/v1/boards/{boardId}/widget-nodes
-**Описание**: Получить все WidgetNode доски.
-
-### GET /api/v1/boards/{boardId}/widget-nodes/{nodeId}
-**Описание**: Получить конкретный WidgetNode.
-
-### PATCH /api/v1/boards/{boardId}/widget-nodes/{nodeId}
-**Описание**: Обновить WidgetNode (позиция, размер).
-
-### DELETE /api/v1/boards/{boardId}/widget-nodes/{nodeId}
-**Описание**: Удалить WidgetNode.
+</details>
 
 ---
 
-### CommentNode Endpoints
+## 7. Extraction (`/api/v1/boards/{board_id}`)
 
-### POST /api/v1/boards/{boardId}/comment-nodes
-**Статус**: ⏳ FR-2
-**Описание**: Создать CommentNode (комментарий к узлу).
-**Request Body**:
-```json
-{
-  "target_node_id": "datanode_123",
-  "comment_text": "Sales spike in Q4 needs investigation",
-  "author": "user",
-  "position": { "x": 120, "y": 350, "width": 250, "height": 100 }
-}
+| Method | Path                                                              | Request Body        | Response             | Описание                     |
+| ------ | ----------------------------------------------------------------- | ------------------- | -------------------- | ---------------------------- |
+| POST   | `/api/v1/boards/{board_id}/source-nodes/{source_node_id}/extract` | `ExtractionRequest` | `ExtractionResponse` | Извлечь данные из SourceNode |
+
+<details>
+<summary>📄 Schemas</summary>
+
+```
+ExtractionRequest { position: dict = {"x": 0, "y": 0}, preview_rows: int? }
+ExtractionResponse { content_node: dict, extract_edge: dict, summary: {tables_created, total_rows, source_type} }
 ```
 
-### GET /api/v1/boards/{boardId}/comment-nodes
-**Описание**: Получить все комментарии доски.
-
-### PATCH /api/v1/boards/{boardId}/comment-nodes/{nodeId}
-**Описание**: Обновить комментарий.
-
-### DELETE /api/v1/boards/{boardId}/comment-nodes/{nodeId}
-**Описание**: Удалить комментарий.
+</details>
 
 ---
 
-## Edge Management Endpoints
+## 8. Widget Nodes (`/api/v1/boards/{board_id}/widget-nodes`)
 
-**Статус**: ⏳ FR-11  
-**Описание**: Управление связями между узлами (6 типов связей).
+| Method | Path                                          | Request Body       | Response                   | Status Code | Описание                |
+| ------ | --------------------------------------------- | ------------------ | -------------------------- | ----------- | ----------------------- |
+| POST   | `/api/v1/boards/{board_id}/widget-nodes`      | `WidgetNodeCreate` | `WidgetNodeResponse`       | 201         | Создать WidgetNode      |
+| GET    | `/api/v1/boards/{board_id}/widget-nodes`      | —                  | `list[WidgetNodeResponse]` | 200         | Список WidgetNode доски |
+| GET    | `/api/v1/boards/{board_id}/widget-nodes/{id}` | —                  | `WidgetNodeResponse`       | 200         | Получить WidgetNode     |
+| PATCH  | `/api/v1/boards/{board_id}/widget-nodes/{id}` | `WidgetNodeUpdate` | `WidgetNodeResponse`       | 200         | Обновить                |
+| DELETE | `/api/v1/boards/{board_id}/widget-nodes/{id}` | —                  | —                          | 204         | Удалить                 |
 
-### POST /api/v1/boards/{boardId}/edges
-**Описание**: Создать связь между узлами (EXTRACT, TRANSFORMATION, VISUALIZATION, COMMENT, DRILL_DOWN, REFERENCE).
+<details>
+<summary>📄 Schemas</summary>
 
-**Пример 1: EXTRACT edge** (извлечение SourceNode → ContentNode):
-```json
-{
-  "from_node_id": "source_123",
-  "to_node_id": "content_456",
-  "edge_type": "EXTRACT",
-  "label": "Extract sales data",
-  "extraction_metadata": {
-    "rows_extracted": 1000,
-    "extraction_time_ms": 234
-  }
-}
 ```
-**Ответ**:
-```json
-{
-  "id": "edge_789",
-  "from_node_id": "source_123",
-  "to_node_id": "content_456",
-  "edge_type": "EXTRACT",
-  "visual_config": {
-    "color": "#4CAF50",
-    "line_style": "solid",
-    "arrow_type": "forward"
-  },
-  "created_at": "2026-01-30T10:30:00Z"
-}
+WidgetNodeCreate { name (max 200), description, html_code, css_code?, js_code?, config?, auto_refresh=true,
+                   refresh_interval?, generated_by?, generation_prompt?, x=0, y=0, width?, height? }
+WidgetNodeUpdate { name?, description?, html_code?, css_code?, js_code?, config?, x?, y?, width?, height?,
+                   auto_refresh?, refresh_interval? }
+WidgetNodeResponse { id, board_id, node_type, name, description, html_code, css_code, js_code, config,
+                     auto_refresh, refresh_interval, generated_by, generation_prompt,
+                     x, y, width, height, created_at, updated_at }
 ```
 
-**Пример 2: TRANSFORMATION edge** (трансформация ContentNode → ContentNode):
-```json
-{
-  "from_node_id": "content_123",
-  "to_node_id": "content_456",
-  "edge_type": "TRANSFORMATION",
-  "transformation_code": "df_filtered = df[df['sales'] > 1000]",
-  "transformation_prompt": "Filter sales data to show only values above 1000",
-  "label": "Filter high-value sales"
-}
-```
-**Ответ**:
-```json
-{
-  "id": "edge_790",
-  "from_node_id": "content_123",
-  "to_node_id": "content_456",
-  "edge_type": "TRANSFORMATION",
-  "transformation_code": "df_filtered = df[df['sales'] > 1000]",
-  "visual_config": {
-    "color": "#2196F3",
-    "line_style": "solid",
-    "arrow_type": "forward"
-  },
-  "created_at": "2026-01-30T10:30:00Z"
-}
-```
-
-**Пример 3: VISUALIZATION edge** (ContentNode → WidgetNode):
-```json
-{
-  "from_node_id": "content_123",
-  "to_node_id": "widget_456",
-  "edge_type": "VISUALIZATION",
-  "label": "Bar chart visualization",
-  "auto_refresh": true
-}
-```
-
-**Пример 4: COMMENT edge** (CommentNode → любой узел):
-```json
-{
-  "from_node_id": "comment_789",
-  "to_node_id": "content_123",
-  "edge_type": "COMMENT",
-  "label": "User annotation"
-}
-```
-
-### GET /api/v1/boards/{boardId}/edges
-**Описание**: Получить все связи доски.
-**Query params**:
-- `from_widget_id`: Фильтр по источнику
-- `to_widget_id`: Фильтр по целевому виджету
-- `edge_type`: Фильтр по типу связи
-
-### PATCH /api/v1/boards/{boardId}/edges/{edgeId}
-**Описание**: Обновить свойства связи (label, visual_config, parameter_mapping).
-**Request Body**:
-```json
-{
-  "label": "Updated label",
-  "visual_config": {
-    "color": "#FF5722"
-  }
-}
-```
-
-### DELETE /api/v1/boards/{boardId}/edges/{edgeId}
-**Описание**: Удалить связь между узлами.
+</details>
 
 ---
 
-## Transformation Management Endpoints
+## 9. Comment Nodes (`/api/v1/boards/{board_id}/comment-nodes`)
 
-**Статус**: ⏳ FR-5  
-**Описание**: Управление трансформациями данных (Transformation Agent).
+| Method | Path                             | Request Body               | Response                    | Status Code | Описание          |
+| ------ | -------------------------------- | -------------------------- | --------------------------- | ----------- | ----------------- |
+| POST   | `.../comment-nodes`              | `CommentNodeCreate`        | `CommentNodeResponse`       | 201         | Создать           |
+| GET    | `.../comment-nodes`              | —                          | `list[CommentNodeResponse]` | 200         | Список            |
+| GET    | `.../comment-nodes/{id}`         | —                          | `CommentNodeResponse`       | 200         | Получить          |
+| PATCH  | `.../comment-nodes/{id}`         | `CommentNodeUpdate`        | `CommentNodeResponse`       | 200         | Обновить          |
+| DELETE | `.../comment-nodes/{id}`         | —                          | —                           | 204         | Удалить           |
+| POST   | `.../comment-nodes/{id}/resolve` | query: `is_resolved?=true` | `CommentNodeResponse`       | 200         | Resolve/unresolve |
 
-### POST /api/v1/boards/{boardId}/transformations
-**Описание**: Создать трансформацию данных (AI генерирует Python код).
-**Request Body**:
-```json
-{
-  "source_node_ids": ["content_123"],
-  "user_prompt": "Filter sales data to show only high-value transactions above $1000 and group by region",
-  "output_position": { "x": 500, "y": 100 }
-}
+<details>
+<summary>📄 Schemas</summary>
+
 ```
-**Ответ**:
-```json
-{
-  "transformation_id": "trans_789",
-  "source_node_ids": ["content_123"],
-  "target_node_id": "content_456",
-  "transformation_code": "df_filtered = df[df['sales'] > 1000]\ndf_grouped = df_filtered.groupby('region').sum()",
-  "transformation_prompt": "Filter sales data...",
-  "edge_id": "edge_789",
-  "execution_status": "success",
-  "execution_time_ms": 145,
-  "created_at": "2026-01-30T10:30:00Z"
-}
+CommentNodeCreate { content, format_type="markdown", color? (hex), config?, x=0, y=0, width?, height? }
+CommentNodeUpdate { content?, format_type?, color?, config?, x?, y?, width?, height?, is_resolved? }
+CommentNodeResponse { id, board_id, node_type, content, format_type, color, config,
+                      author_id, is_resolved, resolved_at?, resolved_by?,
+                      x, y, width, height, created_at, updated_at }
 ```
 
-### GET /api/v1/boards/{boardId}/transformations
-**Описание**: Получить все трансформации доски.
-
-### GET /api/v1/boards/{boardId}/transformations/{transformationId}
-**Описание**: Получить детали трансформации (код, статистика выполнения).
-
-### POST /api/v1/boards/{boardId}/transformations/{transformationId}/execute
-**Описание**: Принудительно выполнить трансформацию (replay).
-
-### PATCH /api/v1/boards/{boardId}/transformations/{transformationId}
-**Описание**: Обновить код трансформации.
-**Request Body**:
-```json
-{
-  "transformation_code": "df_filtered = df[df['sales'] > 2000]  # Updated threshold"
-}
-```
-
-### DELETE /api/v1/boards/{boardId}/transformations/{transformationId}
-**Описание**: Удалить трансформацию (удаляет target DataNode).
+</details>
 
 ---
 
-## Board Construction Endpoints (for Agents)
+## 10. Edges (`/api/v1/boards/{board_id}/edges`)
 
-**Статус**: ⏳ FR-10  
-**Описание**: Agent-driven построение досок с DataNode/WidgetNode узлами.
+| Method | Path                  | Request Body | Response           | Status Code | Описание              |
+| ------ | --------------------- | ------------ | ------------------ | ----------- | --------------------- |
+| POST   | `.../edges`           | `EdgeCreate` | `EdgeResponse`     | 201         | Создать связь         |
+| GET    | `.../edges`           | —            | `EdgeListResponse` | 200         | Список связей доски   |
+| GET    | `.../edges/{edge_id}` | —            | `EdgeResponse`     | 200         | Получить связь        |
+| PATCH  | `.../edges/{edge_id}` | `EdgeUpdate` | `EdgeResponse`     | 200         | Обновить              |
+| DELETE | `.../edges/{edge_id}` | —            | —                  | 204         | Удалить (soft delete) |
 
-### POST /api/v1/boards/{boardId}/build
-**Описание**: Построить доску с набором узлов и связей (используется Reporter Agent и Transformation Agent).
-**Request Body**:
-```json
-{
-  "data_nodes": [
-    {
-      "data_source_type": "sql_query",
-      "data_source_config": {
-        "query": "SELECT region, SUM(sales) FROM sales GROUP BY region"
-      },
-      "position": { "x": 0, "y": 0, "width": 300, "height": 200 }
-    }
-  ],
-  "transformations": [
-    {
-      "source_node_index": 0,
-      "user_prompt": "Filter to show only top 3 regions by sales",
-      "position": { "x": 350, "y": 0 }
-    }
-  ],
-  "widget_nodes": [
-    {
-      "parent_data_node_index": 1,
-      "user_prompt": "Create bar chart showing top regions",
-      "position": { "x": 700, "y": 0, "width": 400, "height": 300 }
-    }
-  ],
-  "layout_strategy": "flow"
-}
+**Типы связей (EdgeType)**: `TRANSFORMATION`, `VISUALIZATION`, `COMMENT`, `DRILL_DOWN`, `REFERENCE`
+
+<details>
+<summary>📄 Schemas</summary>
+
 ```
-**Ответ**:
-```json
-{
-  "board_id": "board_123",
-  "data_nodes_created": 2,
-  "widget_nodes_created": 1,
-  "edges_created": 2,
-  "created_nodes": {
-    "data_nodes": ["datanode_123", "datanode_456"],
-    "widget_nodes": ["widget_789"]
-  },
-  "created_edges": [
-    { "id": "edge_1", "type": "TRANSFORMATION" },
-    { "id": "edge_2", "type": "VISUALIZATION" }
-  ]
+EdgeCreate {
+    source_node_id: UUID,      // Примечание: в коде используется source_node_id/target_node_id (не from_node_id/to_node_id)
+    source_node_type: str,     // source_node, content_node, widget_node, comment_node
+    target_node_id: UUID,
+    target_node_type: str,
+    edge_type: EdgeType,
+    label?: str (max 200),
+    transformation_code?: str,
+    transformation_params?: dict,
+    visual_config?: dict
 }
+
+EdgeUpdate { label?, transformation_code?, transformation_params?, visual_config?, parameter_mapping? }
+
+EdgeResponse extends EdgeCreate { id, board_id, created_at, updated_at, is_valid, validation_errors? }
+EdgeListResponse { edges: [EdgeResponse], total: int }
 ```
 
-### GET /api/v1/boards/{boardId}/state
-**Описание**: Получить полное состояние доски (все узлы и связи).
-**Ответ**:
-```json
-{
-  "board_id": "board_123",
-  "title": "Sales Dashboard",
-  "nodes": {
-    "data_nodes": [...],
-    "widget_nodes": [...],
-    "comment_nodes": [...]
-  },
-  "edges": [...],
-  "layout_info": {...},
-  "last_modified": "2026-01-24T10:45:00Z",
-  "modified_by": "agent_reporter"
-}
-```
-
-### POST /api/v1/boards/{boardId}/layout
-**Описание**: Переорганизовать лэйаут доски.
-**Request Body**:
-```json
-{
-  "strategy": "grid",  # flow, grid, hierarchy, freeform
-  "options": {
-    "columns": 3,
-    "spacing": 20,
-    "auto_arrange": true
-  }
-}
-```
-
-### POST /api/v1/boards/{boardId}/share
-**Описание**: Поделиться доской с другими пользователями.
-**Request Body**:
-```json
-{
-  "user_emails": ["user@example.com"],
-  "permission": "view"  # view, edit, admin
-}
-```
-
-### GET /api/v1/boards/{boardId}/history
-**Описание**: Получить историю изменений доски.
-**Query params**:
-- `limit`: Количество записей (default: 50)
-- `offset`: Смещение
-
-**Ответ**:
-```json
-{
-  "changes": [
-    {
-      "version": 5,
-      "timestamp": "2026-01-23T10:45:00Z",
-      "change_type": "widget_added",
-      "change_data": { "widget_id": "w5", "type": "chart" },
-      "changed_by": "agent_reporter"
-    }
-  ],
-  "total_changes": 23,
-  "current_version": 23
-}
-```
-
-### POST /api/v1/boards/{boardId}/revert/{version}
-**Описание**: Восстановить доску в определённую версию.
+</details>
 
 ---
 
-## AI Assistant Endpoints
+## 11. AI Assistant (`/api/v1/boards/{board_id}/ai`)
 
-**Статус**: ⏳ FR-6, FR-4  
-**Описание**: AI Assistant Panel для диалога с пользователем в контексте доски + AI Resolver для семантических трансформаций.
+| Method | Path                               | Request Body                     | Response              | Описание                    |
+| ------ | ---------------------------------- | -------------------------------- | --------------------- | --------------------------- |
+| POST   | `.../ai/chat`                      | `AIChatRequest`                  | `AIChatResponse`      | Отправить сообщение AI      |
+| GET    | `.../ai/chat/history/me`           | query: `limit?=50`               | `ChatHistoryResponse` | История чата текущего юзера |
+| GET    | `.../ai/chat/history`              | query: `session_id`, `limit?=50` | `ChatHistoryResponse` | История по сессии           |
+| DELETE | `.../ai/chat/session/{session_id}` | —                                | `{message}`           | Удалить сессию чата         |
 
-### POST /api/v1/ai/query
-**Описание**: Запрос к GigaChat для генерации/рекомендации виджета.
-**Request Body**:
-```json
-{ "board_id": "uuid", "query": "Построй сравнение продаж по регионам" }
+<details>
+<summary>📄 Schemas</summary>
+
 ```
-**Ответ (пример)**:
-```json
-{
-  "suggested_widget": {
-    "type": "chart",
-    "spec": { "kind": "bar", "x": "region", "y": "sales" },
-    "data_source": "demo"
-  },
-  "message": "Предлагаю столбчатую диаграмму по регионам"
-}
+AIChatRequest { message: str (1-10000), session_id?: UUID, context?: dict }
+AIChatResponse { response: str, session_id: UUID, suggested_actions?: [SuggestedAction], context_used?: dict }
+SuggestedAction { action, description, params? }
+ChatHistoryResponse { messages: [ChatMessageSchema], session_id?, total_messages: int }
 ```
 
-### POST /api/v1/ai/resolve
-**Статус**: ✅ РЕАЛИЗОВАНО (31.01.2026)  
-**Описание**: Batch AI resolution для семантических задач. Используется **внутри** сгенерированного кода трансформаций через модуль `gb`. Endpoint существует, но основное применение — через `gb.ai_resolve_batch()` (прямой вызов ResolverAgent без HTTP).
+</details>
 
-**Request Body**:
-```json
-{
-  "values": ["Алексей", "Мария", "Иван"],
-  "task_description": "определи пол человека по имени, верни M или F",
-  "result_format": "string",
-  "chunk_size": 50
-}
-```
+---
 
-**Response**:
-```json
-{
-  "status": "success",
-  "results": ["M", "F", "M"],
-  "metadata": {
-    "total_values": 3,
-    "chunks_processed": 1,
-    "processing_time_ms": 2150
-  }
-}
-```
+## 12. AI Resolver (`/ai`)
 
-**Error Response**:
-```json
-{
-  "status": "error",
-  "error": "Failed to get response from GigaChat: timeout",
-  "results": [null, null, null]
-}
-```
+> **⚠️ Prefix**: `/ai` без `/api/v1` — endpoint вне версионированного API.
 
-**Примеры задач:**
-- Определение пола по имени: `"определи пол: M или F"`
-- Sentiment analysis: `"классифицируй отзыв: positive/negative/neutral"`
-- Категоризация: `"определи категорию продукта: electronics/clothing/food/home/other"`
-- Извлечение данных: `"извлеки email адрес из текста"`
-- Перевод: `"переведи с русского на английский"`
+| Method | Path          | Request Body | Response | Описание                                    |
+| ------ | ------------- | ------------ | -------- | ------------------------------------------- |
+| POST   | `/ai/resolve` | `dict`       | `dict`   | Batch AI resolution для семантических задач |
 
-**⚠️ Основное применение — через gb module:**
+**Request**: `{ values: [str], task_description: str, result_format?: str, chunk_size?: int }`
+
+**Response**: `{ results: [...], count: int, task_description: str }`
+
+**Основное применение** — через `gb.ai_resolve_batch()` в коде трансформаций:
 ```python
-# В сгенерированном коде трансформации
 names = df['name'].tolist()
-genders = gb.ai_resolve_batch(
-    names,
-    "определи пол человека по имени: M или F"
-)
+genders = gb.ai_resolve_batch(names, "определи пол: M или F")
 df['gender'] = genders
 ```
 
-См. полную документацию: [AI_RESOLVER_SYSTEM.md](./AI_RESOLVER_SYSTEM.md)
+См. [AI_RESOLVER_SYSTEM.md](./AI_RESOLVER_SYSTEM.md)
 
-### POST /api/v1/boards/{boardId}/ai/chat
-**Описание**: Отправить сообщение в AI Assistant Panel. Ассистент анализирует контекст доски (текущие виджеты, данные) и возвращает ответ с опциональными рекомендациями.
-**Request Body**:
-```json
-{
-  "message": "Какой регион показал максимальный рост?",
-  "session_id": "uuid" (optional, для истории в рамках сессии)
-}
+---
+
+## 13. Files (`/api/v1/files`)
+
+| Method | Path                                       | Request Body        | Response                                      | Описание                  |
+| ------ | ------------------------------------------ | ------------------- | --------------------------------------------- | ------------------------- |
+| POST   | `/api/v1/files/upload`                      | multipart/form-data | `{file_id, filename, mime_type, size_bytes}`  | Загрузить файл            |
+| GET    | `/api/v1/files/download/{file_id}`         | —                   | File/Redirect                                 | Скачать файл              |
+| GET    | `/api/v1/files/image/{file_id}`             | —                   | Image (public)                                | Публичное изображение     |
+| POST   | `/api/v1/files/{file_id}/analyze-csv`      | —                   | `CSVAnalysisResult`                           | Анализ структуры CSV      |
+| POST   | `/api/v1/files/{file_id}/analyze-excel`    | —                   | `ExcelAnalysisResult`                         | Анализ Excel              |
+| POST   | `/api/v1/files/{file_id}/excel-preview`    | —                   | `ExcelPreviewResponse`                        | Превью листов Excel       |
+| POST   | `/api/v1/files/{file_id}/analyze-excel-smart` | —                 | `SmartExcelAnalysisResult`                    | Умный анализ областей     |
+| POST   | `/api/v1/files/{file_id}/analyze-document` | —                   | `DocumentAnalysisResult`                      | Анализ документа          |
+| POST   | `/api/v1/files/{file_id}/extract-document-chat` | body             | `DocumentExtractionChatResponse`              | Итеративное извлечение    |
+
+<details>
+<summary>📄 CSVAnalysisResult</summary>
+
 ```
-**Ответ (пример)**:
-```json
-{
-  "response": "Регион Западный показал рост на 35% квартал к кварталу. Я вижу на вашей доске график продаж...",
-  "suggested_actions": [
-    {
-      "action": "create_widget",
-      "widget_spec": {
-        "type": "chart",
-        "title": "Рост по регионам",
-        "spec": { "kind": "line", "x": "date", "y": "growth_rate" }
-      },
-      "description": "Построить линейный график роста по регионам?"
-    }
-  ],
-  "session_id": "uuid"
-}
+CSVAnalysisResult { delimiter, encoding, has_header, rows_count, columns: [{name, type, sample_values}], preview_rows }
 ```
 
-### GET /api/v1/boards/{boardId}/ai/chat/history
-**Описание**: Получить историю диалога в текущей сессии.
-**Параметры**: `session_id` (optional)
-**Ответ**:
-```json
-{
-  "messages": [
-    { "role": "user", "content": "...", "timestamp": "..." },
-    { "role": "assistant", "content": "...", "timestamp": "..." }
-  ]
-}
+</details>
+
+---
+
+## 14. Database (`/api/v1/database`)
+
+| Method | Path                               | Request Body                | Response                     | Описание              |
+| ------ | ---------------------------------- | --------------------------- | ---------------------------- | --------------------- |
+| POST   | `/api/v1/database/test-connection` | `DatabaseConnectionRequest` | `DatabaseConnectionResponse` | Тест подключения к БД |
+| POST   | `/api/v1/database/preview`          | —                           | `TablePreviewResponse`       | Превью таблицы БД     |
+| POST   | `/api/v1/database/table-columns`   | —                           | —                            | Список колонок таблицы|
+
+<details>
+<summary>📄 Schemas</summary>
+
 ```
+DatabaseConnectionRequest { database_type: str, host?, port?, database?, user?, password?, uri?, path? }
+DatabaseConnectionResponse { success: bool, database_type, tables: [str], table_count: int }
+```
+
+</details>
+
+---
+
+## 15. Dimensions (`/api/v1/projects/{project_id}/dimensions`)
+
+Измерения для Cross-Filter. См. [CROSS_FILTER_SYSTEM.md](./CROSS_FILTER_SYSTEM.md).
+
+| Method | Path                                                                 | Request Body   | Response                           | Описание                |
+| ------ | -------------------------------------------------------------------- | -------------- | ---------------------------------- | ----------------------- |
+| GET    | `/api/v1/projects/{project_id}/dimensions`                           | —              | `list[DimensionResponse]`          | Список измерений        |
+| POST   | `/api/v1/projects/{project_id}/dimensions`                           | `DimensionCreate` | `DimensionResponse`             | Создать измерение       |
+| GET    | `/api/v1/projects/{project_id}/dimensions/{dim_id}`                  | —              | `DimensionResponse`                | Получить измерение      |
+| PUT    | `/api/v1/projects/{project_id}/dimensions/{dim_id}`                  | `DimensionUpdate` | `DimensionResponse`             | Обновить                |
+| DELETE | `/api/v1/projects/{project_id}/dimensions/{dim_id}`                  | —              | 204                                | Удалить                 |
+| POST   | `/api/v1/projects/{project_id}/dimensions/merge`                     | body           | `MergeDimensionsResponse`          | Объединить измерения    |
+| GET    | `/api/v1/projects/{project_id}/dimensions/{dim_id}/mappings`         | —              | `list[DimensionColumnMappingResponse]` | Маппинги столбцов  |
+| POST   | `/api/v1/projects/{project_id}/dimensions/{dim_id}/mappings`         | body           | `DimensionColumnMappingResponse`   | Добавить маппинг        |
+| DELETE | `/api/v1/projects/{project_id}/dimensions/mappings/{mapping_id}`     | —              | 204                                | Удалить маппинг         |
+| GET    | `/api/v1/projects/{project_id}/dimensions/{dim_id}/values`            | —              | —                                  | Уникальные значения     |
+
+---
+
+## 16. Board Filters (`/api/v1/boards/{board_id}/filters`)
+
+Активные фильтры доски (Cross-Filter). Хранение in-memory по умолчанию (для production — Redis).
+
+| Method | Path                                                           | Request Body        | Response                 | Описание              |
+| ------ | -------------------------------------------------------------- | ------------------- | ------------------------ | --------------------- |
+| GET    | `/api/v1/boards/{board_id}/filters`                            | —                   | `ActiveFiltersResponse`  | Текущие активные      |
+| PUT    | `/api/v1/boards/{board_id}/filters`                            | `ActiveFiltersUpdate` | `ActiveFiltersResponse` | Установить фильтры    |
+| POST   | `/api/v1/boards/{board_id}/filters/clear`                      | —                   | `ActiveFiltersResponse`  | Сбросить              |
+| POST   | `/api/v1/boards/{board_id}/filters/apply-preset/{preset_id}`   | —                   | `ActiveFiltersResponse`  | Применить пресет      |
+| POST   | `/api/v1/boards/{board_id}/filters/compute-filtered`            | body (node_ids, filters) | `{nodes: [...]}`   | Пересчёт pipeline с фильтром |
+
+---
+
+## 17. Dashboard Filters (`/api/v1/dashboards/{dashboard_id}/filters`)
+
+Активные фильтры дашборда. Контракт аналогичен Board Filters.
+
+| Method | Path                                                                 | Request Body        | Response                 | Описание              |
+| ------ | -------------------------------------------------------------------- | ------------------- | ------------------------ | --------------------- |
+| GET    | `/api/v1/dashboards/{dashboard_id}/filters`                         | —                   | `ActiveFiltersResponse`  | Текущие активные      |
+| PUT    | `/api/v1/dashboards/{dashboard_id}/filters`                         | `ActiveFiltersUpdate` | `ActiveFiltersResponse` | Установить фильтры    |
+| POST   | `/api/v1/dashboards/{dashboard_id}/filters/clear`                   | —                   | `ActiveFiltersResponse`  | Сбросить              |
+| POST   | `/api/v1/dashboards/{dashboard_id}/filters/apply-preset/{preset_id}` | —                   | `ActiveFiltersResponse`  | Применить пресет      |
+| POST   | `/api/v1/dashboards/{dashboard_id}/filters/compute-filtered`         | body                | `{nodes: [...]}`         | Пересчёт с фильтром   |
+
+---
+
+## 18. Filter Presets (`/api/v1/projects/{project_id}/filter-presets`)
+
+Сохранённые наборы фильтров (проектный скоуп).
+
+| Method | Path                                                                   | Request Body          | Response                | Описание        |
+| ------ | ---------------------------------------------------------------------- | --------------------- | ----------------------- | --------------- |
+| GET    | `/api/v1/projects/{project_id}/filter-presets`                         | query: scope?, target_id? | `list[FilterPresetResponse]` | Список пресетов |
+| POST   | `/api/v1/projects/{project_id}/filter-presets`                         | `FilterPresetCreate`  | `FilterPresetResponse`  | Создать         |
+| GET    | `/api/v1/projects/{project_id}/filter-presets/{preset_id}`             | —                     | `FilterPresetResponse`  | Получить        |
+| PUT    | `/api/v1/projects/{project_id}/filter-presets/{preset_id}`             | `FilterPresetUpdate`  | `FilterPresetResponse`  | Обновить        |
+| DELETE | `/api/v1/projects/{project_id}/filter-presets/{preset_id}`             | —                     | 204                      | Удалить         |
+
+---
+
+## 19. Dashboards (`/api/v1/dashboards`)
+
+Дашборды — презентационный слой. См. [DASHBOARD_SYSTEM.md](./DASHBOARD_SYSTEM.md).
+
+| Method | Path                                           | Request Body           | Response                    | Описание           |
+| ------ | ---------------------------------------------- | ---------------------- | --------------------------- | ------------------ |
+| POST   | `/api/v1/dashboards`                           | `DashboardCreate`      | `DashboardResponse`         | Создать дашборд    |
+| GET    | `/api/v1/dashboards`                           | query: project_id?     | `list[DashboardResponse]`   | Список дашбордов   |
+| GET    | `/api/v1/dashboards/{dashboard_id}`             | —                      | `DashboardResponse`         | Получить           |
+| PUT    | `/api/v1/dashboards/{dashboard_id}`            | `DashboardUpdate`      | `DashboardResponse`         | Обновить           |
+| DELETE | `/api/v1/dashboards/{dashboard_id}`            | —                      | 204                         | Удалить            |
+| POST   | `/api/v1/dashboards/{dashboard_id}/items`      | `DashboardItemCreate`  | `DashboardItemResponse`    | Добавить элемент   |
+| PUT    | `/api/v1/dashboards/{dashboard_id}/items/{item_id}` | `DashboardItemUpdate` | `DashboardItemResponse`    | Обновить элемент   |
+| DELETE | `/api/v1/dashboards/{dashboard_id}/items/{item_id}` | —                  | 204                         | Удалить элемент   |
+| PUT    | `/api/v1/dashboards/{dashboard_id}/items/reorder` | body                | —                           | Z-order элементов  |
+| POST   | `/api/v1/dashboards/{dashboard_id}/clone`      | —                      | `DashboardResponse`         | Клонировать        |
+| GET    | `/api/v1/dashboards/{dashboard_id}/thumbnail`  | —                      | —                           | Thumbnail URL      |
+| DELETE | `/api/v1/dashboards/{dashboard_id}/thumbnail`  | —                      | —                           | Удалить thumbnail  |
+
+---
+
+## 20. Library (`/api/v1/projects/{project_id}/library`)
+
+Библиотека виджетов и таблиц проекта (для размещения на дашбордах).
+
+| Method | Path                                                                         | Request Body    | Response                      | Описание            |
+| ------ | ---------------------------------------------------------------------------- | --------------- | ----------------------------- | ------------------- |
+| POST   | `/api/v1/projects/{project_id}/library/widgets`                              | body            | `ProjectWidgetResponse`       | Сохранить виджет    |
+| GET    | `/api/v1/projects/{project_id}/library/widgets`                              | —               | `list[ProjectWidgetResponse]` | Список виджетов     |
+| GET    | `/api/v1/projects/{project_id}/library/widgets/{widget_id}`                   | —               | `ProjectWidgetResponse`       | Получить виджет     |
+| PUT    | `/api/v1/projects/{project_id}/library/widgets/{widget_id}`                   | body            | `ProjectWidgetResponse`       | Обновить            |
+| DELETE | `/api/v1/projects/{project_id}/library/widgets/{widget_id}`                  | —               | 204                           | Удалить             |
+| POST   | `/api/v1/projects/{project_id}/library/tables`                               | body            | `ProjectTableResponse`        | Сохранить таблицу   |
+| GET    | `/api/v1/projects/{project_id}/library/tables`                               | —               | `list[ProjectTableResponse]`  | Список таблиц       |
+| GET    | `/api/v1/projects/{project_id}/library/tables/{table_id}`                     | —               | `ProjectTableResponse`        | Получить таблицу    |
+| PUT    | `/api/v1/projects/{project_id}/library/tables/{table_id}`                    | body            | `ProjectTableResponse`        | Обновить            |
+| DELETE | `/api/v1/projects/{project_id}/library/tables/{table_id}`                    | —               | 204                           | Удалить             |
+
+---
+
+## 21. Public (`/api/v1/public`)
+
+Публичный доступ без авторизации (шаринг дашбордов).
+
+| Method | Path                               | Query/Request   | Response                    | Описание              |
+| ------ | ---------------------------------- | --------------- | --------------------------- | --------------------- |
+| GET    | `/api/v1/public/dashboards/{token}` | password?       | `PublicDashboardResponse`   | Просмотр дашборда по токену |
+
+---
+
+## 22. Content Nodes — Dimension mappings
+
+Эндпоинты для Cross-Filter (маппинг столбцов к измерениям):
+
+| Method | Path                                                       | Описание                        |
+| ------ | ---------------------------------------------------------- | ------------------------------- |
+| GET    | `/api/v1/content-nodes/{content_id}/dimension-mappings`    | Маппинги столбцов ноды на измерения |
+| POST   | `/api/v1/content-nodes/{content_id}/detect-dimensions`     | Авто-определение и создание маппингов |
+
+---
 
 ## Real-time (Socket.IO) события
 
@@ -879,452 +595,58 @@ const socket = io('http://localhost:8000', {
 });
 ```
 
-### События доски (Board Events)
+### События доски
 
-#### `join_board` (Client → Server)
-Подключиться к комнате доски для получения обновлений.
-```json
-{
-  "board_id": "board_uuid"
-}
-```
+| Event         | Направление     | Описание                     |
+| ------------- | --------------- | ---------------------------- |
+| `join_board`  | Client → Server | Подключиться к комнате доски |
+| `leave_board` | Client → Server | Покинуть комнату             |
 
-#### `leave_board` (Client → Server)
-Покинуть комнату доски.
-```json
-{
-  "board_id": "board_uuid"
-}
-```
+### События узлов
 
-### События узлов (Node Events)
+| Event                                  | Направление    | Описание             |
+| -------------------------------------- | -------------- | -------------------- |
+| `source_node_created/updated/deleted`  | Bi-directional | CRUD для SourceNode  |
+| `content_node_created/updated/deleted` | Bi-directional | CRUD для ContentNode |
+| `widget_node_created/updated/deleted`  | Bi-directional | CRUD для WidgetNode  |
+| `comment_node_created`                 | Bi-directional | Создание комментария |
 
-#### `source_node_created` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "node": {
-    "id": "source_uuid",
-    "type": "source_node",
-    "source_type": "database",
-    "source_config": {...},
-    "position": { "x": 100, "y": 200, "width": 300, "height": 200 },
-    "created_by": "user_uuid",
-    "created_at": "2026-01-30T10:30:00Z"
-  }
-}
-```
+### События связей
 
-#### `source_node_updated` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "node_id": "source_uuid",
-  "changes": {
-    "position": { "x": 150, "y": 250 },
-    "source_config": {...}
-  },
-  "updated_by": "user_uuid"
-}
-```
+| Event          | Направление    | Описание       |
+| -------------- | -------------- | -------------- |
+| `edge_created` | Bi-directional | Создание связи |
+| `edge_deleted` | Bi-directional | Удаление связи |
 
-#### `source_node_deleted` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "node_id": "source_uuid",
-  "deleted_by": "user_uuid"
-}
-```
+### События трансформаций
 
-#### `content_node_created` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "node": {
-    "id": "content_uuid",
-    "type": "content_node",
-    "content_type": "extracted",
-    "source_node_id": "source_uuid",
-    "position": { "x": 450, "y": 200, "width": 300, "height": 250 },
-    "created_by": "agent_transformation",
-    "created_at": "2026-01-30T10:30:00Z"
-  }
-}
-```
+| Event                      | Направление     | Описание            |
+| -------------------------- | --------------- | ------------------- |
+| `transformation_started`   | Server → Client | Начало выполнения   |
+| `transformation_completed` | Server → Client | Успешное завершение |
+| `transformation_failed`    | Server → Client | Ошибка выполнения   |
 
-#### `content_node_updated` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "node_id": "content_uuid",
-  "changes": {
-    "position": { "x": 500, "y": 250 },
-    "content": {...}
-  },
-  "updated_by": "user_uuid"
-}
-```
+### AI Agent события
 
-#### `content_node_deleted` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "node_id": "content_uuid",
-  "deleted_by": "user_uuid"
-}
-```
-
-#### `widget_node_created` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "node": {
-    "id": "widget_uuid",
-    "type": "widget_node",
-    "parent_content_node_id": "content_uuid",
-    "description": "Bar chart showing sales",
-    "position": { "x": 450, "y": 100, "width": 400, "height": 300 },
-    "created_by": "agent_reporter",
-    "created_at": "2026-01-30T10:31:00Z"
-  }
-}
-```
-
-#### `widget_node_updated` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "node_id": "widget_uuid",
-  "changes": {
-    "position": { "x": 500, "y": 150 }
-  },
-  "updated_by": "user_uuid"
-}
-```
-
-#### `widget_node_deleted` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "node_id": "widget_uuid",
-  "deleted_by": "user_uuid"
-}
-```
-
-#### `comment_node_created` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "node": {
-    "id": "comment_uuid",
-    "type": "comment_node",
-    "target_node_id": "content_uuid",
-    "comment_text": "Q4 spike needs investigation",
-    "author": "user",
-    "created_by": "user_uuid",
-    "created_at": "2026-01-30T10:32:00Z"
-  }
-}
-```
-
-### События связей (Edge Events)
-
-#### `edge_created` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "edge": {
-    "id": "edge_uuid",
-    "from_node_id": "content_1",
-    "to_node_id": "content_2",
-    "edge_type": "TRANSFORMATION",
-    "label": "Filter high-value sales",
-    "transformation_code": "df_filtered = df[df['sales'] > 1000]",
-    "created_by": "agent_transformation"
-  }
-}
-```
-
-#### `edge_deleted` (Server → Client | Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "edge_id": "edge_uuid",
-  "deleted_by": "user_uuid"
-}
-```
-
-### События трансформаций (Transformation Events)
-
-#### `transformation_started` (Server → Client)
-```json
-{
-  "board_id": "board_uuid",
-  "transformation_id": "trans_uuid",
-  "source_node_ids": ["content_123"],
-  "status": "executing",
-  "started_at": "2026-01-30T10:30:00Z"
-}
-```
-
-#### `transformation_completed` (Server → Client)
-```json
-{
-  "board_id": "board_uuid",
-  "transformation_id": "trans_uuid",
-  "target_node_id": "content_456",
-  "status": "success",
-  "execution_time_ms": 145,
-  "rows_processed": 1250,
-  "completed_at": "2026-01-30T10:30:01Z"
-}
-```
-
-#### `transformation_failed` (Server → Client)
-```json
-{
-  "board_id": "board_uuid",
-  "transformation_id": "trans_uuid",
-  "status": "failed",
-  "error": {
-    "type": "SyntaxError",
-    "message": "Invalid Python syntax",
-    "line": 3
-  },
-  "failed_at": "2026-01-24T10:30:00Z"
-}
-```
-
-### AI Agent События
-
-#### `agent_thinking` (Server → Client)
-Агент начал обработку запроса.
-```json
-{
-  "board_id": "board_uuid",
-  "agent": "planner",
-  "message": "Breaking down request into subtasks...",
-  "timestamp": "2026-01-24T10:30:00Z"
-}
-```
-
-#### `tool_generated` (Server → Client)
-Developer Agent создал новый инструмент.
-```json
-{
-  "board_id": "board_uuid",
-  "agent": "developer",
-  "tool_name": "fetch_competitor_prices",
-  "language": "python",
-  "status": "generated"
-}
-```
-
-#### `tool_executed` (Server → Client)
-Инструмент был выполнен.
-```json
-{
-  "board_id": "board_uuid",
-  "agent": "executor",
-  "tool_name": "fetch_competitor_prices",
-  "status": "success",
-  "execution_time_ms": 2340,
-  "result_summary": "Retrieved 150 product prices"
-}
-```
-
-### Presence Events (опционально)
-
-#### `cursor_moved` (Client → Server)
-```json
-{
-  "board_id": "board_uuid",
-  "user_id": "user_uuid",
-  "position": { "x": 450, "y": 320 },
-  "username": "John Doe"
-}
-```
-
-#### `user_joined` (Server → Client)
-```json
-{
-  "board_id": "board_uuid",
-  "user": {
-    "id": "user_uuid",
-    "username": "John Doe",
-    "joined_at": "2026-01-24T10:30:00Z"
-  }
-}
-```
-
-#### `user_left` (Server → Client)
-```json
-{
-  "board_id": "board_uuid",
-  "user_id": "user_uuid"
-}
-```
-
-**Примечание**: Все события транслируются внутри комнаты `boardId`. При горизонтальном масштабировании сервер использует Redis pub/sub для синхронизации между инстансами.
-
----
-
-## Multi-Agent API Endpoints (FR-7, FR-8)
-
-**Статус**: ⏳ FR-7, FR-8  
-**Описание**: Управление мульти-агентной системой.
-
-### POST /api/v1/agents
-**Описание**: Зарегистрировать новый агент или инициализировать встроенные агенты.
-**Request Body**:
-```json
-{
-  "name": "researcher",
-  "type": "built-in",
-  "system_prompt": "You are a researcher agent...",
-  "capabilities": ["fetch_data", "query_db", "web_scrape"]
-}
-```
-**Response**: Идентификатор агента
-
-### GET /api/v1/agents
-**Описание**: Список всех доступных агентов.
-
-### GET /api/v1/agents/{agentId}
-**Описание**: Информация об агенте, его конфигурация и метрики.
-
-### PATCH /api/v1/agents/{agentId}/config
-**Описание**: Обновить конфигурацию агента (system prompt, capabilities).
-
----
-
-## Tool Management Endpoints (FR-8)
-
-**Статус**: ⏳ FR-8  
-**Описание**: Динамическое создание и управление инструментами.
-
-### GET /api/v1/tools
-**Описание**: Список всех доступных инструментов (встроенные + пользовательские).
-**Query params**: 
-- `category`: "api_call", "db_query", "web_scrape", etc.
-- `sort_by`: "usage_count", "quality_score", "created_at"
-
-### GET /api/v1/tools/{toolId}
-**Описание**: Информация об инструменте (код, параметры, версия, метрики).
-
-### POST /api/v1/tools/{toolId}/test
-**Описание**: Тестировать инструмент с test data в sandbox.
-**Request Body**:
-```json
-{
-  "params": { "url": "https://example.com", "selector": ".price" },
-  "test_data": {...}
-}
-```
-**Response**: Результат выполнения, логи, время выполнения.
-
-### DELETE /api/v1/tools/{toolId}
-**Описание**: Удалить инструмент (версионирование).
-
-### GET /api/v1/tools/{toolId}/history
-**Описание**: История использования инструмента (метрики, ошибки).
-
----
-
-## Agent Execution Endpoints
-
-### POST /api/v1/boards/{boardId}/agents/execute
-**Описание**: Запустить multi-agent workflow для выполнения задачи.
-**Request Body**:
-```json
-{
-  "request": "Analyze sales by region and identify trends",
-  "agents": ["planner", "researcher", "analyst", "reporter"],
-  "board_context": true,
-  "timeout": 300
-}
-```
-**Response**:
-```json
-{
-  "execution_id": "exec_123",
-  "status": "executing",
-  "agents_involved": ["planner", "researcher", "analyst", "reporter"],
-  "estimated_completion": "2026-01-23T10:15:30Z",
-  "websocket_url": "wss://api.gigaboard.io/ws/agents/exec_123"
-}
-```
-
-### GET /api/v1/boards/{boardId}/agents/executions/{executionId}
-**Описание**: Получить статус и результаты выполнения.
-**Response**:
-```json
-{
-  "execution_id": "exec_123",
-  "status": "completed",
-  "created_by_agent": "planner",
-  "tools_created": [
-    {
-      "name": "fetch_competitor_prices",
-      "version": "1.0",
-      "language": "python",
-      "execution_count": 2
-    }
-  ],
-  "results": {
-    "summary": "Analysis complete. Found 3 high-value segments.",
-    "data": {...},
-    "widgets_created": ["widget_123", "widget_456"]
-  },
-  "start_time": "2026-01-23T10:10:00Z",
-  "end_time": "2026-01-23T10:15:30Z",
-  "execution_time_ms": 330000
-}
-```
-
-### WebSocket: /ws/agents/{boardId}/{sessionId}
-**Описание**: Real-time agent communication stream.
-**Messages sent**:
-- `agent_thinking`: Агент начал задачу
-- `tool_generation`: Код инструмента генерируется
-- `tool_testing`: Инструмент тестируется в sandbox
-- `tool_execution`: Инструмент выполняется
-- `analysis_update`: Новые результаты анализа
-- `progress_update`: Общий прогресс
-- `completion`: Задача завершена с результатом
-
-**Example message**:
-```json
-{
-  "type": "agent_thinking",
-  "agent": "planner",
-  "message": "Breaking down request into 4 subtasks...",
-  "timestamp": "2026-01-23T10:10:15Z"
-}
-```
-
-```json
-{
-  "type": "tool_execution",
-  "agent": "executor",
-  "tool_name": "fetch_competitor_prices",
-  "status": "success",
-  "result_summary": "Retrieved 150 product prices from CompetitorA",
-  "execution_time_ms": 2340
-}
-```
+| Event            | Направление     | Описание                          |
+| ---------------- | --------------- | --------------------------------- |
+| `agent_thinking` | Server → Client | Агент начал обработку             |
+| `tool_generated` | Server → Client | Developer Agent создал инструмент |
+| `tool_executed`  | Server → Client | Инструмент выполнен               |
 
 ---
 
 ## Обработка ошибок
-- JSON: `{ "error": { "code": "string", "message": "...", "details": {} } }`
-- Коды: 400/401/403/404/409/429/500
-- Идемпотентность: клиент может повторно слать события с `request_id`; сервер обязан не дублировать операции.
+
+- JSON: `{ "detail": "error message" }` или `{ "error": { "code": "string", "message": "..." } }`
+- Коды: 400 / 401 / 403 / 404 / 409 / 429 / 500
+- Идемпотентность: клиент может повторно слать события с `request_id`
 
 ---
 
-**Версия API**: 1.0 (обновлено для Source-Content архитектуры)  
-**Последнее обновление**: 2026-01-30  
-**Статус**: 🚧 Активная разработка — endpoints реализуются поэтапно  
-**Архитектура**: Source-Content Data-Centric Canvas (SourceNode/ContentNode/WidgetNode/CommentNode)
+> **Предыдущая версия**: Устаревшая API документация с DataNode endpoints и nested URLs доступна в [history/API_V1_LEGACY.md](history/API_V1_LEGACY.md)
+
+**Версия API**: 1.0  
+**Последнее обновление**: 2026-03-01  
+**Статус**: ✅ Актуален — описывает реально существующие endpoints  
+**Итого**: REST-модули: Health, Auth, Projects, Boards, Source Nodes, Content Nodes, Extraction, Widget Nodes, Comment Nodes, Edges, AI Assistant, AI Resolver, Files, Database, Dimensions, Board Filters, Dashboard Filters, Filter Presets, Dashboards, Library, Public; + Socket.IO события

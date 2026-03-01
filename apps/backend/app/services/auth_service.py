@@ -105,7 +105,7 @@ class AuthService:
         await db.commit()
         await db.refresh(user)
         
-        user_response = UserResponse.from_orm(user)
+        user_response = UserResponse.model_validate(user)
         token_response = TokenResponse(
             access_token=token,
             user=user_response,
@@ -142,7 +142,7 @@ class AuthService:
         db.add(session)
         await db.commit()
         
-        user_response = UserResponse.from_orm(user)
+        user_response = UserResponse.model_validate(user)
         token_response = TokenResponse(
             access_token=token,
             user=user_response,

@@ -11,6 +11,8 @@ import { useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
 import { useBoardStore } from '@/store/boardStore'
 import { useAuthStore } from '@/store/authStore'
+import { useFilterStore } from '@/store/filterStore'
+import { useLibraryStore } from '@/store/libraryStore'
 import { notify } from '@/store/notificationStore'
 import { SourceType } from '@/types'
 import { SourceConfig, CreateSourceResult } from './types'
@@ -56,7 +58,18 @@ export function useSourceDialog({ sourceType, onClose, position = { x: 100, y: 1
 
             if (result) {
                 onClose()
-                return { success: true }
+
+                // Re-fetch dimensions and node tables — auto-detection runs server-side after node creation
+                const projectId = useBoardStore.getState().currentBoard?.project_id
+                if (projectId) {
+                    useFilterStore.getState().loadDimensions(projectId)
+                    const boards = useBoardStore.getState().boards.filter(b => b.project_id === projectId)
+                    if (boards.length > 0) {
+                        useLibraryStore.getState().fetchNodeTables(boards)
+                    }
+                }
+
+                return { success: true, sourceId: result.id }
             } else {
                 return { success: false, error: 'Не удалось создать источник' }
             }
@@ -84,6 +97,17 @@ export function useSourceDialog({ sourceType, onClose, position = { x: 100, y: 1
 
             notify.success('Настройки источника обновлены')
             onClose()
+
+            // Re-fetch dimensions and node tables — auto-detection re-runs server-side after node update
+            const projectId = useBoardStore.getState().currentBoard?.project_id
+            if (projectId) {
+                useFilterStore.getState().loadDimensions(projectId)
+                const boards = useBoardStore.getState().boards.filter(b => b.project_id === projectId)
+                if (boards.length > 0) {
+                    useLibraryStore.getState().fetchNodeTables(boards)
+                }
+            }
+
             return { success: true }
         } catch (error: any) {
             const message = error.response?.data?.detail || 'Не удалось обновить источник'

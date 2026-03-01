@@ -24,12 +24,49 @@ from app.services.file_storage import get_file_storage
 from app.sources.csv.extractor import CSVSource
 from app.sources.json.extractor import JSONSource
 from app.sources.excel.extractor import ExcelSource
+from app.sources.document.extractor import DocumentSource
 
 logger = logging.getLogger(__name__)
 
 
 class SourceNodeService:
     """Service for managing SourceNodes."""
+
+    @staticmethod
+    async def _auto_detect_dimensions(
+        db: AsyncSession,
+        board_id: UUID,
+        node_id: UUID,
+        tables: list[dict[str, Any]],
+    ) -> None:
+        """Auto-detect dimensions from tables and upsert into project."""
+        logger.info(
+            f"📊 _auto_detect_dimensions called for SourceNode {node_id}, "
+            f"board={board_id}, tables_count={len(tables)}"
+        )
+        if not tables:
+            logger.info("📊 No tables provided, skipping dimension detection")
+            return
+        try:
+            from app.services.dimension_service import DimensionService
+            project_id = await DimensionService.get_project_id_for_node(db, board_id)
+            logger.info(f"📊 Resolved project_id={project_id} for board {board_id}")
+            if project_id:
+                results = await DimensionService.auto_detect_and_upsert(
+                    db, project_id, node_id, tables,
+                )
+                if results:
+                    await db.commit()
+                    logger.info(
+                        f"📊 Auto-detected {len(results)} dimension(s) for SourceNode {node_id}: "
+                        f"{[r['dimension'] for r in results]}"
+                    )
+                else:
+                    logger.info(f"📊 No dimensions detected for SourceNode {node_id} (no suitable columns)")
+            else:
+                logger.warning(f"⚠️ Could not resolve project_id for board {board_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ Dimension auto-detect failed for SourceNode {node_id}: {e}", exc_info=True)
     
     @staticmethod
     async def create_source_node(
@@ -52,18 +89,27 @@ class SourceNodeService:
         source_type = source_data.source_type
         config = source_data.config
         
-        # Auto-extract for CSV, JSON, EXCEL
-        if source_type in [SourceType.CSV, SourceType.JSON, SourceType.EXCEL]:
+        # Auto-extract for CSV, JSON, EXCEL, DOCUMENT
+        if source_type in [SourceType.CSV, SourceType.JSON, SourceType.EXCEL, SourceType.DOCUMENT]:
             content, lineage = await SourceNodeService._extract_file_content(
                 db, source_type, config
             )
         
+        # Auto-extract for MANUAL source — config already contains table data
+        elif source_type == SourceType.MANUAL:
+            content, lineage = await SourceNodeService._extract_manual_content(config)
+        
         # Create SourceNode with content
+        # Note: используем node_metadata (Python attr), а не metadata (зарезервировано SQLAlchemy)
+        incoming_metadata = source_data.metadata or {}
+        logger.info(f"📝 SourceNode creation - incoming metadata: {incoming_metadata}")
+        logger.info(f"📝 SourceNode creation - incoming metadata.name: '{incoming_metadata.get('name', '<NOT SET>>')}'")
+        
         source_node = SourceNode(
             board_id=source_data.board_id,
             source_type=source_data.source_type,
             config=source_data.config,
-            metadata=source_data.metadata or {},
+            node_metadata=incoming_metadata,
             position=source_data.position,
             created_by=source_data.created_by,
             content=content or {"text": None, "tables": []},
@@ -73,7 +119,32 @@ class SourceNodeService:
         await db.commit()
         await db.refresh(source_node)
         
-        logger.info(f"Created SourceNode {source_node.id} (type: {source_node.source_type}, has_content: {content is not None})")
+        logger.info(f"✅ Created SourceNode {source_node.id} (type: {source_node.source_type}, has_content: {content is not None})")
+        logger.info(f"✅ SourceNode {source_node.id} node_metadata after save: {source_node.node_metadata}")
+        logger.info(f"✅ SourceNode {source_node.id} node_metadata.name: '{source_node.node_metadata.get('name', '<NOT SET>>') if source_node.node_metadata else '<NONE>>'}'")
+
+        # Auto-detect dimensions from tables
+        tables_for_detect = (content or {}).get("tables", [])
+        logger.info(
+            f"🔍 [DIM] SourceNode {source_node.id}: about to call _auto_detect_dimensions, "
+            f"content is None={content is None}, "
+            f"tables_count={len(tables_for_detect)}, "
+            f"table_names={[t.get('name','?') for t in tables_for_detect]}, "
+            f"table_col_counts={[len(t.get('columns',[])) for t in tables_for_detect]}, "
+            f"table_row_counts={[len(t.get('rows',[])) for t in tables_for_detect]}"
+        )
+        for tidx, tbl in enumerate(tables_for_detect):
+            cols = tbl.get('columns', [])
+            rows = tbl.get('rows', [])
+            logger.info(
+                f"🔍 [DIM] SourceNode table[{tidx}]='{tbl.get('name','')}': "
+                f"columns={[c.get('name','?')+':'+c.get('type','?') for c in cols]}, "
+                f"rows_sample_keys={list(rows[0].keys()) if rows else '[]'}"
+            )
+        await SourceNodeService._auto_detect_dimensions(
+            db, source_node.board_id, source_node.id, tables_for_detect,
+        )
+
         return source_node
     
     @staticmethod
@@ -109,6 +180,8 @@ class SourceNodeService:
                 extractor = JSONSource()
             elif source_type == SourceType.EXCEL:
                 extractor = ExcelSource()
+            elif source_type == SourceType.DOCUMENT:
+                extractor = DocumentSource()
             
             if not extractor:
                 return None, None
@@ -133,6 +206,67 @@ class SourceNodeService:
             logger.exception(f"Error extracting file content: {e}")
             return None, None
     
+    @staticmethod
+    async def _extract_manual_content(
+        config: dict[str, Any]
+    ) -> tuple[dict | None, dict | None]:
+        """Extract content from manual source config.
+        
+        Supports two config formats:
+        1. New format: config.tables = [{name, columns, rows}, ...]
+        2. Legacy format: config.columns = [...], config.data = [...]
+        
+        Returns:
+            Tuple of (content, lineage) or (None, None) on failure
+        """
+        try:
+            from app.sources.manual.extractor import ManualSource
+            
+            extractor = ManualSource()
+            
+            # Normalize config: legacy format → new format
+            normalized_config = config
+            if "tables" not in config and "columns" in config:
+                # Legacy format: {columns: [...], data: [...]}
+                columns = config.get("columns", [])
+                data = config.get("data", [])
+                table_name = config.get("table_name", "table_1")
+                
+                # Convert row dicts to list format if needed
+                rows = []
+                for row in data:
+                    if isinstance(row, dict):
+                        rows.append(row)
+                    else:
+                        rows.append(row)
+                
+                normalized_config = {
+                    "tables": [{
+                        "name": table_name,
+                        "columns": columns,
+                        "rows": rows,
+                    }]
+                }
+            
+            result = await extractor.extract(normalized_config)
+            
+            if result.success:
+                content = result.to_content()
+                lineage = {
+                    "operation": "manual_input",
+                    "source_node_id": None,
+                    "transformation_history": []
+                }
+                logger.info(f"Successfully extracted manual content: {len(content.get('tables', []))} tables")
+                return content, lineage
+            else:
+                logger.error(f"Manual extraction failed: {result.error}")
+                return None, None
+                
+        except Exception as e:
+            logger.exception(f"Error extracting manual content: {e}")
+            return None, None
+
     @staticmethod
     async def get_source_node(db: AsyncSession, source_id: UUID) -> SourceNode | None:
         """Get SourceNode by ID.
@@ -188,6 +322,15 @@ class SourceNodeService:
         # Update fields
         if update_data.config is not None:
             source.config = update_data.config
+            
+            # For manual sources, re-extract content from updated config
+            if source.source_type == SourceType.MANUAL:
+                content, lineage = await SourceNodeService._extract_manual_content(update_data.config)
+                if content:
+                    source.content = content
+                    if lineage:
+                        source.lineage = lineage
+        
         if update_data.metadata is not None:
             source.node_metadata = update_data.metadata
         if update_data.position is not None:
@@ -197,27 +340,52 @@ class SourceNodeService:
         await db.refresh(source)
         
         logger.info(f"Updated SourceNode {source_id}")
+
+        # Auto-detect dimensions if content was re-extracted (manual sources)
+        if update_data.config is not None and source.source_type == SourceType.MANUAL:
+            tables = (source.content or {}).get("tables", [])
+            logger.info(
+                f"🔍 [DIM] SourceNode {source_id} update (MANUAL): "
+                f"tables_count={len(tables)}"
+            )
+            if tables:
+                await SourceNodeService._auto_detect_dimensions(
+                    db, source.board_id, source.id, tables,
+                )
+
         return source
     
     @staticmethod
     async def delete_source_node(db: AsyncSession, source_id: UUID) -> bool:
-        """Delete SourceNode.
-        
-        Args:
-            db: Database session
-            source_id: SourceNode ID
-            
-        Returns:
-            True if deleted, False if not found
+        """Delete SourceNode and clean up linked dimensions.
+
+        After deletion:
+        - DimensionColumnMapping rows cascade-delete via FK (ondelete=CASCADE on node_id).
+        - Dimensions that have no remaining mappings are removed as orphans.
         """
         source = await SourceNodeService.get_source_node(db, source_id)
         if not source:
             return False
-        
+
+        # Capture board_id before deletion (needed to resolve project_id afterwards)
+        board_id = source.board_id
+
         await db.delete(source)
         await db.commit()
-        
+
         logger.info(f"Deleted SourceNode {source_id}")
+
+        # Clean up orphaned Dimensions (mappings already cascade-deleted by PG)
+        try:
+            from app.services.dimension_service import DimensionService
+            project_id = await DimensionService.get_project_id_for_node(db, board_id)
+            if project_id:
+                deleted_count = await DimensionService.cleanup_orphaned_dimensions(db, project_id)
+                if deleted_count:
+                    await db.commit()
+        except Exception as exc:
+            logger.warning(f"cleanup_orphaned_dimensions failed for SourceNode {source_id}: {exc}")
+
         return True
     
     @staticmethod
@@ -254,14 +422,20 @@ class SourceNodeService:
         error_message = None
         
         try:
-            # For file-based sources (CSV, JSON, Excel)
-            if source.source_type in [SourceType.CSV, SourceType.JSON, SourceType.EXCEL]:
+            # For file-based sources (CSV, JSON, Excel, Document)
+            if source.source_type in [SourceType.CSV, SourceType.JSON, SourceType.EXCEL, SourceType.DOCUMENT]:
                 logger.info(f"📂 Extracting file-based source: {source.source_type}")
                 content, lineage = await SourceNodeService._extract_file_content(
                     db, source.source_type, source.config
                 )
                 if content is None:
                     error_message = "File extraction returned no content"
+            # For manual sources, re-extract from config
+            elif source.source_type == SourceType.MANUAL:
+                logger.info(f"✏️ Re-extracting manual source from config")
+                content, lineage = await SourceNodeService._extract_manual_content(source.config)
+                if content is None:
+                    error_message = "Manual extraction returned no content"
             # For other types, use the generic extract_data
             else:
                 logger.info(f"🔧 Using generic extraction for: {source.source_type}")
@@ -296,6 +470,18 @@ class SourceNodeService:
         await db.refresh(source)
         
         logger.info(f"✅ SourceNode {source_id} refreshed successfully")
+
+        # Auto-detect dimensions from refreshed tables
+        refresh_tables = (content or {}).get("tables", [])
+        logger.info(
+            f"🔍 [DIM] SourceNode {source_id} refresh: "
+            f"tables_count={len(refresh_tables)}, "
+            f"table_names={[t.get('name','?') for t in refresh_tables]}"
+        )
+        await SourceNodeService._auto_detect_dimensions(
+            db, source.board_id, source.id, refresh_tables,
+        )
+
         return source
     
     @staticmethod
@@ -381,24 +567,21 @@ class SourceNodeService:
         extraction_params = params or {}
         extraction_params["db"] = db  # Pass db session for file storage access
         
-        # Try Multi-Agent system for PROMPT extraction (with fallback to simple mode)
+        # Try Orchestrator V2 for PROMPT extraction (with fallback to simple mode)
         if source.source_type == SourceType.PROMPT:
             try:
-                from app.services.multi_agent.orchestrator import MultiAgentOrchestrator
-                from app.services.multi_agent.message_bus import AgentMessageBus
-                
-                # Create and connect message bus
-                message_bus = AgentMessageBus()
-                await message_bus.connect()
-                
-                orchestrator = MultiAgentOrchestrator(db, message_bus)
-                
-                extraction_params["orchestrator"] = orchestrator
-                extraction_params["source"] = source
-                logger.info("✅ Multi-Agent system initialized for PROMPT extraction")
-                
+                from app.main import get_orchestrator
+
+                orchestrator = get_orchestrator()
+                if orchestrator:
+                    extraction_params["orchestrator"] = orchestrator
+                    extraction_params["source"] = source
+                    logger.info("Orchestrator V2 available for PROMPT extraction")
+                else:
+                    raise RuntimeError("Orchestrator not initialized")
+
             except Exception as e:
-                logger.warning(f"⚠️ Multi-Agent unavailable, using simple GigaChat: {e}")
+                logger.warning(f"Orchestrator unavailable, using simple GigaChat: {e}")
                 # Fallback to simple GigaChatService
                 try:
                     from app.services.gigachat_service import get_gigachat_service

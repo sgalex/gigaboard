@@ -1,8 +1,10 @@
 /**
- * TopBar - main navigation bar
+ * TopBar - main navigation bar.
+ * The center area (#topbar-context) serves as a portal target for
+ * context-specific toolbars rendered by BoardCanvas / DashboardPage.
  */
 import { Link } from 'react-router-dom'
-import { Menu, Search, User, LogOut, Settings, Sparkles } from 'lucide-react'
+import { Menu, User, LogOut, Settings, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { useAuthStore } from '@/store/authStore'
@@ -22,52 +24,42 @@ export function TopBar() {
 
     return (
         <header className="border-b border-border bg-card">
-            <div className="flex h-14 items-center gap-4 px-4">
+            <div className="flex h-12 items-center gap-3 px-3">
                 {/* Left: Menu toggle + Logo */}
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 shrink-0">
                     <Button
                         variant="ghost"
                         size="icon"
+                        className="h-8 w-8"
                         onClick={toggleProjectExplorer}
                         title="Toggle Project Explorer"
                     >
-                        <Menu className="h-5 w-5" />
+                        <Menu className="h-4 w-4" />
                     </Button>
 
-                    <Link to="/" className="flex items-center gap-2">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground font-bold">
+                    <Link to="/" className="flex items-center gap-1.5">
+                        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground text-xs font-bold">
                             GB
                         </div>
-                        <span className="text-lg font-semibold">GigaBoard</span>
                     </Link>
                 </div>
 
-                {/* Center: Global search (placeholder) */}
-                <div className="max-w-xl">
-                    <div className="relative">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                        <input
-                            type="search"
-                            placeholder="Поиск проектов, досок..."
-                            className="w-full h-9 pl-9 pr-4 rounded-md border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                        />
-                    </div>
-                </div>
+                <div className="w-px h-6 bg-border" />
 
-                {/* Spacer */}
-                <div className="flex-1"></div>
+                {/* Center: portal target for context-specific actions */}
+                <div id="topbar-context" className="flex-1 flex items-center gap-2 min-w-0" />
 
                 {/* Right: AI Panel toggle + Theme toggle + User menu */}
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1 shrink-0">
                     {user && (
                         <Button
-                            variant={isAIPanelOpen ? "default" : "outline"}
+                            variant={isAIPanelOpen ? "default" : "ghost"}
                             size="icon"
+                            className="h-8 w-8 relative"
                             onClick={toggleAIPanel}
                             title={isAIPanelOpen ? 'Скрыть AI помощник' : 'Показать AI помощник'}
-                            className="relative"
                         >
-                            <Sparkles className="h-5 w-5" />
+                            <Sparkles className="h-4 w-4" />
                             {isAIPanelOpen && (
                                 <span className="absolute -top-1 -right-1 w-2 h-2 bg-green-500 rounded-full" />
                             )}
@@ -78,8 +70,8 @@ export function TopBar() {
 
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon">
-                                <User className="h-5 w-5" />
+                            <Button variant="ghost" size="icon" className="h-8 w-8">
+                                <User className="h-4 w-4" />
                             </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="w-56">

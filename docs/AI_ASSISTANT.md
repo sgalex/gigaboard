@@ -15,7 +15,7 @@
 
 ### Architecture: Integration with Multi-Agent System
 
-**КРИТИЧЕСКИ ВАЖНО**: AI Assistant Panel работает через **Multi-Agent Orchestrator**, а НЕ напрямую с GigaChat.
+**КРИТИЧЕСКИ ВАЖНО**: AI Assistant Panel работает через **Multi-Agent Orchestrator + Message Bus**, а НЕ напрямую с GigaChat.
 
 ```mermaid
 flowchart TB
@@ -26,51 +26,53 @@ flowchart TB
   
   subgraph Backend["BACKEND API"]
     Route["/api/v1/boards/{board_id}/ai/chat\n(FastAPI endpoint)"]
-    ORCH["Multi-Agent Orchestrator\n• Parse request\n• Create session\n• Route to Planner\n• Collect results"]
+    AIServ["AIService.chat_stream()\n• Создаёт Orchestrator + MessageBus\n• Вызывает process_user_request()"]
   end
   
-  subgraph Agents["MULTI-AGENT SYSTEM"]
-    Planner["Planner Agent\n• Break down task\n• Delegate"]
+  subgraph Orchestration["ORCHESTRATION"]
+    ORCH["MultiAgentOrchestrator\n• _request_plan() → Planner\n• _execute_task() → Agents\n• CriticAgent (standalone)"]
+    MB["AgentMessageBus\n(Redis Pub/Sub, DB=1)\n• request_response()"]
+  end
+  
+  subgraph Agents["12 АГЕНТОВ (BaseAgent)"]
+    Planner["Planner"]
     Researcher["Researcher"]
+    Structurizer["Structurizer"]
     Analyst["Analyst"]
     Transform["Transformation"]
     Reporter["Reporter"]
-    Developer["Developer"]
+    Search["Search"]
+    Resolver["Resolver"]
     Executor["Executor"]
   end
   
-  subgraph MessageBus["MESSAGE BUS (Redis)"]
-    MB["Redis Pub/Sub\n• Broadcast\n• Direct\n• UI Events"]
-  end
-  
   Panel -->|"POST /ai/chat\n{message, context}"| Route
-  Route -->|"Create USER_REQUEST"| ORCH
-  ORCH <-->|"Pub/Sub"| MB
-  Planner <--> MB
-  Researcher <--> MB
-  Analyst <--> MB
-  Transform <--> MB
-  Reporter <--> MB
-  Developer <--> MB
-  Executor <--> MB
-  ORCH -->|"Return response\n+ suggested_actions"| Route
-  Route -->|"AIChatResponse"| Panel
+  Route --> AIServ
+  AIServ --> ORCH
+  ORCH -->|"request_response(agent, task)"| MB
+  MB -->|"_handle_message() → process_task()"| Agents
+  Agents -->|"TASK_RESULT"| MB
+  MB -->|"return result"| ORCH
+  ORCH -->|"aggregated response"| AIServ
+  AIServ -->|"AIChatResponse + Socket.IO"| Panel
   Canvas <-."Real-time updates\n(Socket.IO)".-> Panel
 ```
 
 **Поток данных**:
 1. Пользователь вводит сообщение в AI Assistant Panel
 2. Frontend → `POST /api/v1/boards/{board_id}/ai/chat`
-3. **AIService создаёт USER_REQUEST и отправляет в Orchestrator**
-4. Orchestrator публикует в Message Bus (broadcast)
-5. Planner Agent получает запрос, анализирует контекст доски, создаёт план
-6. Planner делегирует задачи специализированным агентам (Researcher, Reporter, etc.)
-7. Агенты выполняют задачи, публикуют TASK_RESULT обратно в Message Bus
-8. Orchestrator собирает результаты, формирует ответ
+3. **AIService создаёт Orchestrator + MessageBus, вызывает `process_user_request()`**
+4. Orchestrator → `message_bus.request_response("planner", task)` → получает план
+5. Orchestrator итерирует по шагам плана, вызывая каждого агента через `request_response()`
+6. Каждый агент получает задачу через `_handle_message()` → `process_task()`
+7. Агенты возвращают TASK_RESULT обратно через Message Bus
+8. Orchestrator собирает результаты, CriticAgent (standalone) валидирует
 9. Backend → Frontend: `AIChatResponse` с текстом и `suggested_actions`
 10. Frontend отображает сообщение AI + кнопки действий
 
-**См. также**: [MULTI_AGENT_SYSTEM.md](./MULTI_AGENT_SYSTEM.md) для детальной архитектуры Message Bus
+> **Примечание**: Агенты **не общаются друг с другом напрямую**. Orchestrator медиирует все вызовы.
+
+**См. также**: [MULTI_AGENT.md](./MULTI_AGENT.md) для детальной архитектуры Orchestrator V2
 
 ### Компоненты
 
@@ -381,121 +383,53 @@ class AIService:
 
 ### MultiAgentOrchestrator responsibilities
 
-**Новый класс** (`apps/backend/app/services/multi_agent/orchestrator.py`):
+**Класс**: `apps/backend/app/services/multi_agent/orchestrator.py`
+
+Orchestrator медиирует **все** вызовы агентов через Message Bus. Агенты не общаются друг с другом напрямую.
+
+**Основной flow** (`process_user_request()`):
 
 ```python
 class MultiAgentOrchestrator:
     """
     Orchestrator для Multi-Agent системы.
-    Принимает USER_REQUEST от AI Assistant Panel,
-    публикует в Message Bus, собирает результаты.
+    Принимает запрос от AIService.chat_stream(),
+    вызывает агентов через message_bus.request_response(),
+    собирает и агрегирует результаты.
     """
     
-    def __init__(self, db: AsyncSession):
-        self.db = db
-        self.message_bus = AgentMessageBus()
-        self.session_manager = AgentSessionManager(db)
-    
-    async def process_user_request(
-        self,
-        request: Dict,
-        timeout: float = 30.0
-    ) -> Dict:
-        """
-        Обработать запрос пользователя через Multi-Agent систему.
+    async def process_user_request(self, message: str, board_id: str, ...) -> dict:
+        # 1. Получить план от Planner через Message Bus
+        plan = await self._request_plan(message, board_id, session_id)
         
-        Flow:
-        1. Create AgentSession
-        2. Create USER_REQUEST message
-        3. Publish to Message Bus (broadcast)
-        4. Wait for Planner to create execution plan
-        5. Monitor progress (TASK_PROGRESS, TASK_RESULT messages)
-        6. Collect final result from Planner
-        7. Return formatted response to AIService
-        
-        Args:
-            request: User request с board_id, message, context
-            timeout: Максимальное время ожидания (default 30s)
-        
-        Returns:
-            {
-                "response": "AI answer",
-                "session_id": "uuid",
-                "suggested_actions": [
-                    {
-                        "action_type": "create_widget",
-                        "label": "Создать график продаж",
-                        "params": {...}
-                    }
-                ]
-            }
-        """
-        # 1. Create session
-        session = await self.session_manager.create_session(
-            board_id=request["board_id"],
-            user_id=request["user_id"],
-            request_text=request["message"]
-        )
-        
-        # 2. Create USER_REQUEST message
-        user_message = AgentMessage(
-            message_id=str(uuid4()),
-            message_type=MessageType.USER_REQUEST,
-            sender="orchestrator",
-            receiver="broadcast",  # Planner подпишется
-            session_id=str(session.id),
-            board_id=request["board_id"],
-            payload={
-                "message": request["message"],
-                "board_context": request["context"],
-                "user_id": request["user_id"],
-            },
-            timestamp=datetime.utcnow().isoformat()
-        )
-        
-        # 3. Publish to Message Bus
-        await self.message_bus.publish(user_message)
-        
-        # 4. Wait for Planner response (with timeout)
-        try:
-            result = await asyncio.wait_for(
-                self._wait_for_completion(session.id),
-                timeout=timeout
+        # 2. Выполнить каждый шаг плана
+        results = {}
+        for step in plan.steps:
+            result = await self._execute_task(
+                agent_name=step.agent,
+                task=step.task,
+                session_id=session_id,
             )
-            return result
-        except asyncio.TimeoutError:
-            # Timeout → возвращаем partial result или error
-            return {
-                "response": "К сожалению, обработка запроса заняла слишком много времени. Попробуйте упростить вопрос.",
-                "session_id": str(session.id),
-                "suggested_actions": [],
-                "error": "timeout"
-            }
-    
-    async def _wait_for_completion(self, session_id: UUID) -> Dict:
-        """
-        Ожидать завершения обработки запроса.
-        Подписывается на канал results для данной сессии.
-        """
-        results_channel = f"gigaboard:sessions:{session_id}:results"
+            results[step.agent] = result
         
-        async for message in self.message_bus.subscribe(results_channel):
-            if message.message_type == MessageType.TASK_RESULT:
-                # Planner отправил финальный результат
-                return {
-                    "response": message.payload.get("response"),
-                    "session_id": str(session_id),
-                    "suggested_actions": message.payload.get("suggested_actions", []),
-                }
-            elif message.message_type == MessageType.ERROR:
-                # Ошибка в обработке
-                return {
-                    "response": f"Произошла ошибка: {message.payload.get('error_message')}",
-                    "session_id": str(session_id),
-                    "suggested_actions": [],
-                    "error": message.payload.get("error_type")
-                }
+        # 3. CriticAgent валидирует (standalone, без Message Bus)
+        critic = CriticAgent(message_bus=None)
+        validation = await critic.process_task({"results": results, ...})
+        
+        # 4. Агрегировать и вернуть
+        return aggregated_response
+    
+    async def _request_plan(self, message, board_id, session_id):
+        """Отправить запрос Planner через Message Bus"""
+        return await self.message_bus.request_response("planner", task)
+    
+    async def _execute_task(self, agent_name, task, session_id):
+        """Отправить задачу агенту через Message Bus"""
+        return await self.message_bus.request_response(agent_name, task)
 ```
+
+> **Примечание**: CriticAgent вызывается **standalone** (`message_bus=None`), без Message Bus.
+> Это единственный агент, который не проходит через pub/sub.
 
 ### Backend Route Update
 
@@ -590,7 +524,7 @@ FastAPI Route → AI Assistant Panel
 - ✅ Observability: все сообщения логируются в Message Bus
 
 **См. также**:
-- [MULTI_AGENT_SYSTEM.md](./MULTI_AGENT_SYSTEM.md) — полная документация Multi-Agent архитектуры
+- [MULTI_AGENT.md](./MULTI_AGENT.md) — полная документация Multi-Agent архитектуры
 - [MESSAGE_BUS_QUICKSTART.md](./MESSAGE_BUS_QUICKSTART.md) — примеры работы с Message Bus
 ```
 

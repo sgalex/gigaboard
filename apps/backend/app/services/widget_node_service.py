@@ -1,9 +1,10 @@
 """WidgetNode service - business logic for widget nodes."""
 from uuid import UUID
-from sqlalchemy import select
+from sqlalchemy import select, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import WidgetNode, Board
+from app.models.edge import Edge
 from app.schemas import WidgetNodeCreate, WidgetNodeUpdate
 
 
@@ -92,7 +93,15 @@ class WidgetNodeService:
         widget_node_id: UUID,
         user_id: UUID
     ) -> None:
-        """Delete WidgetNode."""
+        """Delete WidgetNode and its referencing edges."""
         widget_node = await WidgetNodeService.get_widget_node(db, widget_node_id, user_id)
+        await db.execute(
+            delete(Edge).where(
+                or_(
+                    Edge.source_node_id == widget_node_id,
+                    Edge.target_node_id == widget_node_id,
+                )
+            )
+        )
         await db.delete(widget_node)
         await db.commit()

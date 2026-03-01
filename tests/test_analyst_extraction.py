@@ -122,14 +122,14 @@ Return as structured JSON with arrays."""
     }
     
     context = {
-        "previous_results": {
-            "researcher": SAMPLE_RESEARCHER_DATA
-        }
+        "agent_results": [
+            {"agent": "researcher", **SAMPLE_RESEARCHER_DATA}
+        ]
     }
     
     # Проверяем prompt перед отправкой
     print("📝 Building prompt...")
-    prompt = analyst._build_universal_prompt(task, context["previous_results"])
+    prompt = analyst._build_universal_prompt(task, context["agent_results"])
     
     print(f"\n📊 Prompt Statistics:")
     print(f"   Total length: {len(prompt)} characters")

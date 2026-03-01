@@ -1,5 +1,8 @@
 """
 Configuration для Multi-Agent системы: таймауты, retry, limits.
+
+V2: Обновлённые имена агентов (discovery, research, codex, validator).
+См. docs/MULTI_AGENT_V2_CONCEPT.md
 """
 from typing import Dict, Optional
 from .message_types import MessageType
@@ -29,13 +32,23 @@ class TimeoutConfig:
     
     # Таймауты по агентам (секунды) - переопределяют MESSAGE_TIMEOUTS
     AGENT_TIMEOUTS: Dict[str, int] = {
+        # V2 core agents
         "planner": 30,          # Planner должен быть быстрым
-        "researcher": 120,      # Researcher может делать медленные HTTP/SQL запросы
-        "analyst": 60,          # Analyst анализирует данные
-        "developer": 90,        # Developer генерирует код
-        "reporter": 60,         # Reporter создаёт визуализации
-        "transformation": 90,   # Transformation выполняет pandas операции
-        "executor": 300,        # Executor может выполнять долгие задачи
+        "discovery": 120,       # DiscoveryAgent — web + dataset search
+        "research": 120,        # ResearchAgent — fetch URLs, может быть медленным
+        "structurizer": 90,     # StructurizerAgent — parse & extract
+        "analyst": 60,          # AnalystAgent — анализ данных
+        "transform_codex": 90,   # TransformCodexAgent — генерация Python кода
+        "reporter": 60,         # ReporterAgent — формирование ответа
+        "validator": 30,        # ValidatorAgent — gate-keeper
+        # V1 legacy (backward compat until Phase 3)
+        "search": 120,
+        "researcher": 120,
+        "transformation": 90,
+        "developer": 90,
+        "executor": 300,
+        "critic": 30,
+        "suggestions": 30,
         "form_generator": 30,
         "data_discovery": 120,
     }

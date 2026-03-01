@@ -76,7 +76,7 @@ AI: "Вижу, у вас тренд возрастающий. Предлагаю
 **A:** Да, архитектура расширяема:
 1. Создать новый `AIAdapter` (например, `OpenAIAdapter`)
 2. Реализовать интерфейс `process_message()`
-3. Заменить в `AIAssistantService`
+3. Заменить провайдер в контроллере AI Assistant
 4. Тестировать
 
 Пример:
@@ -327,19 +327,12 @@ relevant_widgets = [
 ## 🚦 Roadmap Questions
 
 ### Q29: Какие функции планируются?
-**A:** 
-- 🎯 **Phase 1** (MVP): Диалог + создание виджетов ✅
-- 🎯 **Phase 2**: Multi-turn с памятью, voice input
-- 🎯 **Phase 3**: Custom AI instructions, personas
-- 🎯 **Phase 4**: Collaborative AI (видимо для всей команды)
+**A:** См. [FUTURE_FEATURES.md](./FUTURE_FEATURES.md) и [ROADMAP.md](./ROADMAP.md)
 
 ---
 
 ### Q30: Когда будет GA версия?
-**A:** 
-- 📅 Staging: конец февраля 2026
-- 📅 Beta: март 2026 (для ранних пользователей)
-- 📅 GA: апрель 2026 (для всех)
+**A:** См. [ROADMAP.md](./ROADMAP.md)
 
 ---
 
@@ -352,7 +345,4 @@ relevant_widgets = [
 - 📖 Docs: [AI_ASSISTANT.md](./AI_ASSISTANT.md)
 - 🐛 Bugs: GitHub Issues
 
----
 
-**Last Updated**: 2026-01-23
-**Version**: 0.1 (Draft)

@@ -41,10 +41,10 @@ class SuggestionAnalysisRequest(BaseModel):
         description="Current widget HTML code"
     )
     max_suggestions: int = Field(
-        5, 
+        6, 
         ge=1, 
         le=10, 
-        description="Max number of suggestions"
+        description="Max number of suggestions to return (top N from 10 generated)"
     )
 
 

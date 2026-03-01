@@ -317,15 +317,6 @@ new_node = await ContentNodeService.create_content_node(
 
 ## 📚 См. также
 
-- [DATA_NODE_SYSTEM.md](DATA_NODE_SYSTEM.md) — система нодов
+- [DATA_NODE_SYSTEM.md](DATA_NODE_SYSTEM.md) — архитектура SourceNode/ContentNode
 - [CONNECTION_TYPES.md](CONNECTION_TYPES.md) — типы связей
-- [BOARD_CONSTRUCTION_SYSTEM.md](BOARD_CONSTRUCTION_SYSTEM.md) — система досок
 
----
-
-**Статус:** ✅ Реализовано (Frontend + Backend)  
-**Версия:** 1.1  
-**Дата:** 2025-01-XX
-
-**Changelog:**
-- v1.1: Добавлена `findNearestFreePosition()` для ручного перемещения, интеграция в BoardCanvas

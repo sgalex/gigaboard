@@ -1,20 +1,15 @@
 """
-Multi-Agent System для GigaBoard.
+Multi-Agent System V2 для GigaBoard.
 
-Phase 1: Message Bus Infrastructure (завершена 2026-01-29)
-Phase 2: Orchestrator & Session Management (завершена 2026-01-29)
-Phase 3: Agents Implementation (в разработке 2026-01-29)
+V2: Единый Orchestrator, AgentPayload, zero-mapping.
+См. docs/MULTI_AGENT_V2_CONCEPT.md для полной спецификации.
 
 Модули:
 - message_types: MessageType enum, AgentMessage schema
 - message_bus: AgentMessageBus для pub/sub коммуникации
-- session: AgentSessionManager для управления сессиями
-- orchestrator: MultiAgentOrchestrator для координации агентов
+- orchestrator: Orchestrator V2 (единый путь)
 - agents: Специализированные агенты (PlannerAgent, AnalystAgent, etc.)
-- timeout_monitor: Мониторинг таймаутов сообщений
-- metrics: Сбор метрик и мониторинг
-
-См. docs/MULTI_AGENT_SYSTEM.md для детальной документации.
+- schemas: AgentPayload — универсальный формат данных
 """
 from .message_types import MessageType, AgentMessage
 from .message_bus import AgentMessageBus
@@ -24,16 +19,14 @@ from .exceptions import (
     TimeoutError,
     AgentNotFoundError
 )
-from .session import AgentSessionManager
-from .orchestrator import MultiAgentOrchestrator
-from .agents import BaseAgent, PlannerAgent, AnalystAgent, TransformationAgent, ReporterAgent, ResearcherAgent, SearchAgent
-
-# Engine - главный фасад
-from .engine import MultiAgentEngine
+from .orchestrator import Orchestrator
+from .schemas.agent_payload import AgentPayload
+from .agents import BaseAgent, PlannerAgent, AnalystAgent, ReporterAgent, QualityGateAgent
 
 __all__ = [
-    # Engine (главный фасад для AI Assistant)
-    "MultiAgentEngine",
+    # V2 Orchestrator
+    "Orchestrator",
+    "AgentPayload",
     # Message Bus
     "MessageType",
     "AgentMessage",
@@ -43,15 +36,10 @@ __all__ = [
     "MessageDeliveryError",
     "TimeoutError",
     "AgentNotFoundError",
-    # Session & Orchestration
-    "AgentSessionManager",
-    "MultiAgentOrchestrator",
-    # Agents
+    # V2 Agents
     "BaseAgent",
     "PlannerAgent",
     "AnalystAgent",
-    "TransformationAgent",
     "ReporterAgent",
-    "ResearcherAgent",
-    "SearchAgent",
+    "QualityGateAgent",
 ]

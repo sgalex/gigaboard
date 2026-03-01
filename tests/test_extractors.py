@@ -47,7 +47,8 @@ def test_manual_extractor_json():
     assert result.is_success
     assert len(result.tables) == 1
     assert result.tables[0]["name"] == "manual_data"
-    assert result.tables[0]["columns"] == ["name", "age"]
+    col_names = [c["name"] for c in result.tables[0]["columns"]]
+    assert col_names == ["name", "age"]
     assert len(result.tables[0]["rows"]) == 2
 
 
@@ -71,7 +72,8 @@ def test_manual_extractor_table():
     
     assert result.is_success
     assert len(result.tables) == 1
-    assert result.tables[0]["columns"] == ["product", "price", "quantity"]
+    col_names = [c["name"] for c in result.tables[0]["columns"]]
+    assert col_names == ["product", "price", "quantity"]
     assert len(result.tables[0]["rows"]) == 2
 
 
@@ -94,7 +96,8 @@ Charlie,35,Paris"""
     
     assert result.is_success
     assert len(result.tables) == 1
-    assert result.tables[0]["columns"] == ["name", "age", "city"]
+    col_names = [c["name"] for c in result.tables[0]["columns"]]
+    assert col_names == ["name", "age", "city"]
     assert len(result.tables[0]["rows"]) == 3
 
 
@@ -248,8 +251,8 @@ def test_extraction_result_to_content_dict():
     result.tables = [
         {
             "name": "test_table",
-            "columns": ["col1", "col2"],
-            "rows": [[1, 2], [3, 4]]
+            "columns": [{"name": "col1", "type": "int"}, {"name": "col2", "type": "int"}],
+            "rows": [{"col1": 1, "col2": 2}, {"col1": 3, "col2": 4}]
         }
     ]
     

@@ -49,19 +49,62 @@ class JSONSourceConfig(BaseModel):
     extraction_code: str | None = Field(None, description="AI-generated extraction code")
 
 
+class DetectedRegionConfig(BaseModel):
+    """A single detected table region in an Excel sheet."""
+    sheet_name: str = Field(..., description="Sheet name")
+    start_row: int = Field(..., description="Start row (1-based)")
+    start_col: int = Field(..., description="Start column (1-based)")
+    end_row: int = Field(..., description="End row (1-based)")
+    end_col: int = Field(..., description="End column (1-based)")
+    header_row: int | None = Field(None, description="Header row (1-based or None)")
+    table_name: str = Field(default="", description="Display name for the table")
+    selected_columns: list[str] = Field(default_factory=list, description="Columns to extract")
+
+
 class ExcelSourceConfig(BaseModel):
-    """Configuration for Excel file source."""
+    """Configuration for Excel file source.
+    
+    Два режима:
+    - simple: извлечение по листам (sheets, selected_columns)
+    - smart: извлечение по регионам (detected_regions)
+    
+    See docs/SOURCE_NODE_CONCEPT_V2.md - section "Excel Dialog".
+    """
     file_id: str = Field(..., description="Uploaded file ID")
+    filename: str | None = Field(None, description="Original filename")
+    mime_type: str | None = Field(None, description="File MIME type")
+    size_bytes: int | None = Field(None, description="File size in bytes")
+    analysis_mode: str = Field(default="simple", description="Analysis mode: 'simple' or 'smart'")
+    # Simple mode
     sheets: list[str] = Field(default_factory=list, description="Sheets to extract (all if empty)")
     has_header: bool = Field(default=True, description="First row is header")
     max_rows: int | None = Field(default=None, description="Maximum rows to load per sheet (None = all rows)")
+    selected_columns: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Selected columns per sheet: {sheet_name: [col1, col2, ...]}. Empty = all columns."
+    )
+    # Smart mode
+    detected_regions: list[DetectedRegionConfig] = Field(
+        default_factory=list,
+        description="Detected table regions for smart extraction"
+    )
+    extraction_code: str | None = Field(None, description="AI-generated Python extraction code")
 
 
 class DocumentSourceConfig(BaseModel):
-    """Configuration for document source (PDF, DOCX, TXT)."""
+    """Configuration for document source (PDF, DOCX, TXT).
+    
+    См. docs/SOURCE_NODE_CONCEPT_V2.md — раздел "📄 4. Document Dialog".
+    """
     file_id: str = Field(..., description="Uploaded file ID")
-    extraction_prompt: str | None = Field(None, description="AI prompt for table extraction")
+    filename: str | None = Field(None, description="Original filename")
+    document_type: str | None = Field(None, description="Document type: pdf, docx, txt")
+    mime_type: str | None = Field(None, description="File MIME type")
+    size_bytes: int | None = Field(None, description="File size in bytes")
+    is_scanned: bool = Field(default=False, description="Whether PDF is scanned (needs OCR)")
+    extraction_prompt: str | None = Field(None, description="AI prompt for data extraction")
     extraction_code: str | None = Field(None, description="AI-generated extraction code")
+    page_range: str | None = Field(None, description="Page range to extract, e.g. '1-5'")
 
 
 class APISourceConfig(BaseModel):

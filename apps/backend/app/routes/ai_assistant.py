@@ -17,6 +17,7 @@ from ..core import get_db
 from ..middleware.auth import get_current_user
 from ..models import User
 from ..services.ai_service import AIService
+from ..services.controllers import AIAssistantController
 from ..schemas.ai_chat import (
     AIChatRequest,
     AIChatResponse,
@@ -30,6 +31,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/boards", tags=["ai-assistant"])
 
 
+def _get_orchestrator_or_503():
+    """Get Orchestrator V2 or raise 503."""
+    from ..main import get_orchestrator
+    orch = get_orchestrator()
+    if not orch:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orchestrator not initialized. Check backend logs."
+        )
+    return orch
+
+
 @router.post("/{board_id}/ai/chat", response_model=AIChatResponse)
 async def chat_with_ai(
     board_id: UUID,
@@ -38,49 +51,91 @@ async def chat_with_ai(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Отправить сообщение AI Assistant в контексте доски.
-    
-    AI анализирует текущее состояние доски (DataNode, WidgetNode, Edge)
-    и отвечает на вопрос пользователя, предлагая действия при необходимости.
-    
-    Args:
-        board_id: UUID доски
-        request: Запрос с сообщением и опциональным контекстом
-        current_user: Текущий пользователь
-        db: Database session
-        
-    Returns:
-        AIChatResponse с ответом AI и suggested_actions
-        
-    Raises:
-        HTTPException: 404 если доска не найдена, 500 при ошибке AI
+    Отправить сообщение AI Assistant в контексте доски (V2 controller).
+
+    Использует AIAssistantController → Orchestrator V2 pipeline.
+    Сохраняет историю чата через AIService.
     """
+    from uuid import uuid4
+    from ..models.chat_message import ChatMessage, MessageRole
+
     try:
         ai_service = AIService(db)
-        
-        result = await ai_service.chat(
+        session_id = request.session_id or uuid4()
+
+        # 1. Gather board context
+        selected_node_ids = None
+        if request.context and "selected_nodes" in request.context:
+            selected_node_ids = [UUID(nid) for nid in request.context["selected_nodes"]]
+
+        board_context = await ai_service.get_board_context(board_id, selected_node_ids)
+        chat_history_raw = await ai_service.get_chat_history(board_id, session_id, limit=10)
+
+        # 2. Save user message to DB
+        user_msg = ChatMessage(
             board_id=board_id,
             user_id=current_user.id,
-            message=request.message,
-            session_id=request.session_id,
+            session_id=session_id,
+            role=MessageRole.USER,
+            content=request.message,
             context=request.context,
         )
-        
-        # Преобразуем suggested_actions в Pydantic модели
-        suggested_actions = None
-        if result.get("suggested_actions"):
-            suggested_actions = [
-                SuggestedAction(**action) 
-                for action in result["suggested_actions"]
-            ]
-        
-        return AIChatResponse(
-            response=result["response"],
-            session_id=UUID(result["session_id"]),
-            suggested_actions=suggested_actions,
-            context_used=result.get("context_used"),
+        db.add(user_msg)
+
+        # 3. Call V2 controller
+        orchestrator = _get_orchestrator_or_503()
+        controller = AIAssistantController(orchestrator)
+
+        result = await controller.process_request(
+            user_message=request.message,
+            context={
+                "board_id": str(board_id),
+                "user_id": str(current_user.id),
+                "session_id": str(session_id),
+                "board_context": board_context,
+                "selected_node_ids": [str(nid) for nid in selected_node_ids] if selected_node_ids else [],
+                "chat_history": chat_history_raw,
+            },
         )
-        
+
+        # 4. Extract response text
+        response_text = result.narrative or result.code_description or "Нет ответа от AI"
+
+        # 5. Build suggested_actions from controller metadata
+        suggested_actions = None
+        if result.metadata.get("suggested_actions"):
+            suggested_actions = [
+                SuggestedAction(**action)
+                for action in result.metadata["suggested_actions"]
+            ]
+
+        # 6. Save AI response to DB
+        assistant_msg = ChatMessage(
+            board_id=board_id,
+            user_id=current_user.id,
+            session_id=session_id,
+            role=MessageRole.ASSISTANT,
+            content=response_text,
+            context={"board_context": board_context},
+            suggested_actions=[a.dict() for a in suggested_actions] if suggested_actions else None,
+        )
+        db.add(assistant_msg)
+        await db.commit()
+
+        return AIChatResponse(
+            response=response_text,
+            session_id=session_id,
+            suggested_actions=suggested_actions,
+            context_used={
+                "board_id": str(board_id),
+                "total_nodes": board_context.get("stats", {}).get("total_source_nodes", 0)
+                    + board_context.get("stats", {}).get("total_content_nodes", 0)
+                    + board_context.get("stats", {}).get("total_widget_nodes", 0),
+            },
+        )
+
+    except HTTPException:
+        raise
     except ValueError as e:
         logger.error(f"Validation error in chat_with_ai: {e}")
         raise HTTPException(
@@ -88,7 +143,8 @@ async def chat_with_ai(
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Error in chat_with_ai: {e}")
+        await db.rollback()
+        logger.error(f"Error in chat_with_ai: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process AI request: {str(e)}"

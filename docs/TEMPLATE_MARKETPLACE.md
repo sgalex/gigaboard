@@ -1,25 +1,25 @@
-# Template Marketplace — DataNode & Transformation Templates
+# Template Marketplace — SourceNode & Transformation Templates
 
 **Статус**: 🚧 Планируется  
 **Приоритет**: Must Have (Phase 3)  
 **Дата создания**: 24 января 2026  
-**Обновлено**: 24 января 2026 (DataNode architecture)
+**Обновлено**: 24 января 2026 (Source-Content architecture)
 
 ---
 
 ## 📋 Обзор
 
-**Template Marketplace** — открытая библиотека готовых шаблонов для ускорения аналитической работы. Включает шаблоны для **DataNode**, **WidgetNode**, **трансформаций** и полных **Board Templates**.
+**Template Marketplace** — открытая библиотека готовых шаблонов для ускорения аналитической работы. Включает шаблоны для **SourceNode/ContentNode**, **WidgetNode**, **трансформаций** и полных **Board Templates**.
 
 ### 🆕 Новая архитектура: Data-Centric Canvas
 
 Marketplace теперь поддерживает три типа узлов:
-- **DataNode** — шаблоны источников данных (SQL, API, CSV)
-- **WidgetNode** — шаблоны визуализаций (созданные AI из DataNode)
+- **SourceNode** — шаблоны источников данных (SQL, API, CSV)
+- **WidgetNode** — шаблоны визуализаций (созданные AI из ContentNode)
 - **TransformationNode** — переиспользуемые трансформации (Python pandas код)
 
 ### Ключевые возможности
-- 📚 **Публичная библиотека**: Тысячи готовых шаблонов DataNode, WidgetNode, Transformations
+- 📚 **Публичная библиотека**: Тысячи готовых шаблонов SourceNode, ContentNode, WidgetNode, Transformations
 - ⚡ **One-click import**: Импорт шаблона в свою доску одним кликом
 - 🎨 **Категории**: 
   - **Data Sources**: PostgreSQL, MySQL, MongoDB, API, CSV
@@ -39,8 +39,8 @@ Marketplace теперь поддерживает три типа узлов:
 ### Database Schema
 
 ```python
-class DataNodeTemplate(Base):
-    """Шаблон DataNode в Marketplace"""
+class SourceNodeTemplate(Base):
+    """Шаблон SourceNode в Marketplace"""
     __tablename__ = 'data_node_templates'
     
     id = Column(UUID, primary_key=True, default=uuid4)
@@ -57,7 +57,7 @@ class DataNodeTemplate(Base):
         'sales', 'hr', 'engineering', 'analytics', 'other'
     ))
     
-    # DataNode configuration
+    # SourceNode configuration
     data_source_type = Column(String(50))  # 'postgresql', 'mysql', 'api', etc.
     query_template = Column(Text)  # SQL query with placeholders
     api_config = Column(JSONB)  # API endpoint, method, headers, etc.
@@ -115,8 +115,8 @@ class TransformationTemplate(Base):
     
     # Transformation code
     python_code = Column(Text, nullable=False)  # Pandas transformation
-    input_schema = Column(JSONB)  # Expected input DataNode schema
-    output_schema = Column(JSONB)  # Expected output DataNode schema
+    input_schema = Column(JSONB)  # Expected input ContentNode schema
+    output_schema = Column(JSONB)  # Expected output ContentNode schema
     
     # Parameters
     parameters = Column(JSONB)  # [{"name": "window_size", "type": "int", "default": 7}]
@@ -166,7 +166,7 @@ class WidgetNodeTemplate(Base):
     html_template = Column(Text)  # HTML with template variables
     css_template = Column(Text)  # CSS styling
     js_template = Column(Text)  # JavaScript for interactivity
-    required_data_schema = Column(JSONB)  # Expected DataNode schema
+    required_data_schema = Column(JSONB)  # Expected ContentNode schema
     
     # Preview
     thumbnail_url = Column(String(500))
@@ -192,7 +192,7 @@ class WidgetNodeTemplate(Base):
 
 
 class BoardTemplate(Base):
-    """Шаблон доски (полный граф: DataNode → Transformation → WidgetNode)"""
+    """Шаблон доски (полный граф: SourceNode → Transformation → ContentNode → WidgetNode)"""
     __tablename__ = 'board_templates'
     
     id = Column(UUID, primary_key=True, default=uuid4)
@@ -202,7 +202,7 @@ class BoardTemplate(Base):
     industry = Column(String(100))
     
     # Configuration
-    nodes = Column(JSONB)  # Array of DataNode, WidgetNode, CommentNode configs
+    nodes = Column(JSONB)  # Array of SourceNode, ContentNode, WidgetNode, CommentNode configs
     edges = Column(JSONB)  # TRANSFORMATION, VISUALIZATION, COMMENT edges
     layout = Column(JSONB)  # Node positions on canvas
     
@@ -324,7 +324,7 @@ const MARKETPLACE_CATEGORIES = {
 
 ## 📦 Example Templates
 
-### 1. DataNode Template: Stripe Monthly Revenue
+### 1. SourceNode Template: Stripe Monthly Revenue
 
 ```json
 {
@@ -433,13 +433,13 @@ const MARKETPLACE_CATEGORIES = {
   "nodes": [
     {
       "id": "dn1",
-      "type": "DataNode",
+      "type": "SourceNode",
       "name": "Stripe Subscriptions",
       "template_id": "stripe_mrr_template_id"
     },
     {
       "id": "dn2",
-      "type": "DataNode",
+      "type": "SourceNode",
       "name": "Churned Customers",
       "template_id": "stripe_churn_template_id"
     },
@@ -525,7 +525,7 @@ const MARKETPLACE_CATEGORIES = {
 ## 🚀 Implementation Roadmap
 
 ### Phase 1: MVP (Month 1-2)
-- [ ] Database models для DataNode/Transformation/WidgetNode templates
+- [ ] Database models для SourceNode/ContentNode/Transformation/WidgetNode templates
 - [ ] Marketplace browse page (категории, поиск, фильтры)
 - [ ] Template detail modal
 - [ ] Import functionality

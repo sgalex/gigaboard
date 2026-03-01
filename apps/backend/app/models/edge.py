@@ -13,9 +13,6 @@ class EdgeType(str, enum.Enum):
     Source-Content Node Architecture v2.0:
     - TRANSFORMATION: SourceNode/ContentNode → ContentNode (data transformation with Python code)
     - VISUALIZATION: ContentNode/SourceNode → WidgetNode (auto-refresh visualization)
-    
-    Примечание: EXTRACT удалён — SourceNode теперь содержит данные напрямую (наследует ContentNode).
-    См. docs/SOURCE_NODE_CONCEPT_V2.md для деталей.
     """
     TRANSFORMATION = "TRANSFORMATION"  # SourceNode/ContentNode → ContentNode (with Python code)
     VISUALIZATION = "VISUALIZATION"   # ContentNode/SourceNode → WidgetNode (auto-refresh)

@@ -7,11 +7,15 @@ import { RegisterPage } from './pages/RegisterPage'
 import { WelcomePage } from './pages/WelcomePage'
 import { ProjectOverviewPage } from './pages/ProjectOverviewPage'
 import { BoardPage } from './pages/BoardPage'
+import { DashboardPage } from './pages/DashboardPage'
+import { DashboardViewPage } from './pages/DashboardViewPage'
+import { PublicDashboardPage } from './pages/PublicDashboardPage'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { ThemeProvider } from './components/ThemeProvider'
 import { Toaster } from './components/notifications/Toaster'
 import { CreateProjectDialog } from './components/dialogs/CreateProjectDialog'
 import { CreateBoardDialog } from './components/dialogs/CreateBoardDialog'
+import { CreateDashboardDialog } from './components/dialogs/CreateDashboardDialog'
 
 function App() {
     return (
@@ -20,6 +24,7 @@ function App() {
             <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
                 <CreateProjectDialog />
                 <CreateBoardDialog />
+                <CreateDashboardDialog />
                 <Routes>
                     <Route path="/" element={<LandingPage />} />
                     <Route path="/login" element={<LoginPage />} />
@@ -48,6 +53,23 @@ function App() {
                             </ProtectedRoute>
                         }
                     />
+                    <Route
+                        path="/project/:projectId/dashboard/:dashboardId"
+                        element={
+                            <ProtectedRoute>
+                                <DashboardPage />
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route
+                        path="/project/:projectId/dashboard/:dashboardId/view"
+                        element={
+                            <ProtectedRoute>
+                                <DashboardViewPage />
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route path="/shared/:token" element={<PublicDashboardPage />} />
                     <Route path="*" element={<Navigate to="/welcome" replace />} />
                 </Routes>
             </Router>

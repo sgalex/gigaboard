@@ -22,6 +22,8 @@ class BoardUpdate(BaseModel):
     
     name: str | None = Field(None, min_length=1, max_length=200)
     description: str | None = None
+    settings: dict | None = None
+    thumbnail_url: str | None = None
 
 
 class BoardResponse(BoardBase):
@@ -30,6 +32,8 @@ class BoardResponse(BoardBase):
     id: UUID
     project_id: UUID
     user_id: UUID
+    settings: dict | None = None
+    thumbnail_url: str | None = None
     created_at: datetime
     updated_at: datetime
     
@@ -40,8 +44,12 @@ class BoardResponse(BoardBase):
 class BoardWithNodesResponse(BoardResponse):
     """Schema for board with node counts."""
     
+    source_nodes_count: int = 0
+    content_nodes_count: int = 0
     widget_nodes_count: int = 0
     comment_nodes_count: int = 0
+    tables_count: int = 0  # Sum of content.tables length across ContentNodes on board
+    columns_count: int = 0  # Sum of columns in all tables on board
     
     class Config:
         from_attributes = True

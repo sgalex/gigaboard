@@ -4,9 +4,10 @@
 """
 from typing import Any
 from uuid import UUID
+import uuid
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_db
@@ -14,10 +15,16 @@ from app.models import User
 from app.middleware import get_current_user, get_current_user_with_token
 from app.services.content_node_service import ContentNodeService
 from app.services.board_service import BoardService
-from app.services.agents.transformation_agent import transformation_agent
-from app.services.agents.transformation_multi_agent import get_transformation_multi_agent
 from app.services.executors.python_executor import python_executor
 from app.services.edge_service import EdgeService
+from app.services.filter_engine import FilterEngine
+from app.services.dimension_service import DimensionService
+from app.services.controllers import (
+    TransformationController,
+    TransformSuggestionsController,
+    WidgetController,
+    WidgetSuggestionsController,
+)
 from app.utils.node_positioning import find_optimal_node_position, NodeBounds
 from app.schemas.content_node import (
     ContentNodeCreate,
@@ -40,6 +47,143 @@ from app.schemas.widget_suggestions import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/content-nodes", tags=["content-nodes"])
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Serialization helpers
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _serialize_content_node(node) -> dict:
+    """Serialize ContentNode/SourceNode SQLAlchemy model to dict with correct field names.
+    
+    Without this, node_metadata is serialized as 'node_metadata' instead of 'metadata',
+    because transform routes return raw dicts without response_model.
+    ContentNodeResponse applies validation_alias='node_metadata' → serialization_alias='metadata'.
+    """
+    return ContentNodeResponse.model_validate(node).model_dump(by_alias=True)
+
+
+def _serialize_edge(edge) -> dict | None:
+    """Serialize Edge SQLAlchemy model to dict."""
+    if edge is None:
+        return None
+    from app.schemas.edge import EdgeResponse
+    return EdgeResponse.model_validate(edge).model_dump(by_alias=True)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Helper functions for V2 controller integration
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _get_orchestrator_or_503():
+    """Get Orchestrator V2 or raise 503."""
+    from app.main import get_orchestrator
+    orch = get_orchestrator()
+    if not orch:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orchestrator not initialized. Check backend logs for Redis/GigaChat connection issues."
+        )
+    return orch
+
+
+async def _collect_content_nodes_data(
+    db: AsyncSession,
+    primary_content_id: UUID,
+    selected_node_ids: list[str] | None = None,
+) -> tuple[list[dict], dict, str, str]:
+    """
+    Collect data from ContentNodes for controller processing.
+
+    Consolidates duplicated node-loading logic from multiple route handlers.
+
+    Returns:
+        (nodes_data, input_data, text_content, board_id)
+        - nodes_data: list of node dicts {node_id, node_name, text, tables}
+        - input_data: dict name→DataFrame for PythonExecutor
+        - text_content: concatenated text from all nodes
+        - board_id: UUID string of the board
+    """
+    if selected_node_ids is None:
+        selected_node_ids = [str(primary_content_id)]
+
+    # Get board_id from primary node
+    primary_node = await ContentNodeService.get_content_node(db, primary_content_id)
+    if not primary_node:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"ContentNode {primary_content_id} not found"
+        )
+    board_id = str(primary_node.board_id)
+
+    nodes_data: list[dict] = []
+    input_data: dict = {}
+    text_content = ""
+
+    for nid_str in selected_node_ids:
+        try:
+            nid = UUID(nid_str) if isinstance(nid_str, str) else nid_str
+        except ValueError:
+            logger.warning(f"Invalid UUID format: {nid_str}")
+            continue
+
+        # Reuse primary_node if same ID
+        if nid == primary_content_id:
+            node = primary_node
+        else:
+            node = await ContentNodeService.get_content_node(db, nid)
+
+        if not node or not node.content:
+            continue
+
+        if "text" in node.content and node.content["text"]:
+            text_content += node.content["text"] + "\n\n"
+
+        nd: dict = {
+            "node_id": str(node.id),
+            "node_name": (
+                node.node_metadata.get("name", f"Node {node.id}")
+                if node.node_metadata else f"Node {node.id}"
+            ),
+            "text": node.content.get("text", ""),
+            "tables": [],
+        }
+
+        for table in node.content.get("tables", []):
+            nd["tables"].append({
+                "name": table.get("name", "table"),
+                "columns": table.get("columns", []),
+                "column_types": table.get("column_types", {}),
+                "rows": table.get("rows", [])[:10],
+                "row_count": table.get("row_count", len(table.get("rows", []))),
+            })
+            try:
+                df = python_executor.table_dict_to_dataframe(table)
+                input_data[table["name"]] = df
+            except Exception as e:
+                logger.warning(f"Failed to convert table to DataFrame: {e}")
+
+        nodes_data.append(nd)
+
+    # Text-only fallback
+    if not input_data and text_content.strip():
+        input_data["text"] = text_content.strip()
+        logger.info(f"📝 Text-only mode: {len(text_content)} characters")
+
+    if not nodes_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No valid ContentNodes found"
+        )
+
+    return nodes_data, input_data, text_content, board_id
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  CRUD Routes
+# ══════════════════════════════════════════════════════════════════════
 
 
 @router.post("/", response_model=ContentNodeResponse, status_code=status.HTTP_201_CREATED)
@@ -67,13 +211,73 @@ async def create_content_node(
 @router.get("/{content_id}", response_model=ContentNodeResponse)
 async def get_content_node(
     content_id: UUID,
+    filters: str | None = Query(None, description="URL-encoded FilterExpression JSON for cross-filtering"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get ContentNode by ID."""
+    """Get ContentNode by ID.
+
+    Supports optional cross-filtering via `?filters=<encoded JSON>`.
+    See docs/CROSS_FILTER_SYSTEM.md
+    """
     content_node = await ContentNodeService.get_content_node(db, content_id)
     if not content_node:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ContentNode not found")
+
+    # Apply cross-filters if provided
+    if filters and content_node.content and content_node.content.get("tables"):
+        import json as _json
+        from urllib.parse import unquote
+        try:
+            decoded = unquote(filters)
+            filter_expr = _json.loads(decoded)
+            mappings = await DimensionService.get_mappings_for_node(db, content_id)
+            logger.info(
+                "get_content_node %s: filters applied, mappings=%d",
+                content_id, len(mappings),
+            )
+            if not mappings:
+                logger.info(
+                    "get_content_node %s: no mappings, running auto-detect",
+                    content_id,
+                )
+                project_id = await DimensionService.get_project_id_for_node(
+                    db, content_node.board_id,
+                )
+                if project_id:
+                    await DimensionService.auto_detect_and_upsert(
+                        db, project_id, content_id,
+                        content_node.content["tables"],
+                    )
+                    await db.flush()
+                    mappings = await DimensionService.get_mappings_for_node(db, content_id)
+            if mappings:
+                orig_tables = content_node.content["tables"]
+                filtered_tables = FilterEngine.apply_filters(
+                    orig_tables,
+                    filter_expr,
+                    mappings,
+                )
+                for i, (ot, ft) in enumerate(zip(orig_tables, filtered_tables)):
+                    logger.info(
+                        "get_content_node %s: table[%d] '%s' rows %d→%d",
+                        content_id, i, ot.get("name", "?"),
+                        ot.get("row_count", len(ot.get("rows", []))),
+                        ft.get("row_count", len(ft.get("rows", []))),
+                    )
+                from copy import deepcopy
+                node_dict = _serialize_content_node(content_node)
+                node_dict["content"]["tables"] = filtered_tables
+                return node_dict
+            else:
+                logger.warning(
+                    "get_content_node %s: no dimension mappings even after auto-detect — filter skipped",
+                    content_id,
+                )
+        except Exception as e:
+            logger.warning("Failed to apply cross-filters: %s", e)
+            # Fall through to return unfiltered data
+
     return content_node
 
 
@@ -121,117 +325,68 @@ async def preview_transformation(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Generate transformation code using Multi-Agent system (no execution).
-    
+    """Generate transformation code using Orchestrator V2 (no execution).
+
     Returns code for preview/edit before execution.
-    
+
     Request body:
     {
         "prompt": str,
-        "selected_node_ids": [UUID, UUID, ...]  # Optional, defaults to [content_id]
+        "selected_node_ids": [UUID, ...]  # Optional, defaults to [content_id]
     }
-    
-    Workflow:
-    1. Collect data from all selected ContentNodes
-    2. AnalystAgent analyzes data
-    3. TransformationAgent generates code
-    4. ValidatorAgent validates code
-    5. Returns code + validation + agent plan
     """
     prompt = params.get("prompt")
     if not prompt:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="prompt is required")
-    
-    # Get selected node IDs (default to single content_id)
+
     selected_node_ids = params.get("selected_node_ids", [str(content_id)])
     if isinstance(selected_node_ids, str):
         selected_node_ids = [selected_node_ids]
     
+    existing_code = params.get("existing_code")
+    chat_history = params.get("chat_history", [])
+
     try:
-        # Collect data from all selected ContentNodes
-        all_nodes_data = []
-        for node_id_str in selected_node_ids:
-            try:
-                node_id = UUID(node_id_str) if isinstance(node_id_str, str) else node_id_str
-            except ValueError:
-                logger.warning(f"Invalid UUID format: {node_id_str}")
-                continue
-                
-            node = await ContentNodeService.get_content_node(db, node_id)
-            if node and node.content:
-                # Collect node text and tables
-                node_data = {
-                    "node_id": str(node.id),
-                    "node_name": node.node_metadata.get("name", f"Node {node.id}") if node.node_metadata else f"Node {node.id}",
-                    "text": node.content.get("text", ""),
-                    "tables": []
-                }
-                
-                # Process tables: limit rows to 10
-                if "tables" in node.content:
-                    for table in node.content["tables"]:
-                        table_data = {
-                            "name": table.get("name", "table"),
-                            "columns": table.get("columns", []),
-                            "column_types": table.get("column_types", {}),
-                            "rows": table.get("rows", [])[:10],  # First 10 rows only
-                            "row_count": table.get("row_count", len(table.get("rows", [])))
-                        }
-                        node_data["tables"].append(table_data)
-                
-                all_nodes_data.append(node_data)
-        
-        if not all_nodes_data:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No valid ContentNodes found")
-        
-        # Initialize Multi-Agent system with message bus (or fallback if Redis unavailable)
-        from app.services.multi_agent import AgentMessageBus
-        from app.services.gigachat_service import get_gigachat_service
-        
-        message_bus = None
-        gigachat_service = get_gigachat_service()
-        
-        # Try to connect to message bus, fallback to direct mode if Redis unavailable
-        try:
-            message_bus = AgentMessageBus()
-            await message_bus.connect()
-            logger.info("Using Multi-Agent system with message bus")
-        except Exception as e:
-            logger.warning(f"Message bus unavailable, using direct mode: {e}")
-            message_bus = None
-        
-        # Use Multi-Agent system for code generation
-        multi_agent = get_transformation_multi_agent(
-            message_bus=message_bus,
-            gigachat_service=gigachat_service
+        nodes_data, _input_data, text_content, board_id = await _collect_content_nodes_data(
+            db, content_id, selected_node_ids
         )
-        
-        result = await multi_agent.generate_transformation_code(
-            nodes_data=all_nodes_data,
-            user_prompt=prompt
+
+        # V2 controller — preview only (no execution)
+        orchestrator = _get_orchestrator_or_503()
+        controller = TransformationController(orchestrator)
+
+        result = await controller.process_request(
+            user_message=prompt,
+            context={
+                "board_id": board_id,
+                "user_id": str(current_user.id),
+                "input_tables": [t for nd in nodes_data for t in nd.get("tables", [])],
+                "text_content": text_content,
+                "existing_code": existing_code,
+                "chat_history": chat_history,
+                "selected_node_ids": selected_node_ids,
+                "skip_execution": True,
+            },
         )
-        
-        # Disconnect message bus if connected
-        if message_bus:
-            await message_bus.disconnect()
-        
+
+        if result.status != "success":
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result.error or "Code generation failed"
+            )
+
         return {
-            "transformation_id": result["transformation_id"],
-            "code": result["code"],
-            "description": result["description"],
-            "validation": result["validation"],
-            "agent_plan": result["agent_plan"],
-            "analysis": result["analysis"],
-            "source_node_ids": selected_node_ids
+            "transformation_id": str(uuid.uuid4()),
+            "code": result.code,
+            "description": result.code_description,
+            "validation": result.validation,
+            "agent_plan": result.plan,
+            "analysis": None,
+            "source_node_ids": selected_node_ids,
         }
-        
-    except ValueError as e:
-        logger.error(f"Multi-agent code generation failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Preview transformation failed: {e}", exc_info=True)
         raise HTTPException(
@@ -289,14 +444,24 @@ async def test_transformation(
                 continue
             
             node = await ContentNodeService.get_content_node(db, node_id)
-            if node and node.content:
+            node_content = node.content if node else None
+
+            # Fallback: try SourceNode if ContentNode not found
+            if not node_content:
+                from app.services.source_node_service import SourceNodeService
+                source_node = await SourceNodeService.get_source_node(db, node_id)
+                if source_node and source_node.content:
+                    node_content = source_node.content
+                    logger.info(f"📦 Using SourceNode fallback for {node_id} in test")
+
+            if node_content:
                 # Collect text content
-                if "text" in node.content and node.content["text"]:
-                    text_content += node.content["text"] + "\n\n"
+                if "text" in node_content and node_content["text"]:
+                    text_content += node_content["text"] + "\n\n"
                 
                 # Collect tables
-                if "tables" in node.content:
-                    for table in node.content["tables"]:
+                if "tables" in node_content:
+                    for table in node_content["tables"]:
                         df = python_executor.table_dict_to_dataframe(table)
                         input_data[table["name"]] = df
         
@@ -315,7 +480,6 @@ async def test_transformation(
             code=code,
             input_data=input_data,
             user_id=str(current_user.id),
-            auth_token=auth_token
         )
         
         execution_time_ms = int((time.time() - start_time) * 1000)
@@ -327,7 +491,7 @@ async def test_transformation(
                 "execution_time_ms": execution_time_ms
             }
         
-        # Convert result DataFrames to table format (limit rows for preview)
+        # Convert result DataFrames to table format with AI-generated names (limit rows for preview)
         result_tables = []
         row_counts = {}
         
@@ -339,9 +503,12 @@ async def test_transformation(
                 # Limit to first 100 rows for preview
                 preview_df = df.head(100)
                 
+                # var_name now contains meaningful name from generated code (e.g., sales_by_brand)
+                logger.info(f"📝 Using table name from code: '{var_name}'")
+                
                 table_dict = python_executor.dataframe_to_table_dict(
                     df=preview_df,
-                    table_name=var_name
+                    table_name=var_name  # Use name from generated code
                 )
                 table_dict["row_count"] = row_count  # Total count
                 table_dict["preview_row_count"] = len(preview_df)  # Preview count
@@ -370,188 +537,74 @@ async def iterative_transformation(
     db: AsyncSession = Depends(get_db),
     user_and_token: tuple[User, str] = Depends(get_current_user_with_token)
 ):
-    """
-    Iterative transformation generation with AI chat.
-    
+    """Iterative transformation generation with AI chat via V2 controller.
+
     Generates new transformation or improves existing one based on chat history.
     Automatically executes and returns preview data.
-    
+
     Request body:
     {
         "user_prompt": str,
-        "existing_code": str | null,  // For improvements
+        "existing_code": str | null,
         "transformation_id": str | null,
         "chat_history": [{"role": str, "content": str}, ...],
         "selected_node_ids": [UUID, ...],
         "preview_only": bool = True
     }
-    
-    Returns:
-    {
-        "transformation_id": str,
-        "code": str,
-        "description": str,
-        "preview_data": {...},  // Executed results
-        "validation": {...},
-        "agent_plan": {...}
-    }
     """
     current_user, auth_token = user_and_token
-    
+
     user_prompt = params.get("user_prompt")
     if not user_prompt:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_prompt is required")
-    
+
     existing_code = params.get("existing_code")
-    transformation_id = params.get("transformation_id")
     chat_history = params.get("chat_history", [])
     selected_node_ids = params.get("selected_node_ids", [str(content_id)])
-    
     if isinstance(selected_node_ids, str):
         selected_node_ids = [selected_node_ids]
-    
-    try:
-        # Collect data from all selected ContentNodes
-        all_nodes_data = []
-        input_data = {}  # For execution
-        text_content = ""  # For text-only ContentNodes
 
-        for node_id_str in selected_node_ids:
-            try:
-                node_id = UUID(node_id_str) if isinstance(node_id_str, str) else node_id_str
-            except ValueError:
-                logger.warning(f"Invalid UUID format: {node_id_str}")
-                continue
-                
-            node = await ContentNodeService.get_content_node(db, node_id)
-            if node and node.content:
-                # Collect text content for text-only mode
-                if "text" in node.content and node.content["text"]:
-                    text_content += node.content["text"] + "\n\n"
-                
-                # For AI prompt context (limited)
-                node_data = {
-                    "node_id": str(node.id),
-                    "node_name": node.node_metadata.get("name", f"Node {node.id}") if node.node_metadata else f"Node {node.id}",
-                    "text": node.content.get("text", ""),
-                    "tables": []
-                }
-                
-                # Process tables
-                if "tables" in node.content:
-                    for table in node.content["tables"]:
-                        # Limited for AI context
-                        table_data = {
-                            "name": table.get("name", "table"),
-                            "columns": table.get("columns", []),
-                            "column_types": table.get("column_types", {}),
-                            "rows": table.get("rows", [])[:10],
-                            "row_count": table.get("row_count", len(table.get("rows", [])))
-                        }
-                        node_data["tables"].append(table_data)
-                        
-                        # Full data for execution
-                        df = python_executor.table_dict_to_dataframe(table)
-                        input_data[table["name"]] = df
-                
-                all_nodes_data.append(node_data)
-        
-        # If no tables but we have text, add it as 'text' variable
-        if not input_data and text_content.strip():
-            input_data["text"] = text_content.strip()
-            logger.info(f"📝 Using text-only mode for AI transformation: {len(text_content)} characters")
-        
-        if not all_nodes_data:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No valid ContentNodes found")
-        
-        # Initialize Multi-Agent system
-        from app.services.multi_agent import AgentMessageBus
-        from app.services.gigachat_service import get_gigachat_service
-        
-        message_bus = None
-        gigachat_service = get_gigachat_service()
-        
-        try:
-            message_bus = AgentMessageBus()
-            await message_bus.connect()
-            logger.info("Using Multi-Agent system with message bus")
-        except Exception as e:
-            logger.warning(f"Message bus unavailable, using direct mode: {e}")
-            message_bus = None
-        
-        # Use Multi-Agent system for iterative generation
-        multi_agent = get_transformation_multi_agent(
-            message_bus=message_bus,
-            gigachat_service=gigachat_service
+    try:
+        nodes_data, input_data, text_content, board_id = await _collect_content_nodes_data(
+            db, content_id, selected_node_ids
         )
-        
-        # Build context for AI
-        context = {
-            "nodes_data": all_nodes_data,
-            "existing_code": existing_code,
-            "chat_history": chat_history,
-            "mode": "improve" if existing_code else "create"
-        }
-        
-        # Generate/improve code
-        result = await multi_agent.generate_transformation_code(
-            nodes_data=all_nodes_data,
-            user_prompt=user_prompt,
-            existing_code=existing_code,
-            chat_history=chat_history
+
+        # V2 controller — generates + executes
+        orchestrator = _get_orchestrator_or_503()
+        controller = TransformationController(orchestrator)
+
+        result = await controller.process_request(
+            user_message=user_prompt,
+            context={
+                "board_id": board_id,
+                "user_id": str(current_user.id),
+                "auth_token": auth_token,
+                "input_tables": [t for nd in nodes_data for t in nd.get("tables", [])],
+                "input_data": input_data,  # Full DataFrames for execution
+                "text_content": text_content,
+                "existing_code": existing_code,
+                "chat_history": chat_history,
+                "selected_node_ids": selected_node_ids,
+            },
         )
-        
-        # Auto-execute for preview
-        import time
-        start_time = time.time()
-        
-        execution_result = await python_executor.execute_transformation(
-            code=result["code"],
-            input_data=input_data,
-            user_id=str(current_user.id),
-            auth_token=auth_token
-        )
-        
-        execution_time_ms = int((time.time() - start_time) * 1000)
-        
-        # Convert results to preview format
-        preview_tables = []
-        if execution_result.success:
-            for var_name, df in execution_result.result_dfs.items():
-                if hasattr(df, 'to_dict'):
-                    row_count = len(df)
-                    preview_df = df.head(50)  # First 50 rows for quick preview
-                    
-                    table_dict = python_executor.dataframe_to_table_dict(
-                        df=preview_df,
-                        table_name=var_name
-                    )
-                    table_dict["row_count"] = row_count
-                    table_dict["preview_row_count"] = len(preview_df)
-                    preview_tables.append(table_dict)
-        
-        # Disconnect message bus
-        if message_bus:
-            await message_bus.disconnect()
-        
+
+        if result.status != "success":
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result.error or "Transformation failed"
+            )
+
         return {
-            "transformation_id": result["transformation_id"],
-            "code": result["code"],
-            "description": result["description"],
-            "preview_data": {
-                "tables": preview_tables,
-                "execution_time_ms": execution_time_ms
-            } if execution_result.success else None,
-            "validation": result["validation"],
-            "agent_plan": result["agent_plan"]
+            "transformation_id": str(uuid.uuid4()),
+            "code": result.code,
+            "description": result.code_description,
+            "preview_data": result.preview_data,
+            "validation": result.validation,
+            "agent_plan": result.plan,
         }
-        
-    except ValueError as e:
-        logger.error(f"Iterative transformation failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Iterative transformation failed: {e}", exc_info=True)
         raise HTTPException(
@@ -581,6 +634,7 @@ async def _generate_content_metadata(
         dict with 'name' and 'description' keys
     """
     logger.info(f"🤖 Starting AI metadata generation for transformation")
+    logger.info(f"🤖 _generate_content_metadata called with: user_prompt='{user_prompt[:100] if user_prompt else None}', result_tables={[t.get('name') for t in (result_tables or [])]}")
     
     try:
         from app.services.gigachat_service import get_gigachat_service
@@ -601,8 +655,16 @@ async def _generate_content_metadata(
         # Build summary of result data
         result_summary = []
         for table in result_tables[:3]:  # Max 3 result tables
-            cols = ", ".join(table.get('columns', [])[:5])  # Max 5 columns
+            raw_cols = table.get('columns', [])[:5]
+            # columns can be list of dicts [{name, type}] or list of strings
+            if raw_cols and isinstance(raw_cols[0], dict):
+                cols = ", ".join(c.get("name", str(c)) for c in raw_cols)
+            else:
+                cols = ", ".join(str(c) for c in raw_cols)
             result_summary.append(f"  - {table['name']}: {table.get('row_count', 0)} rows ({cols}...)")
+        
+        logger.info(f"🤖 source_summary: {source_summary}")
+        logger.info(f"🤖 result_summary: {result_summary}")
         
         # Create prompt for AI
         prompt = f"""На основе следующей информации о data transformation сгенерируй краткое название (3-5 слов) и описание (1-2 предложения).
@@ -623,7 +685,10 @@ async def _generate_content_metadata(
   "description": "Краткое описание: что было сделано и какой получен результат"
 }}
 
-Важно: название должно быть информативным и отражать суть трансформации, без слова "Transformed"."""
+ВАЖНО: 
+- Название и описание должны быть СТРОГО на русском языке, даже если исходные данные содержат английские термины или данные на других языках
+- Название должно быть информативным и отражать суть трансформации, без слова "Transformed"
+- Используй русские термины для технических понятий (например: "фильтрация", "группировка", "агрегация", "объединение")"""
         
         logger.info(f"🤖 Sending prompt to GigaChat ({len(prompt)} chars)")
         
@@ -635,8 +700,30 @@ async def _generate_content_metadata(
         import json
         import re
         
-        # Try to extract JSON from response (improved regex)
-        json_match = re.search(r'\{[^{}]*"name"[^{}]*"description"[^{}]*\}', response, re.DOTALL)
+        # Try to extract JSON from response — support any key order
+        # First attempt: standard json.loads on first {...} block
+        brace_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
+        if brace_match:
+            try:
+                metadata = json.loads(brace_match.group())
+                if metadata.get("name") or metadata.get("description"):
+                    name = metadata.get("name", "")[:100]
+                    description = metadata.get("description", "")[:500]
+                    
+                    logger.info(f"✅ Parsed AI metadata (json.loads) - name: '{name}', description: '{description[:100]}...'")
+                    
+                    return {
+                        "name": name,
+                        "description": description
+                    }
+            except json.JSONDecodeError:
+                pass
+
+        # Second attempt: regex for JSON with "name" and "description" (any order)
+        json_match = re.search(
+            r'\{[^{}]*(?:"name"|"description")[^{}]*(?:"name"|"description")[^{}]*\}',
+            response, re.DOTALL,
+        )
         if json_match:
             try:
                 metadata = json.loads(json_match.group())
@@ -653,8 +740,9 @@ async def _generate_content_metadata(
                 logger.warning(f"Failed to parse JSON: {e}, matched text: {json_match.group()}")
         
         # Try alternative: look for lines starting with name/description
-        name_match = re.search(r'["\']?name["\']?\s*[:=]\s*["\']([^"\']+)["\']', response, re.IGNORECASE)
-        desc_match = re.search(r'["\']?description["\']?\s*[:=]\s*["\']([^"\']+)["\']', response, re.IGNORECASE)
+        # Handle markdown formatting: **name**, *name*, __name__, `name`
+        name_match = re.search(r'[*_`"\']*name[*_`"\']*\s*[:=]\s*["\']([^"\']+)["\']', response, re.IGNORECASE)
+        desc_match = re.search(r'[*_`"\']*description[*_`"\']*\s*[:=]\s*["\']([^"\']+)["\']', response, re.IGNORECASE)
         
         if name_match or desc_match:
             name = name_match.group(1)[:100] if name_match else f"Result: {result_tables[0]['name'] if result_tables else 'Data'}"
@@ -668,18 +756,20 @@ async def _generate_content_metadata(
             }
         
         # Fallback if parsing failed
-        logger.warning(f"⚠️ Failed to parse AI metadata response, using fallback. Response: {response[:200]}")
+        fallback_name = f"Результат: {result_tables[0]['name'] if result_tables else 'Данные'}"
+        logger.warning(f"⚠️ Failed to parse AI metadata response, using fallback name='{fallback_name}'. Full response: {response[:500]}")
         return {
-            "name": f"Result: {result_tables[0]['name'] if result_tables else 'Data'}",
-            "description": user_prompt[:200] if user_prompt else "Transformation result"
+            "name": fallback_name,
+            "description": user_prompt[:200] if user_prompt else "Результат трансформации"
         }
         
     except Exception as e:
-        logger.error(f"❌ Failed to generate AI metadata: {e}", exc_info=True)
+        fallback_name = f"Результат: {result_tables[0]['name'] if result_tables else 'Данные'}"
+        logger.error(f"❌ Failed to generate AI metadata: {e}, using fallback name='{fallback_name}'", exc_info=True)
         # Fallback to simple generation
         return {
-            "name": f"Result: {result_tables[0]['name'] if result_tables else 'Data'}",
-            "description": user_prompt[:200] if user_prompt else "Transformation result"
+            "name": fallback_name,
+            "description": user_prompt[:200] if user_prompt else "Результат трансформации"
         }
 
 
@@ -706,6 +796,7 @@ async def execute_transformation(
     transformation_id = params.get("transformation_id")
     description = params.get("description", "Custom transformation")
     prompt = params.get("prompt", "")  # Original user prompt for transformation
+    chat_history = params.get("chat_history", [])  # Chat history for editing later
     selected_node_ids = params.get("selected_node_ids", [str(content_id)])  # Support multiple source nodes
     target_node_id = params.get("target_node_id")  # If provided, UPDATE existing node instead of CREATE
     
@@ -779,12 +870,11 @@ async def execute_transformation(
         
         logger.info(f"🚀 Executing transformation code ({len(code)} chars)...")
         
-        # Execute transformation code with auth token for gb helpers
+        # Execute transformation code
         execution_result = await python_executor.execute_transformation(
             code=code,
             input_data=input_data,
             user_id=str(current_user.id),
-            auth_token=auth_token
         )
         
         if not execution_result.success:
@@ -793,14 +883,15 @@ async def execute_transformation(
                 detail=f"Transformation execution failed: {execution_result.error}"
             )
         
-        # Convert result DataFrames to ContentNode format (multiple tables)
+        # Convert result DataFrames to ContentNode format with AI-generated table names
         result_tables = []
-        for table_name, df in execution_result.result_dfs.items():
-            result_table = python_executor.dataframe_to_table_dict(df, table_name)
-            # Keep 'rows' as is - frontend expects it
-            # (dataframe_to_table_dict already returns 'rows')
+        for var_name, df in execution_result.result_dfs.items():
+            # var_name now contains meaningful name from generated code (e.g., sales_by_brand)
+            logger.info(f"📝 Using table name from code: '{var_name}'")
+            
+            result_table = python_executor.dataframe_to_table_dict(df, var_name)
             result_tables.append(result_table)
-            logger.info(f"📋 Result table '{table_name}': {result_table.get('row_count', 0)} rows, columns: {result_table.get('columns', [])}")
+            logger.info(f"📋 Result table '{var_name}': {result_table.get('row_count', 0)} rows, columns: {result_table.get('columns', [])}")
             # Log first 2 rows of data
             if result_table.get('data') and len(result_table['data']) > 0:
                 logger.info(f"   First row: {result_table['data'][0]}")
@@ -831,7 +922,7 @@ async def execute_transformation(
                 logger.info(f"🔄 UPDATE mode: updating existing node {target_node_id}")
                 
                 # Update content and lineage
-                final_name = ai_metadata.get("name") or existing_node.node_metadata.get('name', f"Transformed: {source_node.node_metadata.get('name', 'Data')}")
+                final_name = ai_metadata.get("name") or existing_node.node_metadata.get('name', f"Трансформация: {source_node.node_metadata.get('name', 'Данные')}")
                 final_description = ai_metadata.get("description", description[:100] if description else "")
                 
                 # Preserve existing lineage and append new transformation
@@ -850,9 +941,11 @@ async def execute_transformation(
                         {
                             "operation": "transform",
                             "description": description,
+                            "prompt": prompt,
                             "code_snippet": code,
                             "transformation_id": transformation_id or str(uuid.uuid4()),
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "chat_history": chat_history
                         }
                     ]
                 }
@@ -912,9 +1005,9 @@ async def execute_transformation(
                 logger.info(f"✅ Updated existing node {target_node_id} with {len(result_tables)} tables")
                 
                 return {
-                    "content_node": updated_node,
-                    "transform_edge": existing_edges[0] if existing_edges else None,
-                    "transform_edges": existing_edges,
+                    "content_node": _serialize_content_node(updated_node),
+                    "transform_edge": _serialize_edge(existing_edges[0]) if existing_edges else None,
+                    "transform_edges": [_serialize_edge(e) for e in existing_edges],
                     "transformation": {
                         "id": transformation_id,
                         "code": code,
@@ -970,7 +1063,7 @@ async def execute_transformation(
         )
         
         # Create new ContentNode with multiple result tables
-        final_name = ai_metadata.get("name") or f"Transformed: {source_node.node_metadata.get('name', 'Data')}"
+        final_name = ai_metadata.get("name") or f"Трансформация: {source_node.node_metadata.get('name', 'Данные')}"
         final_description = ai_metadata.get("description", description[:100] if description else "")
         
         logger.info(f"📦 Creating ContentNode with name='{final_name}', description='{final_description[:50]}...'")
@@ -995,9 +1088,11 @@ async def execute_transformation(
                         {
                             "operation": "transform",
                             "description": description,
+                            "prompt": prompt,
                             "code_snippet": code,  # Full code, not truncated
                             "transformation_id": transformation_id or str(uuid.uuid4()),
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "chat_history": chat_history
                         }
                     ]
                 },
@@ -1052,9 +1147,9 @@ async def execute_transformation(
         logger.info(f"Transformation executed: {len(all_source_nodes)} source nodes -> {new_content_node.id}")
         
         return {
-            "content_node": new_content_node,
-            "transform_edge": created_edges[0] if created_edges else None,  # Return first edge for backward compatibility
-            "transform_edges": created_edges,  # Return all edges
+            "content_node": _serialize_content_node(new_content_node),
+            "transform_edge": _serialize_edge(created_edges[0]) if created_edges else None,
+            "transform_edges": [_serialize_edge(e) for e in created_edges],
             "transformation": {
                 "id": transformation_id,
                 "code": code,
@@ -1082,91 +1177,102 @@ async def transform_content_node(
     db: AsyncSession = Depends(get_db),
     user_and_token: tuple[User, str] = Depends(get_current_user_with_token)
 ):
-    """Transform a ContentNode using AI-generated Python code.
-    
+    """Transform a ContentNode using AI-generated Python code (V2 controller).
+
     Creates a new ContentNode with transformed data and TRANSFORMATION edge.
     """
     current_user, auth_token = user_and_token
-    
+
     prompt = params.get("prompt")
     if not prompt:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="prompt is required")
-    
+
     try:
         # 1. Get source ContentNode
         source_node = await ContentNodeService.get_content_node(db, content_id)
         if not source_node:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ContentNode not found")
-        
-        # 2. Generate transformation code via AI agent
-        transformation = await transformation_agent.generate_transformation(
-            source_content=source_node.content,
-            prompt=prompt,
-            metadata={
+
+        # 2. Generate code via V2 controller (skip_execution — route handles execution + DB save)
+        orchestrator = _get_orchestrator_or_503()
+        controller = TransformationController(orchestrator)
+
+        input_tables = source_node.content.get("tables", []) if source_node.content else []
+        gen_result = await controller.process_request(
+            user_message=prompt,
+            context={
                 "board_id": str(source_node.board_id),
                 "user_id": str(current_user.id),
-            }
+                "input_tables": input_tables,
+                "skip_execution": True,
+            },
         )
-        
-        # Validate generated code
-        validation = await transformation_agent.validate_code(transformation["code"])
-        if not validation["valid"]:
+
+        if gen_result.status != "success" or not gen_result.code:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Generated code validation failed: {validation['errors']}"
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=gen_result.error or "Code generation failed"
             )
-        
+
         # 3. Prepare input data for execution
         input_data = {}
-        for table in source_node.content.get("tables", []):
+        for table in input_tables:
             df = python_executor.table_dict_to_dataframe(table)
             input_data[table["name"]] = df
-        
-        # 4. Execute transformation code with auth token for gb helpers
+
+        # 4. Execute transformation code
         execution_result = await python_executor.execute_transformation(
-            code=transformation["code"],
+            code=gen_result.code,
             input_data=input_data,
             user_id=str(current_user.id),
-            auth_token=auth_token
         )
-        
+
         if not execution_result.success:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Transformation execution failed: {execution_result.error}"
             )
-        
-        # 5. Convert result DataFrames to ContentNode format (multiple tables)
+
+        # 5. Convert result DataFrames to ContentNode format
         result_tables = []
-        for table_name, df in execution_result.result_dfs.items():
-            result_table = python_executor.dataframe_to_table_dict(df, table_name)
+        for var_name, df in execution_result.result_dfs.items():
+            result_table = python_executor.dataframe_to_table_dict(df, var_name)
             result_tables.append(result_table)
-        
-        # 6. Create new ContentNode with multiple result tables
-        from app.schemas.content_node import ContentNodeCreate, DataLineage
-        
+
+        # 6. Generate AI-powered name and description (как в V1 execute-transformation)
+        from app.schemas.content_node import ContentNodeCreate
+
+        ai_metadata = await _generate_content_metadata(
+            source_nodes=[source_node],
+            user_prompt=prompt,
+            transformation_code=gen_result.code,
+            result_tables=result_tables,
+            execution_time_ms=execution_result.execution_time_ms or 0,
+        )
+
+        source_name = source_node.node_metadata.get("name", "Данные") if source_node.node_metadata else "Данные"
+        final_name = ai_metadata.get("name") or f"Трансформация: {source_name}"
+        final_description = ai_metadata.get("description") or gen_result.code_description or ""
+
+        logger.info(f"🤖 V2 transform AI metadata - name: '{final_name}', description: '{final_description[:100]}...'")
+
+        # 7. Create new ContentNode
         new_content_node = await ContentNodeService.create_content_node(
             db,
             ContentNodeCreate(
                 board_id=source_node.board_id,
-                content={
-                    "text": prompt[:100] if prompt else "",
-                    "tables": result_tables
-                },
+                content={"text": prompt[:100] if prompt else "", "tables": result_tables},
                 lineage={
                     "source_node_id": str(content_id),
-                    "transformation_id": transformation["transformation_id"],
                     "operation": "transform",
-                    "timestamp": transformation["metadata"]["generated_at"],
-                    "agent": "transformation_agent",
+                    "agent": "orchestrator_v2",
                     "created_by": str(current_user.id),
                 },
                 metadata={
-                    "name": f"Transformed: {source_node.node_metadata.get('name', 'Data')}",
-                    "description": transformation["description"],
+                    "name": final_name,
+                    "description": final_description,
                     "transformation_prompt": prompt,
                     "execution_time_ms": execution_result.execution_time_ms,
-                    "source_rows": sum(t.get("row_count", 0) for t in source_node.content.get("tables", [])),
                     "result_tables_count": len(result_tables),
                     "result_rows": sum(t.get("row_count", 0) for t in result_tables),
                 },
@@ -1176,13 +1282,13 @@ async def transform_content_node(
                 }
             )
         )
-        
+
         await db.commit()
         await db.refresh(new_content_node)
-        
+
         # 7. Create TRANSFORMATION edge
         from app.schemas.edge import EdgeCreate
-        
+
         transform_edge = await EdgeService.create_edge(
             db,
             source_node.board_id,
@@ -1194,29 +1300,27 @@ async def transform_content_node(
                 edge_type="TRANSFORMATION",
                 label=prompt[:50],
                 transformation_params={
-                    "transformation_id": transformation["transformation_id"],
                     "prompt": prompt,
-                    "code": transformation["code"],
+                    "code": gen_result.code,
                     "execution_time_ms": execution_result.execution_time_ms,
                 }
             ),
             current_user.id
         )
-        
+
         await db.commit()
-        
+
         logger.info(f"Transformation completed: {content_id} -> {new_content_node.id}")
-        
+
         return {
-            "content_node": new_content_node,
-            "transform_edge": transform_edge,
+            "content_node": _serialize_content_node(new_content_node),
+            "transform_edge": _serialize_edge(transform_edge),
             "transformation": {
-                "id": transformation["transformation_id"],
-                "code": transformation["code"],
+                "code": gen_result.code,
                 "execution_time_ms": execution_result.execution_time_ms,
             }
         }
-        
+
     except HTTPException:
         await db.rollback()
         raise
@@ -1331,115 +1435,90 @@ async def create_visualization(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Create WidgetNode visualization from ContentNode using Reporter Agent.
-    
+    """Create WidgetNode visualization from ContentNode via V2 controller.
+
     Workflow:
-    1. Reporter Agent analyzes ContentNode (text + tables)
-    2. AI generates HTML/CSS/JS code for visualization
-    3. Code is validated (security, performance)
-    4. WidgetNode is created with VISUALIZATION edge to ContentNode
-    
+    1. WidgetController generates HTML/CSS/JS code via Orchestrator V2
+    2. WidgetNode is created in DB
+    3. VISUALIZATION edge is created to ContentNode
+
     Args:
         content_id: Source ContentNode to visualize
         request: Visualization options (user_prompt, widget_name, auto_refresh, position)
-    
+
     Returns:
         VisualizeResponse with created WidgetNode and edge IDs
     """
     try:
-        # Get ContentNode
         content_node = await ContentNodeService.get_content_node(db, content_id)
         if not content_node:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"ContentNode {content_id} not found"
             )
-        
-        # Initialize Reporter Agent
-        from app.services.multi_agent.agents.reporter import get_reporter_agent
-        from app.services.gigachat_service import get_gigachat_service
-        from app.services.multi_agent import AgentMessageBus
-        
-        message_bus = None
-        gigachat_service = get_gigachat_service()
-        
-        # Try to connect to message bus (optional)
-        try:
-            message_bus = AgentMessageBus()
-            await message_bus.connect()
-            logger.info("Using Reporter Agent with message bus")
-        except Exception as e:
-            logger.warning(f"Message bus unavailable, using direct mode: {e}")
-        
-        reporter_agent = get_reporter_agent(
-            message_bus=message_bus,
-            gigachat_service=gigachat_service
-        )
-        
-        # Prepare task for Reporter Agent
-        task = {
-            "type": "generate_visualization",
-            "content_node_id": str(content_id),
-            "content_node": {
-                "id": str(content_node.id),
+
+        content_data = content_node.content or {}
+
+        # 1. Generate widget code via V2 controller
+        orchestrator = _get_orchestrator_or_503()
+        controller = WidgetController(orchestrator)
+
+        result = await controller.process_request(
+            user_message=request.user_prompt,
+            context={
                 "board_id": str(content_node.board_id),
-                "content": content_node.content,
-                "metadata": content_node.node_metadata or {},
-                "position": content_node.position
+                "user_id": str(current_user.id),
+                "content_node_id": str(content_id),
+                "content_data": content_data,
+                "content_node_metadata": content_node.node_metadata or {},
             },
-            "user_prompt": request.user_prompt
-        }
-        
-        # Generate visualization
-        logger.info(f"🎨 Generating visualization for ContentNode {content_id}")
-        result = await reporter_agent.process_task(task)
-        
-        if "error" in result:
+        )
+
+        if result.status != "success":
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Visualization generation failed: {result['error']}"
+                detail=f"Visualization generation failed: {result.error}"
             )
-        
-        # Create WidgetNode
+
+        # 2. Create WidgetNode
         from app.services.widget_node_service import WidgetNodeService
         from app.schemas.widget_node import WidgetNodeCreate
-        
-        widget_name = request.widget_name or result.get("description", "Visualization")
-        
-        # Determine position (user override or offset from ContentNode)
+
+        widget_name = request.widget_name or result.widget_name or "Visualization"
+
         if request.position:
             widget_position = request.position
         else:
             node_position = content_node.position or {"x": 0, "y": 0}
             widget_position = {
-                "x": node_position.get("x", 0) + 350,  # Offset to the right
+                "x": node_position.get("x", 0) + 350,
                 "y": node_position.get("y", 0)
             }
-        
+
         widget_data = WidgetNodeCreate(
             board_id=content_node.board_id,
             name=widget_name,
-            description=result.get("description", "AI-generated visualization"),
-            html_code=result.get("widget_code", ""),  # Reporter returns full HTML or separate parts
-            css_code=result.get("css_code"),
-            js_code=result.get("js_code"),
-            config=result.get("visualization_config", {}),
+            description=result.code_description or "AI-generated visualization",
+            html_code=result.widget_code or "",
+            css_code=None,
+            js_code=None,
+            config={"widget_type": result.widget_type or "custom"},
             auto_refresh=request.auto_refresh,
-            generated_by="reporter_agent",
+            generated_by="orchestrator_v2",
             generation_prompt=request.user_prompt,
             x=widget_position["x"],
             y=widget_position["y"],
-            width=result.get("width", 400),
-            height=result.get("height", 300)
+            width=400,
+            height=300
         )
-        
+
         widget_node = await WidgetNodeService.create_widget_node(
             db, content_node.board_id, current_user.id, widget_data
         )
-        
-        # Create VISUALIZATION edge
+
+        # 3. Create VISUALIZATION edge
         from app.schemas.edge import EdgeCreate
-        
+
         edge_data = EdgeCreate(
             source_node_id=content_id,
             source_node_type="ContentNode",
@@ -1448,38 +1527,31 @@ async def create_visualization(
             edge_type="VISUALIZATION",
             label=f"Visualizes: {widget_node.name}",
             transformation_params={
-                "description": result.get("description", ""),
-                "widget_type": result.get("widget_type", "custom"),
+                "description": result.code_description or "",
+                "widget_type": result.widget_type or "custom",
                 "auto_refresh": request.auto_refresh,
-                "created_by": "reporter_agent"
+                "created_by": "orchestrator_v2"
             }
         )
-        
+
         edge = await EdgeService.create_edge(db, content_node.board_id, edge_data, current_user.id)
-        
-        # Commit transaction
+
         await db.commit()
         await db.refresh(widget_node)
         await db.refresh(edge)
-        
-        # Clean up message bus
-        if message_bus:
-            await message_bus.disconnect()
-        
-        logger.info(
-            f"✅ Created WidgetNode {widget_node.id} with VISUALIZATION edge from ContentNode {content_id}"
-        )
-        
+
+        logger.info(f"Created WidgetNode {widget_node.id} with VISUALIZATION edge from ContentNode {content_id}")
+
         return VisualizeResponse(
             widget_node_id=widget_node.id,
             edge_id=edge.id,
             status="success"
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Visualization creation failed: {e}", exc_info=True)
+        logger.error(f"Visualization creation failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Visualization creation failed: {str(e)}"
@@ -1493,275 +1565,341 @@ async def visualize_content_iterative(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Generate visualization code iteratively (for interactive editor).
-    
-    This endpoint is used by the interactive WidgetDialog to:
+    """Generate visualization code iteratively via V2 controller.
+
+    Used by the interactive WidgetDialog:
     1. Generate initial visualization from user prompt
     2. Refine existing visualization based on user feedback
     3. Return HTML/CSS/JS code without creating WidgetNode
-    
-    The actual WidgetNode is created later via /visualize endpoint
-    when user clicks "Save to board".
-    
+
     Args:
         content_id: Source ContentNode to visualize
         request: Iterative generation request (prompt + optional existing code)
-    
+
     Returns:
         VisualizeIterativeResponse with generated HTML/CSS/JS code
     """
     try:
-        # Fetch ContentNode
         content_node = await ContentNodeService.get_content_node(db, content_id)
         if not content_node:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"ContentNode {content_id} not found"
             )
-        
-        # Verify board access
+
         board = await BoardService.get_board(db, content_node.board_id, current_user.id)
         if not board:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this board"
             )
-        
-        # Initialize Reporter Agent
-        from app.services.multi_agent.agents.reporter import get_reporter_agent
-        from app.services.gigachat_service import get_gigachat_service
-        from app.services.multi_agent import AgentMessageBus
-        
-        message_bus = None
-        gigachat_service = get_gigachat_service()
-        
-        # Try to connect to message bus (optional)
-        try:
-            message_bus = AgentMessageBus()
-            await message_bus.connect()
-            logger.info("Using Reporter Agent with message bus")
-        except Exception as e:
-            logger.warning(f"Message bus unavailable, using direct mode: {e}")
-        
-        reporter_agent = get_reporter_agent(
-            message_bus=message_bus,
-            gigachat_service=gigachat_service
-        )
-        
-        # Prepare task for Reporter Agent
+
         content_data = content_node.content or {}
-        tables = content_data.get("tables", [])
-        text = content_data.get("text", "")
-        
-        task = {
-            "type": "generate_visualization" if not (request.existing_html or request.existing_css or request.existing_js) else "refine_visualization",
-            "content_node_id": str(content_id),
-            "content_node": {
-                "id": str(content_id),
+
+        # V2 controller
+        orchestrator = _get_orchestrator_or_503()
+        controller = WidgetController(orchestrator)
+
+        result = await controller.process_request(
+            user_message=request.user_prompt,
+            context={
                 "board_id": str(content_node.board_id),
-                "content": content_data,
-                "metadata": content_node.node_metadata or {},
-                "position": content_node.position
+                "user_id": str(current_user.id),
+                "content_node_id": str(content_id),
+                "content_data": content_data,
+                "content_node_metadata": content_node.node_metadata or {},
+                "existing_widget_code": request.existing_widget_code,
+                "chat_history": request.chat_history or [],
+                "is_refinement": bool(request.existing_widget_code),
             },
-            # Explicit data fields for easier access
-            "data": {
-                "tables": tables,
-                "text": text
-            },
-            "user_prompt": request.user_prompt
-        }
-        
-        # Log data structure for debugging
-        if tables:
-            logger.info(f"📊 Data tables: {len(tables)} table(s)")
-            for idx, table in enumerate(tables):
-                logger.info(f"  Table {idx}: {table.get('name', 'Unnamed')} - {table.get('row_count', 0)} rows, {table.get('column_count', 0)} cols")
-        if text:
-            logger.info(f"📝 Text data: {len(text)} characters")
-        
-        # Add data access instructions for agent (DYNAMIC API)
-        task["data_access_info"] = {
-            "description": "Widget can fetch live data from ContentNode via async API",
-            "api_method": "window.fetchContentData()",
-            "examples": [
-                "// Fetch all data (async)",
-                "const data = await window.fetchContentData();",
-                "const tables = data.tables; // Array of tables",
-                "const text = data.text; // Text content",
-                "",
-                "// Get specific table",
-                "const salesTable = await window.getTable('Sales Data');",
-                "const firstTable = await window.getTable(0);",
-                "",
-                "// Auto-refresh example",
-                "async function render() {",
-                "  const data = await window.fetchContentData();",
-                "  // Update chart with data.tables[0].data",
-                "}",
-                "render(); // Initial render",
-                "const refreshId = window.startAutoRefresh(render, 5000); // Auto-refresh every 5s",
-                "",
-                "// IMPORTANT: All data access must use await/async pattern"
-            ]
-        }
-        
-        # Add existing code if iterating
-        if request.existing_widget_code:
-            task["existing_widget_code"] = request.existing_widget_code
-            logger.info(f"📝 Including existing widget_code: {len(request.existing_widget_code)} chars")
-        elif request.existing_html or request.existing_css or request.existing_js:
-            task["existing_code"] = {
-                "html": request.existing_html or "",
-                "css": request.existing_css or "",
-                "js": request.existing_js or ""
-            }
-        
-        # Add chat history for context
-        if request.chat_history:
-            task["chat_history"] = request.chat_history
-            logger.info(f"💬 Including chat history: {len(request.chat_history)} messages")
-        
-        # Generate visualization
-        logger.info(f"🎨 Generating iterative visualization for ContentNode {content_id}")
-        logger.info(f"📋 Task type: {task['type']}, User prompt: '{request.user_prompt}'")
-        logger.info(f"🤖 Using Reporter Agent via Multi-Agent System")
-        result = await reporter_agent.process_task(task)
-        
-        # Clean up message bus
-        if message_bus:
-            try:
-                await message_bus.disconnect()
-            except:
-                pass
-        
-        # Check result
-        if "error" in result:
+        )
+
+        if result.status != "success":
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Visualization generation failed: {result.get('error', 'Unknown error')}"
+                detail=result.error or "Visualization generation failed"
             )
-        
-        # Extract code parts (support both new widget_code and legacy format)
-        widget_code = result.get("widget_code")
-        html_code = result.get("html_code", "")
-        css_code = result.get("css_code", "")
-        js_code = result.get("js_code", "")
-        widget_name = result.get("widget_name", "")
-        description = result.get("description", "AI-generated visualization")
-        
-        logger.info(
-            f"✅ Generated iterative visualization for ContentNode {content_id}"
-        )
-        logger.info(f"  widget_name: {widget_name}, widget_code: {len(widget_code) if widget_code else 0} chars")
-        
+
         return VisualizeIterativeResponse(
-            html_code=html_code,
-            css_code=css_code,
-            js_code=js_code,
-            widget_code=widget_code,
-            widget_name=widget_name,
-            description=description,
+            html_code=result.code if result.code_language == "html" else "",
+            css_code="",
+            js_code="",
+            widget_code=result.widget_code,
+            widget_name=result.widget_name or "",
+            widget_type=result.widget_type or "custom",
+            description=result.code_description or "AI-generated visualization",
             status="success"
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Iterative visualization generation failed: {e}", exc_info=True)
+        logger.error(f"Iterative visualization failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Visualization generation failed: {str(e)}"
         )
 
 
-@router.post("/{content_id}/analyze-suggestions", response_model=SuggestionAnalysisResponse)
-async def analyze_widget_suggestions(
+@router.post("/{content_id}/visualize-multiagent", response_model=VisualizeIterativeResponse)
+async def visualize_content_multiagent(
     content_id: UUID,
-    request: SuggestionAnalysisRequest,
+    request: VisualizeIterativeRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Analyze widget and generate improvement suggestions.
-    
-    This endpoint uses WidgetSuggestionAgent to provide AI-powered recommendations
-    for improving visualizations based on:
-    - Data structure analysis (columns, types, cardinality)
-    - Widget code analysis (libraries, interactivity, chart type)
-    - Chat history context
-    
+    """Generate visualization code via Orchestrator V2 (full pipeline).
+
+    Uses WidgetController → Orchestrator V2.
+
     Args:
-        content_id: Source ContentNode to analyze
-        request: Analysis request (chat history + current widget code)
-    
+        content_id: Source ContentNode to visualize
+        request: Iterative generation request (prompt + optional existing code)
+
     Returns:
-        SuggestionAnalysisResponse with prioritized suggestions
+        VisualizeIterativeResponse with generated HTML/CSS/JS code
     """
     try:
-        # Verify ContentNode exists and user has access
         content_node = await ContentNodeService.get_content_node(db, content_id)
         if not content_node:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"ContentNode {content_id} not found"
             )
-        
+
         board = await BoardService.get_board(db, content_node.board_id, current_user.id)
         if not board:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this board"
             )
-        
-        # Get global MultiAgentEngine instance
-        from app.main import get_multi_agent_engine
-        
-        engine = get_multi_agent_engine()
-        if not engine:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="MultiAgentEngine not initialized. Check backend logs for Redis/GigaChat connection issues."
-            )
-        
-        if not engine.is_initialized:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="MultiAgentEngine initialization failed. Widget Suggestions requires Redis and GigaChat."
-            )
-        
-        suggestions_agent = engine.agents.get("suggestions")
-        if not suggestions_agent:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="WidgetSuggestionAgent not initialized. Check that 'suggestions' is in enable_agents list."
-            )
-        
-        # Execute analysis
-        logger.info(f"🔍 Analyzing widget suggestions for ContentNode {content_id}")
-        try:
-            result = await suggestions_agent.execute_sync(
-                db=db,
-                content_node_id=str(content_id),
-                chat_history=request.chat_history or [],
-                current_widget_code=request.current_widget_code,
-                max_suggestions=request.max_suggestions or 8
-            )
-        except Exception as agent_error:
-            logger.error(f"❌ WidgetSuggestionAgent execution failed: {agent_error}", exc_info=True)
+
+        content_data = content_node.content or {}
+
+        # V2 controller
+        orchestrator = _get_orchestrator_or_503()
+        controller = WidgetController(orchestrator)
+
+        result = await controller.process_request(
+            user_message=request.user_prompt,
+            context={
+                "board_id": str(content_node.board_id),
+                "user_id": str(current_user.id),
+                "content_node_id": str(content_id),
+                "content_data": content_data,
+                "content_node_metadata": content_node.node_metadata or {},
+                "existing_widget_code": request.existing_widget_code,
+                "chat_history": request.chat_history or [],
+                "is_refinement": bool(request.existing_widget_code),
+            },
+        )
+
+        if result.status != "success":
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Analysis failed: {str(agent_error)}"
+                detail=result.error or "Visualization generation failed"
             )
-        
-        # Format response
-        return SuggestionAnalysisResponse(
-            suggestions=result["suggestions"],
-            analysis_summary=result["analysis_summary"]
+
+        logger.info(
+            f"🏷️ visualize-multiagent response: "
+            f"widget_name={result.widget_name!r}, "
+            f"description={str(result.code_description or '')[:80]!r}"
         )
-        
+        return VisualizeIterativeResponse(
+            html_code=result.code if result.code_language == "html" else "",
+            css_code="",
+            js_code="",
+            widget_code=result.widget_code,
+            widget_name=result.widget_name or "",
+            widget_type=result.widget_type or "custom",
+            description=result.code_description or "AI-generated visualization",
+            status="success"
+        )
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Widget suggestions analysis failed: {e}", exc_info=True)
+        logger.error(f"MultiAgent visualization failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Visualization generation failed: {str(e)}"
+        )
+
+
+@router.post("/{content_id}/transform-multiagent")
+async def transform_content_multiagent(
+    content_id: UUID,
+    params: dict,
+    db: AsyncSession = Depends(get_db),
+    user_and_token: tuple[User, str] = Depends(get_current_user_with_token)
+):
+    """Transform data via Orchestrator V2 (full validation pipeline).
+
+    Uses TransformationController → Orchestrator V2.
+    Supports both TRANSFORMATION mode (code gen + execution) and
+    DISCUSSION mode (narrative response).
+
+    Request body:
+    {
+        "user_prompt": str,
+        "existing_code": str | null,
+        "transformation_id": str | null,
+        "chat_history": [{"role": str, "content": str}, ...],
+        "selected_node_ids": [UUID, ...],
+        "preview_only": bool = True
+    }
+    """
+    current_user, auth_token = user_and_token
+
+    user_prompt = params.get("user_prompt")
+    if not user_prompt:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_prompt is required")
+
+    existing_code = params.get("existing_code")
+    chat_history = params.get("chat_history", [])
+    selected_node_ids = params.get("selected_node_ids", [str(content_id)])
+    if isinstance(selected_node_ids, str):
+        selected_node_ids = [selected_node_ids]
+
+    try:
+        # Collect data using helper
+        nodes_data, input_data, text_content, board_id = await _collect_content_nodes_data(
+            db, content_id, selected_node_ids
+        )
+
+        # V2 controller
+        orchestrator = _get_orchestrator_or_503()
+        controller = TransformationController(orchestrator)
+
+        result = await controller.process_request(
+            user_message=user_prompt,
+            context={
+                "board_id": board_id,
+                "user_id": str(current_user.id),
+                "auth_token": auth_token,
+                "input_tables": [t for nd in nodes_data for t in nd.get("tables", [])],
+                "input_data": input_data,  # Full DataFrames for execution
+                "text_content": text_content,
+                "existing_code": existing_code,
+                "chat_history": chat_history,
+                "selected_node_ids": selected_node_ids,
+            },
+        )
+
+        if result.status != "success":
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result.error or "Transformation failed"
+            )
+
+        # Discussion mode
+        if result.mode == "discussion":
+            return {
+                "transformation_id": None,
+                "code": None,
+                "description": result.narrative,
+                "content_type": result.narrative_format,
+                "preview_data": None,
+                "validation": {"is_valid": True, "errors": []},
+                "agent_plan": result.plan,
+                "mode": "discussion",
+            }
+
+        # Transformation mode
+        logger.info(f"📤 Sending transformation response: code={len(result.code or '')} chars, preview_tables={len(result.preview_data.get('tables', []) if result.preview_data else [])}")
+        logger.info(f"📄 First 100 chars of code: {(result.code or '')[:100]}...")
+        return {
+            "transformation_id": str(uuid.uuid4()),
+            "code": result.code,
+            "description": result.code_description,
+            "preview_data": result.preview_data,
+            "validation": result.validation or {"is_valid": True, "errors": []},
+            "agent_plan": result.plan,
+        }
+
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        error_msg = str(e)
+        if "Failed to get response from GigaChat" in error_msg or "getaddrinfo failed" in error_msg:
+            logger.error(f"GigaChat API connection error: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Не удалось подключиться к GigaChat API. Проверьте GIGACHAT_CREDENTIALS в .env"
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Transformation generation failed: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"MultiAgent transformation failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Transformation generation failed: {str(e)}"
+        )
+
+
+@router.post("/{content_id}/analyze-suggestions")
+async def analyze_widget_suggestions(
+    content_id: UUID,
+    request: SuggestionAnalysisRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Analyze widget and generate improvement suggestions via V2 controller.
+
+    Uses WidgetSuggestionsController → Orchestrator V2 pipeline.
+
+    Args:
+        content_id: Source ContentNode to analyze
+        request: Analysis request (chat history + current widget code)
+
+    Returns:
+        {"suggestions": [...], "analysis_summary": str}
+    """
+    try:
+        content_node = await ContentNodeService.get_content_node(db, content_id)
+        if not content_node:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"ContentNode {content_id} not found"
+            )
+
+        board = await BoardService.get_board(db, content_node.board_id, current_user.id)
+        if not board:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this board"
+            )
+
+        content_data = content_node.content or {}
+
+        # V2 controller
+        orchestrator = _get_orchestrator_or_503()
+        controller = WidgetSuggestionsController(orchestrator)
+
+        result = await controller.process_request(
+            user_message=f"Предложи улучшения виджета для ContentNode {content_id}",
+            context={
+                "board_id": str(content_node.board_id),
+                "user_id": str(current_user.id),
+                "content_node_id": str(content_id),
+                "content_data": content_data,
+                "current_widget_code": request.current_widget_code,
+                "chat_history": request.chat_history or [],
+                "max_suggestions": request.max_suggestions or 6,
+            },
+        )
+
+        return {
+            "suggestions": result.suggestions,
+            "analysis_summary": result.narrative or "Analysis complete",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Widget suggestions analysis failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Widget suggestions analysis failed: {str(e)}"
@@ -1775,156 +1913,252 @@ async def analyze_transform_suggestions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Analyze data and generate transformation suggestions using AI agent.
-    
-    Uses TransformSuggestionsAgent to generate contextual recommendations based on:
-    - Current code (if exists) - for iterative improvements
-    - Chat history - for understanding user intent
-    - Data schema - for column-specific suggestions
-    
+    """Analyze data and generate transformation suggestions via V2 controller.
+
+    Uses TransformSuggestionsController → Orchestrator V2 pipeline.
+
     Args:
         content_id: Source ContentNode to analyze
         request: {"chat_history": [...], "current_code": str | null}
-    
+
     Returns:
-        {"suggestions": [{"id", "label", "prompt", "category", "confidence"}, ...]}
+        {"suggestions": [...], "fallback": bool}
     """
     try:
-        # Get ContentNode
         content_node = await ContentNodeService.get_content_node(db, content_id)
         if not content_node:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="ContentNode not found"
-            )
-        
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ContentNode not found")
+
         chat_history = request.get("chat_history", [])
         current_code = request.get("current_code")
-        
-        # Prepare input schemas for agent
+
+        # Build input schemas from ContentNode tables
         tables = content_node.content.get("tables", []) if content_node.content else []
         content_text = content_node.content.get("text", "") if content_node.content else ""
-        
-        input_schemas = []
-        
-        # Если есть таблицы — формируем схемы из них
-        for table in tables[:2]:  # Limit to first 2 tables for performance
+
+        # 🔗 CHAIN TRANSFORMATIONS: Если есть current_code, выполнить его
+        # и использовать результат как базу для suggestions (а не исходные данные)
+        if current_code and tables:
+            logger.info(f"🔗 Executing current_code to get transformed data for suggestions")
+            try:
+                # Конвертируем tables в DataFrames
+                from app.services.executors.python_executor import python_executor
+                input_data_for_exec = {}
+                for table in tables[:2]:
+                    df = python_executor.table_dict_to_dataframe(table)
+                    input_data_for_exec[table.get("name", "df")] = df
+                
+                # Выполняем current_code
+                exec_result = await python_executor.execute_transformation(
+                    code=current_code,
+                    input_data=input_data_for_exec,
+                    user_id=str(current_user.id),
+                )
+                
+                if exec_result.success and exec_result.result_dfs:
+                    logger.info(f"✅ Using {len(exec_result.result_dfs)} result table(s) from current_code as base for suggestions")
+                    # Заменяем tables результатами трансформации
+                    tables = []
+                    for table_name, df in exec_result.result_dfs.items():
+                        table_dict = python_executor.dataframe_to_table_dict(df, table_name)
+                        tables.append(table_dict)
+                else:
+                    logger.warning(f"⚠️ current_code execution failed, using original data: {exec_result.error}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to execute current_code for suggestions: {e}")
+
+        input_schemas: list[dict] = []
+        for table in tables[:2]:  # Берём первые 2 таблицы
             columns = table.get("columns", [])
-            # Handle both list of dicts {"name": "col"} and list of strings ["col"]
+            # Extract column names (handle both [{name,type}] and [str])
             if columns and isinstance(columns[0], dict):
                 column_names = [col["name"] for col in columns][:15]
             else:
                 column_names = columns[:15]
             
-            schema = {
+            # Добавляем sample_rows для лучшего понимания агентами (до 10 строк)
+            rows = table.get("rows", []) or table.get("data", [])
+            sample_rows = rows[:10] if rows else []
+            
+            input_schemas.append({
                 "name": table.get("name", "df"),
                 "columns": column_names,
-                "content_text": content_text  # Добавляем текст из ContentNode
-            }
-            input_schemas.append(schema)
-        
-        # Если таблиц нет, но есть текст — создаём специальную схему
+                "content_text": content_text,
+                "sample_rows": sample_rows,  # Данные для агентов
+                "row_count": len(rows),
+            })
+
         if not input_schemas and content_text and len(content_text.strip()) > 50:
             input_schemas.append({
-                "name": "text_content",
-                "columns": [],
-                "content_text": content_text,
-                "is_text_only": True
+                "name": "text_content", "columns": [],
+                "content_text": content_text, "is_text_only": True,
             })
-            logger.info(f"📝 No tables, using text content ({len(content_text)} chars)")
-        
-        logger.info(f"📊 Prepared {len(input_schemas)} input schemas:")
-        for schema in input_schemas:
-            if schema.get("is_text_only"):
-                logger.info(f"   Text content: {len(schema.get('content_text', ''))} chars")
-            else:
-                logger.info(f"   Table '{schema['name']}': {len(schema['columns'])} columns")
-        
-        # Initialize TransformSuggestionsAgent
-        from app.services.multi_agent.agents.transform_suggestions import TransformSuggestionsAgent
-        from app.services.gigachat_service import get_gigachat_service
-        
-        try:
-            gigachat = get_gigachat_service()
-        except RuntimeError as e:
-            logger.error(f"❌ GigaChat service not initialized: {e}")
-            # Fallback: базовые рекомендации
-            fallback_suggestions = [
-                {
-                    "id": "fallback-1",
-                    "label": "Фильтрация данных",
-                    "prompt": "Отфильтровать строки по условию",
-                    "category": "filter",
-                    "confidence": 0.7,
-                    "description": "Базовая рекомендация (AI недоступен)"
-                },
-                {
-                    "id": "fallback-2",
-                    "label": "Группировка",
-                    "prompt": "Сгруппировать данные и посчитать агрегаты",
-                    "category": "aggregate",
-                    "confidence": 0.65,
-                    "description": "Базовая рекомендация (AI недоступен)"
-                }
-            ]
-            return {"suggestions": fallback_suggestions, "fallback": True}
-        
-        suggestions_agent = TransformSuggestionsAgent(gigachat_service=gigachat)
-        
-        # Generate suggestions via agent
-        logger.info(f"🎯 Requesting suggestions for ContentNode {content_id}")
-        logger.info(f"   Existing code: {'YES' if current_code else 'NO'}")
-        logger.info(f"   Chat history: {len(chat_history)} messages")
-        logger.info(f"   Input schemas: {len(input_schemas)} tables")
-        
-        task = {
-            "type": "generate_suggestions",
-            "existing_code": current_code,
-            "chat_history": chat_history,
-            "input_schemas": input_schemas
-        }
-        
-        result = await suggestions_agent.process_task(task)
-        
-        logger.info(f"📦 Agent result status: {result.get('status')}")
-        if result.get("status") != "success":
-            error_msg = result.get('error', 'Unknown error')
-            logger.error(f"❌ Agent returned error: {error_msg}")
-            raise ValueError(f"Agent failed: {error_msg}")
-        
-        suggestions = result.get("suggestions", [])
-        is_fallback = result.get("fallback", False)
-        logger.info(f"✅ Generated {len(suggestions)} suggestions (fallback: {is_fallback})")
-        
-        if is_fallback:
-            logger.warning("⚠️ Using fallback suggestions - AI generation failed")
-        
-        return {"suggestions": suggestions, "fallback": is_fallback}
-        
+
+        # V2 controller
+        orchestrator = _get_orchestrator_or_503()
+        controller = TransformSuggestionsController(orchestrator)
+
+        result = await controller.process_request(
+            user_message=f"Предложи трансформации для данных ContentNode {content_id}",
+            context={
+                "board_id": str(content_node.board_id),
+                "user_id": str(current_user.id),
+                "input_schemas": input_schemas,
+                "existing_code": current_code,
+                "chat_history": chat_history,
+            },
+        )
+
+        return {"suggestions": result.suggestions, "fallback": result.status != "success"}
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Transform suggestions analysis failed: {e}", exc_info=True)
-        
-        # Fallback: базовые рекомендации
-        fallback_suggestions = [
-            {
-                "id": "fallback-1",
-                "label": "Фильтрация данных",
-                "prompt": "Отфильтровать строки по условию",
-                "category": "filter",
-                "confidence": 0.7,
-                "description": "Базовая рекомендация (AI недоступен)"
-            },
-            {
-                "id": "fallback-2",
-                "label": "Группировка",
-                "prompt": "Сгруппировать данные и посчитать агрегаты",
-                "category": "aggregate",
-                "confidence": 0.65,
-                "description": "Базовая рекомендация (AI недоступен)"
+        logger.error(f"Transform suggestions analysis failed: {e}", exc_info=True)
+        return {
+            "suggestions": [
+                {"id": "fallback-1", "label": "Фильтрация данных", "prompt": "Отфильтровать строки по условию", "category": "filter", "confidence": 0.7, "description": "Базовая рекомендация (AI недоступен)"},
+                {"id": "fallback-2", "label": "Группировка", "prompt": "Сгруппировать данные и посчитать агрегаты", "category": "aggregate", "confidence": 0.65, "description": "Базовая рекомендация (AI недоступен)"},
+            ],
+            "fallback": True,
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Cross-filter: dimension mappings for a content node
+# ══════════════════════════════════════════════════════════════════════
+
+
+@router.get("/{content_id}/dimension-mappings")
+async def get_node_dimension_mappings(
+    content_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get dimension→column mappings for a ContentNode.
+
+    See docs/CROSS_FILTER_SYSTEM.md
+    """
+    mappings = await DimensionService.get_mappings_for_node(db, content_id)
+    return {"mappings": mappings}
+
+
+@router.post("/{content_id}/detect-dimensions")
+async def detect_dimensions(
+    content_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Auto-detect potential dimensions from ContentNode tables.
+
+    Scans columns of all tables in the node and suggests dimensions based on:
+    - Column data type
+    - Number of unique values (<50 unique → likely categorical → dimension candidate)
+    - Fuzzy match against existing Dimension names in the project
+
+    See docs/CROSS_FILTER_SYSTEM.md §Phase 8.3
+    """
+    from difflib import SequenceMatcher
+
+    node = await ContentNodeService.get_content_node(db, content_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="ContentNode not found")
+
+    tables = (node.content or {}).get("tables", [])
+    if not tables:
+        return {"suggestions": [], "message": "No tables found in node"}
+
+    # Load existing project dimensions
+    from app.models.dimension import Dimension as DimModel
+    from sqlalchemy import select as sa_select
+    existing_dims_q = await db.execute(
+        sa_select(DimModel).where(DimModel.project_id == node.project_id)
+    )
+    existing_dims = list(existing_dims_q.scalars().all())
+    dim_name_map = {d.name.lower(): d for d in existing_dims}
+
+    suggestions = []
+
+    for table in tables:
+        table_name = table.get("name", "")
+        columns = table.get("columns", [])
+        rows = table.get("rows", [])
+
+        for col in columns:
+            col_name = col.get("name", "")
+            col_type = col.get("type", "string")
+
+            # Compute unique values
+            values = [row.get(col_name) for row in rows if row.get(col_name) is not None]
+            unique_values = list(set(str(v) for v in values))
+            unique_count = len(unique_values)
+
+            # Heuristic: columns with <= 50 unique values are dimension candidates
+            # For number type, lower threshold (10)
+            max_unique = 50 if col_type in ("string", "date") else 10
+            if col_type == "boolean":
+                max_unique = 3
+
+            is_candidate = unique_count <= max_unique and unique_count > 0
+
+            if not is_candidate:
+                continue
+
+            # Map column type to dimension type
+            dim_type_map = {
+                "string": "string",
+                "text": "string",
+                "number": "number",
+                "integer": "number",
+                "float": "number",
+                "date": "date",
+                "datetime": "date",
+                "boolean": "boolean",
+                "bool": "boolean",
             }
-        ]
-        
-        return {"suggestions": fallback_suggestions, "fallback": True}
+            suggested_type = dim_type_map.get(col_type, "string")
+
+            # Fuzzy match against existing dimensions
+            best_match_id = None
+            best_confidence = 0.0
+            col_lower = col_name.lower().replace("_", " ")
+
+            for dim_name_lower, dim in dim_name_map.items():
+                ratio = SequenceMatcher(None, col_lower, dim_name_lower.replace("_", " ")).ratio()
+                if ratio > best_confidence and ratio >= 0.6:
+                    best_confidence = ratio
+                    best_match_id = str(dim.id)
+
+            # Confidence based on heuristics
+            confidence = 0.5
+            if best_match_id:
+                confidence = max(confidence, best_confidence)
+            if unique_count <= 20:
+                confidence += 0.1
+            if col_type in ("string", "boolean"):
+                confidence += 0.1
+            confidence = min(confidence, 1.0)
+
+            # Take sample values (up to 10)
+            sample = unique_values[:10]
+
+            suggestions.append({
+                "column_name": col_name,
+                "table_name": table_name,
+                "suggested_name": col_name.lower().replace(" ", "_"),
+                "suggested_display_name": col_name.replace("_", " ").title(),
+                "suggested_type": suggested_type,
+                "unique_count": unique_count,
+                "sample_values": sample,
+                "confidence": round(confidence, 2),
+                "existing_dimension_id": best_match_id,
+            })
+
+    # Sort by confidence descending
+    suggestions.sort(key=lambda s: s["confidence"], reverse=True)
+
+    return {
+        "suggestions": suggestions,
+        "total_columns_scanned": sum(len(t.get("columns", [])) for t in tables),
+    }
 

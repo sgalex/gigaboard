@@ -23,6 +23,15 @@ from .database import router as database_router
 # File upload routes
 from .files import router as files_router
 
+# Dashboard system routes
+from .library import router as library_router
+from .dashboards import router as dashboards_router
+from .public import router as public_router
+
+# Cross-filter system routes
+from .dimensions import router as dimensions_router
+from .filters import board_filter_router, dashboard_filter_router, preset_router
+
 __all__ = [
     "auth_router",
     "health_router",
@@ -37,4 +46,11 @@ __all__ = [
     "ai_assistant_router",
     "database_router",
     "files_router",
+    "library_router",
+    "dashboards_router",
+    "public_router",
+    "dimensions_router",
+    "board_filter_router",
+    "dashboard_filter_router",
+    "preset_router",
 ]

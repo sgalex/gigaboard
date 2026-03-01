@@ -47,18 +47,14 @@ class PythonExecutor:
         input_data: Dict[str, Any],
         timeout: int | None = None,
         user_id: str | None = None,
-        auth_token: str | None = None
     ) -> ExecutionResult:
         """Выполняет Python код трансформации.
         
         Args:
             code: Python код для выполнения
-            input_data: Словарь с входными DataFrame
-            timeout: Таймаут выполнения
-            user_id: ID пользователя для логирования
-            auth_token: Bearer token для вызовов API
             input_data: Входные данные {table_name: dataframe}
             timeout: Таймаут в секундах (optional)
+            user_id: ID пользователя для логирования
             
         Returns:
             ExecutionResult с результатом или ошибкой
@@ -122,21 +118,66 @@ class PythonExecutor:
                         namespace[dfN_name] = df
                         logger.info(f"📥 Input: Table '{table_name}' as '{dfN_name}' (shape: {df.shape})")
             
+            # Debug: log code before execution
+            logger.info(f"🔍 Executor received code ({len(code)} chars): {code[:300]}...")
+            logger.info(f"🔍 Checking for df_ pattern: {bool(re.search(r'df_[a-z_]', code))}")
+            
             # Выполнить код
             exec(code, namespace)
             
             # Извлечь ВСЕ DataFrames начинающиеся с 'df_'
-            result_dfs = {}
+            raw_dfs: dict[str, tuple[int, "pd.DataFrame"]] = {}  # name -> (id, df)
             for name, value in namespace.items():
                 if name.startswith('df_') and isinstance(value, pd.DataFrame):
-                    # Убрать префикс 'df_' для читаемых имён таблиц
-                    table_name = name[3:]  # "df_result" -> "result"
-                    result_dfs[table_name] = value
+                    table_name = name[3:]  # "df_sales_by_brand" -> "sales_by_brand"
+                    raw_dfs[table_name] = (id(value), value)
                     logger.info(f"📊 Extracted result table: {name} -> {table_name} (shape: {value.shape})")
+                elif name.startswith('df_') and not isinstance(value, pd.DataFrame):
+                    # Auto-wrap скаляров/Series в DataFrame
+                    # GigaChat часто генерирует: df_avg = df['col'].mean() → float
+                    scalar_types = (int, float, np.integer, np.floating)
+                    if isinstance(value, scalar_types):
+                        col_name = name[3:]  # df_average_salary → average_salary
+                        wrapped = pd.DataFrame({col_name: [value]})
+                        raw_dfs[col_name] = (id(wrapped), wrapped)
+                        logger.warning(f"⚠️ Auto-wrapped scalar {name}={value} into DataFrame (shape: {wrapped.shape})")
+                    elif isinstance(value, pd.Series):
+                        wrapped = value.to_frame()
+                        col_name = name[3:]
+                        raw_dfs[col_name] = (id(wrapped), wrapped)
+                        logger.warning(f"⚠️ Auto-wrapped Series {name} into DataFrame (shape: {wrapped.shape})")
+                    else:
+                        logger.warning(f"⚠️ Skipping {name}: type={type(value).__name__}, not a DataFrame")
             
-            if not result_dfs:
+            if not raw_dfs:
                 logger.error(f"❌ No df_ variables found in namespace. Available variables: {[k for k in namespace.keys() if not k.startswith('_')]}")
-                raise ValueError("Code must define at least one DataFrame variable starting with 'df_' (e.g., df_result, df_summary)")
+                raise ValueError("Code must define at least one DataFrame variable starting with 'df_' (e.g., df_sales_by_brand, df_monthly_stats)")
+            
+            # Дедупликация: если два df_ указывают на один и тот же объект (id),
+            # оставляем ПОСЛЕДНИЙ (по порядку обхода namespace, т.е. по порядку создания).
+            # Пример: df_average_salary = ...; df_city_stats = df_average_salary
+            #   → оба имеют одинаковый id() → оставляем df_city_stats
+            seen_ids: dict[int, str] = {}  # object_id -> table_name
+            for table_name, (obj_id, df_obj) in raw_dfs.items():
+                if obj_id in seen_ids:
+                    prev_name = seen_ids[obj_id]
+                    logger.warning(
+                        f"⚠️ Duplicate DataFrame detected: df_{table_name} is same object as df_{prev_name}. "
+                        f"Keeping df_{table_name}, dropping df_{prev_name}."
+                    )
+                seen_ids[obj_id] = table_name
+            
+            # Собираем финальный результат — только уникальные объекты
+            unique_names = set(seen_ids.values())
+            result_dfs = {
+                name: df_obj
+                for name, (_, df_obj) in raw_dfs.items()
+                if name in unique_names
+            }
+            
+            if len(result_dfs) < len(raw_dfs):
+                dropped = len(raw_dfs) - len(result_dfs)
+                logger.info(f"🧹 Deduplicated: {dropped} duplicate(s) removed, {len(result_dfs)} unique table(s) remain")
             
             logger.info(f"✅ Total result tables extracted: {len(result_dfs)} - {list(result_dfs.keys())}")
             
@@ -156,7 +197,24 @@ class PythonExecutor:
             
         except Exception as e:
             execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
-            error_msg = str(e)
+            # FIX: Включаем тип ошибки в сообщение.
+            # Без этого KeyError('biName') → str(e) = "'biName'" — тип теряется,
+            # и codex hint r'KeyError:.*' не срабатывает.
+            error_type = type(e).__name__
+            error_msg = f"{error_type}: {e}"
+
+            # FIX: Для KeyError / InvalidIndexError добавляем доступные колонки
+            # каждого DataFrame, чтобы GigaChat мог сопоставить и исправить ошибку.
+            _needs_col_hints = isinstance(e, KeyError) or type(e).__name__ == 'InvalidIndexError'
+            if _needs_col_hints:
+                col_hints: list[str] = []
+                for var_name, var_val in namespace.items():
+                    if isinstance(var_val, pd.DataFrame) and not var_name.startswith('_'):
+                        cols_preview = list(var_val.columns[:30])
+                        col_hints.append(f"  {var_name}: {cols_preview}")
+                if col_hints:
+                    error_msg += "\nДоступные колонки DataFrame:\n" + "\n".join(col_hints)
+
             stderr_output = stderr_capture.getvalue()
             
             if stderr_output:
@@ -176,30 +234,51 @@ class PythonExecutor:
             sys.stderr = old_stderr
     
     def dataframe_to_table_dict(self, df: pd.DataFrame, table_name: str = "result") -> Dict[str, Any]:
-        """Конвертирует pandas DataFrame в формат ContentNode table.
+        """Конвертирует pandas DataFrame в unified формат ContentNode table.
         
         Returns:
             {
                 "name": str,
-                "columns": [str, ...],
-                "rows": [[val, ...], ...],
+                "columns": [{"name": str, "type": str}, ...],
+                "rows": [{col_name: value, ...}, ...],
                 "row_count": int,
                 "column_count": int,
             }
         """
         # Создаем копию, чтобы не изменять оригинал
         df_copy = df.copy()
+
+        # Flatten MultiIndex columns (e.g. from .agg(['sum'])) to avoid
+        # tuple keys that jsonable_encoder converts to unhashable lists.
+        if isinstance(df_copy.columns, pd.MultiIndex):
+            df_copy.columns = ['_'.join(str(c) for c in col).strip('_') for col in df_copy.columns]
+            df = df.copy()
+            df.columns = df_copy.columns
         
         # Конвертируем Categorical колонки в строки (чтобы избежать ошибок с fillna)
         for col in df_copy.columns:
             if isinstance(df_copy[col].dtype, pd.CategoricalDtype):
                 df_copy[col] = df_copy[col].astype(str)
         
-        # Конвертировать в list of lists, заполняя NaN пустыми строками
-        rows = df_copy.fillna("").values.tolist()
+        # Typed columns from DataFrame dtypes
+        columns = []
+        for col in df.columns:
+            dtype = str(df[col].dtype)
+            if 'int' in dtype:
+                col_type = "int"
+            elif 'float' in dtype:
+                col_type = "float"
+            elif 'bool' in dtype:
+                col_type = "bool"
+            elif 'datetime' in dtype:
+                col_type = "date"
+            else:
+                col_type = "string"
+            columns.append({"name": str(col), "type": col_type})
         
-        # Имена колонок
-        columns = [str(col) for col in df.columns]
+        # Dict rows via to_dict(orient='records')
+        rows = df_copy.fillna("").to_dict(orient='records')
+        rows = [{str(k): v for k, v in row.items()} for row in rows]
         
         return {
             "name": table_name,
@@ -208,7 +287,7 @@ class PythonExecutor:
             "row_count": len(rows),
             "column_count": len(columns),
             "metadata": {
-                "dtypes": {col: str(df[col].dtype) for col in df.columns},
+                "dtypes": {str(col): str(df[col].dtype) for col in df.columns},
                 "memory_usage_bytes": int(df.memory_usage(deep=True).sum()),
             }
         }
@@ -216,35 +295,20 @@ class PythonExecutor:
     def table_dict_to_dataframe(self, table: Dict[str, Any]) -> pd.DataFrame:
         """Конвертирует ContentNode table в pandas DataFrame.
         
-        Args:
-            table: {name, columns, data/rows, ...}
-            
-        Returns:
-            pandas DataFrame
+        Формат:
+          columns: [{name: str, type: str}, ...]
+          rows: [{col_name: value, ...}, ...]
         """
         columns = table["columns"]
-        # Support both 'data' (ContentNode format) and 'rows' (legacy)
         rows = table.get("data") or table.get("rows", [])
         
-        # Handle new Pydantic format:
-        # columns: [{"name": "col1", "type": "string"}, ...] → ["col1", ...]
-        # rows: [{"id": "uuid", "values": [...]}, ...] → [[...], ...]
+        # Extract column names
+        column_names = [col["name"] for col in columns]
         
-        if columns and isinstance(columns[0], dict):
-            # New format: extract column names
-            column_names = [col["name"] for col in columns]
-        else:
-            # Old format: columns are already strings
-            column_names = columns
+        if not rows:
+            return pd.DataFrame(columns=column_names)
         
-        if rows and isinstance(rows[0], dict) and "values" in rows[0]:
-            # New format: extract values from each row
-            row_values = [row["values"] for row in rows]
-        else:
-            # Old format: rows are already arrays
-            row_values = rows
-        
-        return pd.DataFrame(row_values, columns=column_names)
+        return pd.DataFrame(rows, columns=column_names)
 
 
 # Singleton instance

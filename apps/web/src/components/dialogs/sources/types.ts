@@ -21,4 +21,5 @@ export interface SourceConfig {
 export interface CreateSourceResult {
     success: boolean
     error?: string
+    sourceId?: string  // ID of created/updated source node
 }

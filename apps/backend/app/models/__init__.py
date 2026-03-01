@@ -13,8 +13,23 @@ from .comment_node import CommentNode
 # AI Chat
 from .chat_message import ChatMessage, MessageRole
 
+# Agent Sessions
+from .agent_session import AgentSession, AgentSessionStatus
+
 # Files
 from .uploaded_file import UploadedFile
+
+# Dashboard system
+from .project_widget import ProjectWidget
+from .project_table import ProjectTable
+from .dashboard import Dashboard
+from .dashboard_item import DashboardItem
+from .dashboard_share import DashboardShare
+
+# Cross-filter system
+from .dimension import Dimension
+from .dimension_column_mapping import DimensionColumnMapping
+from .filter_preset import FilterPreset
 
 __all__ = [
     "User",
@@ -32,5 +47,15 @@ __all__ = [
     "CommentNode",
     "ChatMessage",
     "MessageRole",
+    "AgentSession",
+    "AgentSessionStatus",
     "UploadedFile",
+    "ProjectWidget",
+    "ProjectTable",
+    "Dashboard",
+    "DashboardItem",
+    "DashboardShare",
+    "Dimension",
+    "DimensionColumnMapping",
+    "FilterPreset",
 ]

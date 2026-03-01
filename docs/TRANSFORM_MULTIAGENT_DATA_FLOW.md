@@ -110,7 +110,7 @@ result = await multi_agent.generate_transformation_code(
 
 ```python
 task = {
-    "type": "analyze_datanode_content",
+    "type": "analyze_content_node_content",
     "nodes_data": all_nodes_data,     # Полная структура (см. раздел 2.2)
     "prompt": user_prompt             # Запрос пользователя
 }
@@ -281,8 +281,8 @@ validation = {
 execution_result = await python_executor.execute_transformation(
     code=result["code"],                  # Сгенерированный Python код
     input_data=input_data,                # ПОЛНЫЕ DataFrame (см. 2.3)
-    user_id=str(current_user.id),
-    auth_token=auth_token                 # Для gb.get_table() helpers
+    user_id=str(current_user.id)
+    # auth_token удалён (02.2026) — см. Context Architecture refactoring
 )
 ```
 

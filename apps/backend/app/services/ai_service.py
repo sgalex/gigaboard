@@ -17,8 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 
 from .gigachat_service import get_gigachat_service
-from .multi_agent import MultiAgentOrchestrator, AgentMessageBus
-from ..models import Board, BaseNode, WidgetNode, CommentNode, Edge
+from ..models import Board, BaseNode, ContentNode, WidgetNode, CommentNode, Edge
 from ..models.chat_message import ChatMessage, MessageRole
 
 logger = logging.getLogger(__name__)
@@ -59,27 +58,13 @@ class AIService:
 - Не используй технический жаргон без объяснений
 """
     
-    def __init__(self, db: AsyncSession, use_multi_agent: bool = True):
+    def __init__(self, db: AsyncSession):
         """
         Args:
             db: SQLAlchemy async session
-            use_multi_agent: Использовать Multi-Agent систему (Phase 2)
         """
         self.db = db
         self.gigachat = get_gigachat_service()
-        self.use_multi_agent = use_multi_agent
-        
-        # Multi-Agent components (Phase 2)
-        self.orchestrator: Optional[MultiAgentOrchestrator] = None
-        self.message_bus: Optional[AgentMessageBus] = None
-        
-        if use_multi_agent:
-            try:
-                self.message_bus = AgentMessageBus()
-                self.orchestrator = MultiAgentOrchestrator(db, self.message_bus)
-                logger.info("✅ Multi-Agent system enabled for AIService")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to initialize Multi-Agent system: {e}")
     
     async def get_board_context(
         self,
@@ -109,7 +94,8 @@ class AIService:
         nodes_result = await self.db.execute(nodes_query)
         all_nodes = nodes_result.scalars().all()
         
-        # Разделить по типам (DataNode удалён, используем пустой список)
+        # Разделить по типам
+        content_nodes = [n for n in all_nodes if isinstance(n, ContentNode)]
         source_nodes = []  # TODO: добавить SourceNode когда потребуется
         widget_nodes = [n for n in all_nodes if isinstance(n, WidgetNode)]
         comment_nodes = [n for n in all_nodes if isinstance(n, CommentNode)]
@@ -160,8 +146,17 @@ class AIService:
                 }
                 for e in edges
             ],
+            "content_nodes": [
+                {
+                    "id": str(n.id),
+                    "name": n.name if hasattr(n, 'name') else f"ContentNode-{n.id}",
+                    "content_summary": self._summarize_content(n),
+                }
+                for n in content_nodes
+            ],
             "stats": {
                 "total_source_nodes": len(source_nodes),
+                "total_content_nodes": len(content_nodes),
                 "total_widget_nodes": len(widget_nodes),
                 "total_comment_nodes": len(comment_nodes),
                 "total_edges": len(edges),
@@ -181,7 +176,29 @@ class AIService:
             ]
         
         return context
-    
+
+    @staticmethod
+    def _summarize_content(node) -> str:
+        """Краткое описание содержимого ContentNode для контекста AI."""
+        try:
+            content = getattr(node, "content", None)
+            if not content or not isinstance(content, dict):
+                return "empty"
+            tables = content.get("tables", [])
+            text = content.get("text", "")
+            parts = []
+            if text:
+                parts.append(f"text: {text[:100]}")
+            for t in tables:
+                tname = t.get("name", "таблица")
+                cols = t.get("columns", [])
+                col_names = [c["name"] for c in cols]
+                row_count = t.get("row_count", len(t.get("rows", [])))
+                parts.append(f"table '{tname}': {row_count} rows, columns [{', '.join(col_names)}]")
+            return "; ".join(parts) if parts else "empty"
+        except Exception:
+            return "unknown"
+
     async def chat(
         self,
         board_id: UUID,
@@ -310,54 +327,17 @@ class AIService:
     ) -> AsyncIterator[str]:
         """
         Streaming версия chat() - возвращает chunks ответа.
-        
-        Args:
-            board_id: UUID доски
-            user_message: Сообщение пользователя
-            session_id: UUID сессии (если None - создается новая)
-            user_id: UUID пользователя
-            selected_node_ids: Список UUID выбранных нод
-            
-        Yields:
-            Кусочки текстового ответа от GigaChat
+        Uses direct GigaChat (V2 controller integration is non-streaming).
         """
-        # Генерируем session_id если не передан
         if not session_id:
             session_id = uuid4()
         else:
             session_id = UUID(session_id) if isinstance(session_id, str) else session_id
         
-        logger.info(f"🤖 [chat_stream] Starting, session_id={session_id}, board_id={board_id}")
+        logger.info(f"[chat_stream] Starting, session_id={session_id}, board_id={board_id}")
         
-        # Phase 2: Проверить, нужна ли Multi-Agent обработка
-        if self.use_multi_agent and self.orchestrator:
-            logger.info("🤖 [chat_stream] Multi-Agent system enabled, checking if needed...")
-            
-            try:
-                # Используем Orchestrator для сложных запросов
-                async for chunk in self.orchestrator.process_user_request(
-                    user_id=user_id,
-                    board_id=board_id,
-                    user_message=user_message,
-                    chat_session_id=str(session_id),
-                    selected_node_ids=selected_node_ids,
-                ):
-                    yield chunk
-                
-                logger.info("✅ [chat_stream] Multi-Agent processing completed")
-                return  # Выходим, Orchestrator уже обработал запрос
-                
-            except Exception as e:
-                logger.warning(f"⚠️ [chat_stream] Multi-Agent failed, falling back to direct GigaChat: {e}")
-                # Fallback к прямому GigaChat
-        
-        # Fallback: Прямой GigaChat (как было раньше)
-        logger.info("🤖 [chat_stream] Using direct GigaChat processing")
-        
-        # Получить контекст доски
-        logger.info(f"🤖 [chat_stream] Getting board context...")
+        # Get board context
         board_context = await self.get_board_context(board_id, selected_node_ids)
-        logger.info(f"🤖 [chat_stream] Board context received: {board_context['stats']}")
         
         # Получить историю чата
         logger.info(f"🤖 [chat_stream] Getting chat history...")

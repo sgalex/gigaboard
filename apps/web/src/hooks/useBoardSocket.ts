@@ -4,6 +4,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { io, Socket } from 'socket.io-client'
 import { useBoardStore } from '@/store/boardStore'
+import { useLibraryStore } from '@/store/libraryStore'
 import type { WidgetNode, CommentNode, Edge } from '@/types'
 
 const SOCKET_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -58,6 +59,20 @@ export function useBoardSocket(boardId: string | undefined) {
                         widgetNodes: [...state.widgetNodes, node]
                     }
                 })
+
+                // Auto-save widget to project library
+                const projectId = useBoardStore.getState().currentBoard?.project_id
+                if (projectId && node.html_code) {
+                    useLibraryStore.getState().syncWidgetToLibrary(projectId, node.id, node.board_id, {
+                        name: node.name,
+                        description: node.description,
+                        html_code: node.html_code,
+                        css_code: node.css_code,
+                        js_code: node.js_code,
+                        widget_type: node.config?.widget_type,
+                        source_content_node_id: node.config?.sourceContentNodeId,
+                    })
+                }
             }
 
             const handleWidgetNodeUpdated = (node: WidgetNode) => {
@@ -73,6 +88,20 @@ export function useBoardSocket(boardId: string | undefined) {
                         widgetNodes: state.widgetNodes.map((n) => (n.id === node.id ? node : n))
                     }
                 })
+
+                // Auto-update library copy
+                const projectId = useBoardStore.getState().currentBoard?.project_id
+                if (projectId && node.html_code) {
+                    useLibraryStore.getState().syncWidgetToLibrary(projectId, node.id, node.board_id, {
+                        name: node.name,
+                        description: node.description,
+                        html_code: node.html_code,
+                        css_code: node.css_code,
+                        js_code: node.js_code,
+                        widget_type: node.config?.widget_type,
+                        source_content_node_id: node.config?.sourceContentNodeId,
+                    })
+                }
             }
 
             const handleWidgetNodeDeleted = (data: { id: string }) => {
@@ -80,6 +109,12 @@ export function useBoardSocket(boardId: string | undefined) {
                 useBoardStore.setState((state) => ({
                     widgetNodes: state.widgetNodes.filter((n) => n.id !== data.id),
                 }))
+
+                // Remove from project library
+                const projectId = useBoardStore.getState().currentBoard?.project_id
+                if (projectId) {
+                    useLibraryStore.getState().removeWidgetByNodeId(projectId, data.id)
+                }
             }
 
             // CommentNode events

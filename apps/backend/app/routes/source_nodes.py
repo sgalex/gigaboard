@@ -53,7 +53,11 @@ async def create_source_node(
     Creates a data source point (file, database, API, prompt, stream, or manual).
     """
     try:
+        logger.info(f"📥 create_source_node route - source_data.metadata: {source_data.metadata}")
+        logger.info(f"📥 create_source_node route - source_data.metadata.name: '{source_data.metadata.get('name', '<NOT SET>>') if source_data.metadata else '<NONE>>'}'")
         source_node = await SourceNodeService.create_source_node(db, source_data)
+        logger.info(f"📤 create_source_node route - response node_metadata: {source_node.node_metadata}")
+        logger.info(f"📤 create_source_node route - response node_metadata.name: '{source_node.node_metadata.get('name', '<NOT SET>>') if source_node.node_metadata else '<NONE>>'}'")
         return source_node
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

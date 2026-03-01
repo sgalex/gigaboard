@@ -4,16 +4,16 @@
 ```mermaid
 flowchart LR
    subgraph Main["GigaBoard Main Interface — Data-Centric Canvas"]
-      DN1["DataNode: Sales Data"]
+      SN1["SourceNode: Sales Data"]
       WN1["WidgetNode: Sales Chart"]
       WN2["WidgetNode: Top Regions Table"]
       CN1["CommentNode: Q4 spike?"]
-      DN1 -.VISUALIZATION.-> WN1
-      DN1 -.VISUALIZATION.-> WN2
-      CN1 -.COMMENT.-> DN1
+      SN1 -.VISUALIZATION.-> WN1
+      SN1 -.VISUALIZATION.-> WN2
+      CN1 -.COMMENT.-> SN1
    end
    subgraph Panel["🤖 AI Assistant Panel"]
-      P1["Context: Board loaded with 1 DataNode, 2 WidgetNodes"]
+      P1["Context: Board loaded with 1 SourceNode, 2 WidgetNodes"]
       P2["Messages (User ↔ AI)"]
       P3["Suggestions: + Create transformation, + Add visualization"]
       P4["Input: Введите вопрос... [Send]"]
@@ -217,7 +217,7 @@ flowchart LR
    ↓
 10. User clicks on suggested action (optional)
     ↓
-11. DataNode/WidgetNode/CommentNode created on canvas
+11. SourceNode/ContentNode/WidgetNode/CommentNode created on canvas
     ↓ 
 12. TRANSFORMATION/VISUALIZATION/COMMENT edges created
     ↓
@@ -226,7 +226,4 @@ flowchart LR
 14. Panel shows confirmation "Applied ✓" with node type
 ```
 
----
 
-**UI Designed**: 2026-01-23
-**Status**: Draft, ready for design team review

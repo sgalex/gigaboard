@@ -76,10 +76,11 @@ class DatabaseFileStorage(FileStorage):
             raise ValueError("Database session is required for DatabaseFileStorage.save(). Pass db=session.")
         
         # Create file record
+        mime_type = kwargs.get('mime_type', 'application/octet-stream')
         uploaded_file = UploadedFile(
             id=UUID(file_id),
             filename=filename,
-            mime_type="application/octet-stream",  # Will be set by caller
+            mime_type=mime_type,
             size_bytes=len(content),
             content=content,
             uploaded_by=user_id

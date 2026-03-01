@@ -1,4 +1,6 @@
 import { memo, useState } from 'react'
+import { useFilterStore } from '@/store/filterStore'
+import { useLibraryStore } from '@/store/libraryStore'
 import { Handle, Position, NodeProps } from '@xyflow/react'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -31,6 +33,7 @@ import {
     Edit2,
     RefreshCw,
     Trash2,
+    Filter,
 } from 'lucide-react'
 import { ContentNode } from '@/types'
 import { cn } from '@/lib/utils'
@@ -72,20 +75,22 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
     const contentNodes = useBoardStore((state) => state.contentNodes)
     const token = useAuthStore((state) => state.token)
 
-    // Get source node for transform dialog
-    const getSourceNodeForTransform = () => {
-        const sourceNodeId = contentNode.lineage?.source_node_id
-        if (!sourceNodeId) return contentNode // Fallback to current node
+    // Get ALL source nodes for transform dialog (supports multi-source transforms)
+    const getSourceNodesForTransform = (): any[] => {
+        const lineage = contentNode.lineage
+        const sourceNodeIds: string[] = lineage?.source_node_ids || (lineage?.source_node_id ? [lineage.source_node_id] : [])
 
-        // Try to find in SourceNodes
-        const sourceNode = sourceNodes.find(n => n.id === sourceNodeId)
-        if (sourceNode) return sourceNode
+        if (sourceNodeIds.length === 0) return [contentNode]
 
-        // Try to find in ContentNodes (if source was another ContentNode)
-        const sourceContentNode = contentNodes.find(n => n.id === sourceNodeId)
-        if (sourceContentNode) return sourceContentNode
+        const resolved = sourceNodeIds.map(id => {
+            const sn = sourceNodes.find(n => n.id === id)
+            if (sn) return sn
+            const cn = contentNodes.find(n => n.id === id)
+            if (cn) return cn
+            return null
+        }).filter(Boolean)
 
-        return contentNode // Fallback
+        return resolved.length > 0 ? resolved : [contentNode]
     }
 
     // Handle name edit
@@ -125,19 +130,23 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
         setShowPreviewModal(true)
     }
 
-    const tableCount = contentNode.content?.tables?.length || 0
+    const filteredEntry = useFilterStore((s) => s.filteredNodeData?.[contentNode.id] ?? null)
+    const isFiltered = filteredEntry !== null
+    const activeTables = filteredEntry?.tables ?? contentNode.content?.tables ?? []
+    const tableCount = activeTables.length
     const hasText = !!contentNode.content?.text
-    const totalRows = contentNode.content?.tables?.reduce((sum, t) => sum + (t.row_count || 0), 0) || 0
+    const totalRows = activeTables.reduce((sum: number, t: any) => sum + (t.row_count || 0), 0)
 
     // Handle transformation
-    const handleTransform = async (code: string, transformationId: string, description?: string) => {
+    const handleTransform = async (code: string, transformationId: string, description?: string, chatHistory?: Array<{ role: string; content: string }>) => {
         // Pass contentNode.id as targetNodeId to UPDATE existing node instead of creating new one
         await transformContent(
             contentNode.lineage?.source_node_id || contentNode.id,  // source_node_id for API
             description || '',
             code,
             transformationId,
-            contentNode.id  // targetNodeId - UPDATE this node
+            contentNode.id,  // targetNodeId - UPDATE this node
+            chatHistory  // Pass chat history
         )
     }
 
@@ -191,20 +200,37 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
         })
 
         // Reconstruct chat history from lineage
-        const chatHistory = [
-            {
+        // Prefer saved chat_history if available, otherwise create from description
+        let chatHistory: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: Date }> = []
+
+        if (lastTransform.chat_history && Array.isArray(lastTransform.chat_history) && lastTransform.chat_history.length > 0) {
+            // Use real saved chat history
+            console.log('✅ Restoring saved chat history:', lastTransform.chat_history.length, 'messages')
+            chatHistory = lastTransform.chat_history.map((msg: any) => ({
                 id: crypto.randomUUID(),
-                role: 'user' as const,
-                content: lastTransform.description || 'Transform data',
+                role: msg.role as 'user' | 'assistant',
+                content: msg.content,
                 timestamp: new Date()
-            },
-            {
-                id: crypto.randomUUID(),
-                role: 'assistant' as const,
-                content: `Code created and executed successfully`,
-                timestamp: new Date()
-            }
-        ]
+            }))
+        } else {
+            // Fallback: create from description/prompt
+            console.warn('⚠️ No saved chat history, creating from description')
+            const userPrompt = lastTransform.prompt || lastTransform.description || 'Transform data'
+            chatHistory = [
+                {
+                    id: crypto.randomUUID(),
+                    role: 'user' as const,
+                    content: userPrompt,
+                    timestamp: new Date()
+                },
+                {
+                    id: crypto.randomUUID(),
+                    role: 'assistant' as const,
+                    content: `Code created and executed successfully`,
+                    timestamp: new Date()
+                }
+            ]
+        }
 
         setEditTransformData({
             messages: chatHistory,
@@ -291,6 +317,16 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
                 }
             })
 
+            // Re-fetch dimensions and node tables — refresh may expose new columns
+            const projectId = useBoardStore.getState().currentBoard?.project_id
+            if (projectId) {
+                useFilterStore.getState().loadDimensions(projectId)
+                const boards = useBoardStore.getState().boards.filter(b => b.project_id === projectId)
+                if (boards.length > 0) {
+                    useLibraryStore.getState().fetchNodeTables(boards)
+                }
+            }
+
             notify.success('Данные обновлены')
         } catch (error) {
             console.error('Failed to refresh ContentNode:', error)
@@ -329,11 +365,16 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
 
             // Export each table as a separate sheet
             contentNode.content.tables.forEach((table, idx) => {
-                const columns = table.columns || []
-                const rows = table.rows || []
+                const rawColumns = table.columns || []
+                const columns = rawColumns.map((col: any) => col.name)
+                const rawRows = table.rows || []
+                // Dict rows: extract values in column order
+                const arrayRows = rawRows.map((row: any) => {
+                    return columns.map((colName: string) => row?.[colName] ?? '')
+                })
 
-                // Prepare data with headers (rows is already array of arrays)
-                const sheetData = [columns, ...rows]
+                // Prepare data with headers (rows as array of arrays)
+                const sheetData = [columns, ...arrayRows]
                 const worksheet = XLSX.utils.aoa_to_sheet(sheetData)
 
                 // Set column widths
@@ -356,18 +397,25 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
 
     // Get node title
     const getTitle = (): string => {
+        // Strategic logging for ContentNode naming pipeline debugging
+        console.log(`[ContentNodeCard] getTitle() for node ${contentNode.id}:`, {
+            'metadata': contentNode.metadata,
+            'metadata?.name': contentNode.metadata?.name,
+            'node_metadata': (contentNode as any).node_metadata,
+            'tables[0].name': tableCount > 0 ? contentNode.content.tables[0].name : '<no tables>',
+            'full contentNode keys': Object.keys(contentNode),
+        })
         if (contentNode.metadata?.name) return contentNode.metadata.name
         if (tableCount > 0) return contentNode.content.tables[0].name
-        return 'Content Node'
+        return 'Узел данных'
     }
 
-    // Get tables summary
     const getTablesSummary = (): string => {
         if (tableCount === 0) return 'No tables'
         if (tableCount === 1) {
-            const table = contentNode.content.tables[0]
-            const rowCount = table.row_count ?? table.rows?.length ?? 0
-            const colCount = table.column_count ?? table.columns?.length ?? 0
+            const table = activeTables[0]
+            const rowCount = table?.row_count ?? table?.rows?.length ?? 0
+            const colCount = table?.column_count ?? table?.columns?.length ?? 0
             return `${table.name} • ${rowCount} rows × ${colCount} cols`
         }
         return `${tableCount} tables • ${totalRows} total rows`
@@ -389,20 +437,19 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
 
     // Render table preview
     const renderTablePreview = (tableIndex: number) => {
-        const table = contentNode.content.tables[tableIndex]
+        const table = activeTables[tableIndex]
         if (!table) return null
 
-        // Handle both old (array) and new (Pydantic object) formats
-        const rawRows = table.rows?.slice(0, 100) || []
-        const previewRows = rawRows.map((row: any) =>
-            Array.isArray(row) ? row : row.values || []
-        )
-
-        // Handle both old (string array) and new (object array) column formats
+        // Handle column format
         const rawColumns = table.columns || []
-        const columns = rawColumns.map((col: any) =>
-            typeof col === 'string' ? col : col.name || String(col)
-        )
+        const columns = rawColumns.map((col: any) => col.name)
+
+        // Handle row formats: dict rows (unified)
+        const rawRows = table.rows?.slice(0, 100) || []
+        const previewRows = rawRows.map((row: any) => {
+            // Dict row: extract values in column order
+            return columns.map((colName: string) => row?.[colName] ?? '')
+        })
 
         return (
             <div className="space-y-2">
@@ -527,7 +574,7 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
                                     )}
                                     <DropdownMenuItem onClick={() => setShowTransformDialog(true)}>
                                         <Code className="mr-2 h-4 w-4" />
-                                        Трансформация
+                                        Обработка
                                     </DropdownMenuItem>
                                     <DropdownMenuItem onClick={() => setShowWidgetDialog(true)}>
                                         <TrendingUp className="mr-2 h-4 w-4" />
@@ -562,7 +609,13 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
                     {/* Tables as clickable badges */}
                     {tableCount > 0 && (
                         <div className="flex flex-wrap gap-1.5">
-                            {contentNode.content.tables.map((table, idx) => (
+                            {isFiltered && (
+                                <Filter
+                                    className="w-3 h-3 text-blue-600"
+                                    aria-label="Фильтр активен"
+                                />
+                            )}
+                            {activeTables.map((table: any, idx: number) => (
                                 <Badge
                                     key={idx}
                                     variant="outline"
@@ -637,18 +690,26 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
                                 {/* Tabs */}
                                 {tableCount > 1 && (
                                     <div className="flex gap-2 overflow-x-auto pb-2 border-b">
-                                        {contentNode.content.tables.map((table, idx) => (
+                                        {activeTables.map((table: any, idx: number) => (
                                             <button
                                                 key={idx}
                                                 onClick={() => setActiveTableIndex(idx)}
                                                 className={cn(
-                                                    'px-4 py-2 text-sm rounded-md transition-colors whitespace-nowrap',
+                                                    'px-4 py-2 text-sm rounded-md transition-colors whitespace-nowrap flex items-center gap-2',
                                                     activeTableIndex === idx
                                                         ? 'bg-primary text-primary-foreground'
                                                         : 'bg-muted hover:bg-muted/80'
                                                 )}
                                             >
-                                                {table.name}
+                                                <span>{table.name}</span>
+                                                <span className={cn(
+                                                    'px-2 py-0.5 text-xs rounded-full',
+                                                    activeTableIndex === idx
+                                                        ? 'bg-primary-foreground/20 text-primary-foreground'
+                                                        : 'bg-background/50 text-muted-foreground'
+                                                )}>
+                                                    {(table.row_count ?? table.rows?.length ?? 0).toLocaleString()}
+                                                </span>
                                             </button>
                                         ))}
                                     </div>
@@ -678,7 +739,7 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
                     setShowTransformDialog(open)
                     if (!open) setEditTransformData(null) // Clear edit data on close
                 }}
-                sourceNode={getSourceNodeForTransform()}
+                sourceNodes={getSourceNodesForTransform()}
                 onTransform={handleTransform}
                 initialMessages={editTransformData?.messages}
                 initialCode={editTransformData?.code}

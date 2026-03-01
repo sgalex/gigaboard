@@ -18,6 +18,42 @@ logger = logging.getLogger(__name__)
 
 class ContentNodeService:
     """Service for managing ContentNodes."""
+
+    @staticmethod
+    async def _auto_detect_dimensions(
+        db: AsyncSession,
+        board_id: UUID,
+        node_id: UUID,
+        tables: list[dict[str, Any]],
+    ) -> None:
+        """Auto-detect dimensions from tables and upsert into project."""
+        logger.info(
+            f"📊 _auto_detect_dimensions called for ContentNode {node_id}, "
+            f"board={board_id}, tables_count={len(tables)}"
+        )
+        if not tables:
+            logger.info("📊 No tables provided, skipping dimension detection")
+            return
+        try:
+            from app.services.dimension_service import DimensionService
+            project_id = await DimensionService.get_project_id_for_node(db, board_id)
+            logger.info(f"📊 Resolved project_id={project_id} for board {board_id}")
+            if project_id:
+                results = await DimensionService.auto_detect_and_upsert(
+                    db, project_id, node_id, tables,
+                )
+                if results:
+                    await db.commit()
+                    logger.info(
+                        f"📊 Auto-detected {len(results)} dimension(s) for ContentNode {node_id}: "
+                        f"{[r['dimension'] for r in results]}"
+                    )
+                else:
+                    logger.info(f"📊 No dimensions detected for ContentNode {node_id} (no suitable columns)")
+            else:
+                logger.warning(f"⚠️ Could not resolve project_id for board {board_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ Dimension auto-detect failed for ContentNode {node_id}: {e}", exc_info=True)
     
     @staticmethod
     async def create_content_node(
@@ -43,15 +79,21 @@ class ContentNodeService:
             lineage_dict = lineage_dict.model_dump()
         
         # Create ContentNode (BaseNode fields will be auto-populated via JTI)
+        incoming_metadata = content_data.metadata or {}
+        logger.info(f"📝 ContentNode creation - incoming metadata.name: '{incoming_metadata.get('name', '<NOT SET>>')}'")
+        logger.info(f"📝 ContentNode creation - full metadata: {incoming_metadata}")
+        
         content_node = ContentNode(
             board_id=content_data.board_id,
             content=content_dict,
             lineage=lineage_dict,
-            node_metadata=content_data.metadata or {},
+            node_metadata=incoming_metadata,
             position=content_data.position or {"x": 0, "y": 0}
         )
         db.add(content_node)
         await db.flush()  # Get the ID
+        
+        logger.info(f"✅ ContentNode {content_node.id} saved - node_metadata.name: '{content_node.node_metadata.get('name', '<NOT SET>>') if content_node.node_metadata else '<NONE>>'}'")
         
         table_count = len(content_dict.get("tables", []))
         logger.info(f"Created ContentNode {content_node.id} (tables: {table_count})")
@@ -61,7 +103,28 @@ class ContentNodeService:
             row_count = table.get("row_count", len(table.get("rows", [])))
             col_count = table.get("column_count", len(table.get("columns", [])))
             logger.info(f"  Table {idx}: {table.get('name')} ({row_count} rows × {col_count} cols)")
-        
+
+        # Auto-detect dimensions from tables
+        tables_for_detect = content_dict.get("tables", [])
+        logger.info(
+            f"🔍 [DIM] ContentNode {content_node.id}: about to call _auto_detect_dimensions, "
+            f"tables_count={len(tables_for_detect)}, "
+            f"table_names={[t.get('name','?') for t in tables_for_detect]}, "
+            f"table_col_counts={[len(t.get('columns',[])) for t in tables_for_detect]}, "
+            f"table_row_counts={[len(t.get('rows',[])) for t in tables_for_detect]}"
+        )
+        for tidx, tbl in enumerate(tables_for_detect):
+            cols = tbl.get('columns', [])
+            rows = tbl.get('rows', [])
+            logger.info(
+                f"🔍 [DIM] ContentNode table[{tidx}]='{tbl.get('name','')}': "
+                f"columns={[c.get('name','?')+':'+c.get('type','?') for c in cols]}, "
+                f"rows_sample_keys={list(rows[0].keys()) if rows else '[]'}"
+            )
+        await ContentNodeService._auto_detect_dimensions(
+            db, content_data.board_id, content_node.id, tables_for_detect,
+        )
+
         return content_node
     
     @staticmethod
@@ -143,39 +206,58 @@ class ContentNodeService:
         await db.refresh(content)
         
         logger.info(f"Updated ContentNode {content_id}")
+
+        # Auto-detect dimensions if tables changed
+        if update_data.content is not None:
+            tables = (content.content or {}).get("tables", [])
+            logger.info(
+                f"🔍 [DIM] ContentNode {content_id} update: "
+                f"tables_count={len(tables)}, "
+                f"table_names={[t.get('name','?') for t in tables]}"
+            )
+            if tables:
+                await ContentNodeService._auto_detect_dimensions(
+                    db, content.board_id, content_id, tables,
+                )
+
         return content
     
     @staticmethod
     async def delete_content_node(db: AsyncSession, content_id: UUID) -> bool:
         """Delete ContentNode with cascade deletion of dependent nodes.
-        
+
         Deletes:
         - All ContentNodes that have this node as source (lineage.source_node_id)
         - All WidgetNodes that visualize this ContentNode
         - All Edges connected to this node
-        
+        - All ProjectTable rows linked to this ContentNode (source_content_node_id)
+        - Orphaned Dimensions (those with no remaining column mappings in the project)
+
         Args:
             db: Database session
             content_id: ContentNode ID
-            
+
         Returns:
             True if deleted, False if not found
         """
         from app.models import ContentNode, WidgetNode, Edge
         from sqlalchemy import select, or_
-        
+
         content = await ContentNodeService.get_content_node(db, content_id)
         if not content:
             return False
-        
+
+        # Capture board_id before deletion (needed to resolve project_id afterwards)
+        board_id = content.board_id
+
         logger.info(f"🗑️ Deleting ContentNode {content_id} with cascade")
-        
+
         # 1. Find and delete dependent ContentNodes (those created from this node)
         dependent_contents_result = await db.execute(
             select(ContentNode)
         )
         dependent_contents = dependent_contents_result.scalars().all()
-        
+
         # Filter by lineage in Python (JSONB queries are complex)
         to_delete = []
         for node in dependent_contents:
@@ -184,15 +266,15 @@ class ContentNodeService:
             lineage = node.lineage or {}
             source_id = lineage.get("source_node_id")
             source_ids = lineage.get("source_node_ids", [])
-            
+
             if source_id == str(content_id) or str(content_id) in source_ids:
                 to_delete.append(node.id)
                 logger.info(f"  📦 Will cascade delete dependent ContentNode {node.id}")
-        
+
         # Recursively delete dependent ContentNodes
         for dep_id in to_delete:
             await ContentNodeService.delete_content_node(db, dep_id)
-        
+
         # 2. Find and delete WidgetNodes that visualize this ContentNode (via VISUALIZATION edges)
         from app.models.edge import Edge
         widget_edges_result = await db.execute(
@@ -204,7 +286,7 @@ class ContentNodeService:
             )
         )
         widget_edges = widget_edges_result.scalars().all()
-        
+
         # Delete the WidgetNodes at the target of VISUALIZATION edges
         for edge in widget_edges:
             widget_result = await db.execute(
@@ -214,7 +296,7 @@ class ContentNodeService:
             if widget:
                 logger.info(f"  📊 Deleting dependent WidgetNode {widget.id}")
                 await db.delete(widget)
-        
+
         # 3. Delete all edges connected to this node
         edges_result = await db.execute(
             select(Edge).where(
@@ -225,16 +307,41 @@ class ContentNodeService:
             )
         )
         edges = edges_result.scalars().all()
-        
+
         for edge in edges:
             logger.info(f"  🔗 Deleting connected Edge {edge.id}")
             await db.delete(edge)
-        
-        # 4. Finally delete the ContentNode itself
+
+        # 4. Delete ProjectTable rows linked to this ContentNode
+        from app.models.project_table import ProjectTable
+        pt_result = await db.execute(
+            select(ProjectTable).where(ProjectTable.source_content_node_id == content_id)
+        )
+        project_tables = pt_result.scalars().all()
+        for pt in project_tables:
+            logger.info(f"  📋 Deleting linked ProjectTable '{pt.name}' (id={pt.id})")
+            await db.delete(pt)
+
+        # 5. Finally delete the ContentNode itself
         await db.delete(content)
         await db.commit()
-        
-        logger.info(f"✅ Deleted ContentNode {content_id} with {len(to_delete)} dependent ContentNodes, {len(widget_edges)} WidgetNodes, and {len(edges)} Edges")
+
+        logger.info(
+            f"✅ Deleted ContentNode {content_id} with {len(to_delete)} dependent ContentNodes, "
+            f"{len(widget_edges)} WidgetNodes, {len(edges)} Edges, {len(project_tables)} ProjectTables"
+        )
+
+        # 6. Clean up orphaned Dimensions (mappings cascade-deleted via PG FK)
+        try:
+            from app.services.dimension_service import DimensionService
+            project_id = await DimensionService.get_project_id_for_node(db, board_id)
+            if project_id:
+                deleted_count = await DimensionService.cleanup_orphaned_dimensions(db, project_id)
+                if deleted_count:
+                    await db.commit()
+        except Exception as exc:
+            logger.warning(f"cleanup_orphaned_dimensions failed for ContentNode {content_id}: {exc}")
+
         return True
     
     @staticmethod
@@ -370,7 +477,11 @@ class ContentNodeService:
                 df_name = f"df{i}_{j}" if len(source_contents) > 1 else f"df{j}"
                 columns = table.get("columns", [])
                 rows = table.get("rows", [])
-                dfs[df_name] = pd.DataFrame(rows, columns=columns)
+                col_names = [col["name"] for col in columns]
+                if rows:
+                    dfs[df_name] = pd.DataFrame(rows, columns=col_names)
+                else:
+                    dfs[df_name] = pd.DataFrame(columns=col_names)
         
         # Execute transformation code
         exec_globals = {"pd": pd, **dfs}
@@ -390,14 +501,29 @@ class ContentNodeService:
         if not isinstance(result_df, pd.DataFrame):
             raise ValueError("Result must be a pandas DataFrame")
         
-        # Convert result to ContentNode format
+        # Convert result to unified ContentNode format
+        typed_columns = []
+        for col in result_df.columns:
+            dtype = str(result_df[col].dtype)
+            if 'int' in dtype:
+                col_type = "int"
+            elif 'float' in dtype:
+                col_type = "float"
+            elif 'bool' in dtype:
+                col_type = "bool"
+            elif 'datetime' in dtype:
+                col_type = "date"
+            else:
+                col_type = "string"
+            typed_columns.append({"name": str(col), "type": col_type})
+        
         result_table = {
-            "name": "transformed_data",
-            "columns": [str(col) for col in result_df.columns],
-            "rows": result_df.fillna("").values.tolist(),
+            "name": "результат_трансформации",
+            "columns": typed_columns,
+            "rows": result_df.fillna("").to_dict(orient='records'),
             "row_count": len(result_df),
             "column_count": len(result_df.columns),
-            "metadata": {"transformation": description or "Python transformation"}
+            "metadata": {"transformation": description or "Трансформация Python"}
         }
         
         # Build lineage
@@ -407,7 +533,7 @@ class ContentNodeService:
             "transformation_history": [
                 {
                     "operation": "transform",
-                    "description": description or "Python transformation",
+                    "description": description or "Трансформация Python",
                     "code_snippet": transform_code[:500],  # Truncate long code
                     "timestamp": datetime.utcnow().isoformat()
                 }
@@ -423,10 +549,10 @@ class ContentNodeService:
         lineage_dict["source_nodes"] = list(set(lineage_dict["source_nodes"]))
         
         # Generate text summary
-        text_summary = f"Transformed from {len(source_contents)} ContentNode(s)\n"
-        text_summary += f"Result: {len(result_df)} rows × {len(result_df.columns)} columns\n"
+        text_summary = f"Трансформировано из {len(source_contents)} узла(ов) данных\n"
+        text_summary += f"Результат: {len(result_df)} строк × {len(result_df.columns)} столбцов\n"
         if description:
-            text_summary += f"Description: {description}"
+            text_summary += f"Описание: {description}"
         
         # Create new ContentNode
         content_create = ContentNodeCreate(

@@ -63,6 +63,7 @@ export const SuggestionsPanel = ({
     const [hoveredSuggestion, setHoveredSuggestion] = useState<string | null>(null)
     const [tooltipPosition, setTooltipPosition] = useState({ top: 0, left: 0 })
     const badgeRefs = useRef<{ [key: string]: HTMLDivElement | null }>({})
+    const isFirstRender = useRef(true)
 
     const loadSuggestions = async () => {
         if (!contentNodeId) return
@@ -74,7 +75,7 @@ export const SuggestionsPanel = ({
             const response = await contentNodesAPI.analyzeSuggestions(contentNodeId, {
                 chat_history: chatHistory,
                 current_widget_code: currentWidgetCode || null,
-                max_suggestions: 8,
+                max_suggestions: 6,
             })
 
             setSuggestions(response.data.suggestions)
@@ -107,16 +108,22 @@ export const SuggestionsPanel = ({
         }
     }
 
+    // Reload suggestions when contentNodeId changes or when currentWidgetCode changes
+    // Skip first render to wait for currentWidgetCode to be set in edit mode
     useEffect(() => {
-        loadSuggestions()
-    }, [contentNodeId]) // Reload when contentNodeId changes
-
-    // Reload suggestions only when widget is rebuilt (currentWidgetCode changes)
-    useEffect(() => {
-        if (currentWidgetCode) {
-            loadSuggestions()
+        if (isFirstRender.current) {
+            isFirstRender.current = false
+            // In edit mode (currentWidgetCode exists), wait for it to be set
+            // In new widget mode (currentWidgetCode undefined), load immediately
+            if (currentWidgetCode === undefined) {
+                // New widget - load suggestions immediately
+                loadSuggestions()
+            }
+            return
         }
-    }, [currentWidgetCode])
+
+        loadSuggestions()
+    }, [contentNodeId, currentWidgetCode])
 
     if (isLoading) {
         return (
@@ -150,7 +157,7 @@ export const SuggestionsPanel = ({
             {/* Compact tag view with tooltips */}
             <div className="flex flex-wrap gap-1.5">
                 {suggestions.map((suggestion) => {
-                    const Icon = SUGGESTION_ICONS[suggestion.type]
+                    const Icon = SUGGESTION_ICONS[suggestion.type] || Sparkles // Fallback icon
 
                     return (
                         <div
@@ -193,7 +200,7 @@ export const SuggestionsPanel = ({
                     {(() => {
                         const suggestion = suggestions.find(s => s.id === hoveredSuggestion)
                         if (!suggestion) return null
-                        const Icon = SUGGESTION_ICONS[suggestion.type]
+                        const Icon = SUGGESTION_ICONS[suggestion.type] || Sparkles // Fallback icon
 
                         return (
                             <>

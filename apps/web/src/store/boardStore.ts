@@ -11,6 +11,7 @@ import {
     contentNodesAPI
 } from '@/services/api'
 import { notify } from './notificationStore'
+import { useLibraryStore } from './libraryStore'
 import type {
     Board,
     BoardWithNodes,
@@ -49,7 +50,7 @@ interface BoardStore {
     fetchBoards: (projectId?: string) => Promise<void>
     createBoard: (data: BoardCreate) => Promise<Board | null>
     fetchBoard: (id: string) => Promise<void>
-    updateBoard: (id: string, data: BoardUpdate) => Promise<void>
+    updateBoard: (id: string, data: BoardUpdate, silent?: boolean) => Promise<void>
     deleteBoard: (id: string) => Promise<void>
     setCurrentBoard: (board: Board | null) => void
 
@@ -57,7 +58,7 @@ interface BoardStore {
     fetchWidgetNodes: (boardId: string) => Promise<void>
     createWidgetNode: (boardId: string, data: WidgetNodeCreate) => Promise<WidgetNode | null>
     updateWidgetNode: (boardId: string, widgetNodeId: string, data: WidgetNodeUpdate) => Promise<void>
-    deleteWidgetNode: (boardId: string, widgetNodeId: string) => Promise<void>
+    deleteWidgetNode: (boardId: string, widgetNodeId: string, projectId?: string) => Promise<void>
 
     // CommentNode Actions
     fetchCommentNodes: (boardId: string) => Promise<void>
@@ -83,8 +84,8 @@ interface BoardStore {
     getContentTable: (contentNodeId: string, tableIndex: number) => Promise<any>
     getContentLineage: (contentNodeId: string) => Promise<any>
     getDownstreamContents: (contentNodeId: string) => Promise<ContentNode[]>
-    transformContent: (contentNodeId: string, prompt: string, code?: string, transformationId?: string, targetNodeId?: string) => Promise<ContentNode | null>
-    transformContents: (sourceContentIds: string[], code: string, description?: string) => Promise<ContentNode | null>
+    transformContent: (contentNodeId: string, prompt: string, code?: string, transformationId?: string, targetNodeId?: string, chatHistory?: Array<{ role: string; content: string }>) => Promise<ContentNode | null>
+    transformContents: (sourceContentIds: string[], code: string, description?: string, position?: { x: number, y: number }) => Promise<ContentNode | null>
     visualizeContent: (contentNodeId: string, params: {
         user_prompt?: string
         auto_refresh?: boolean
@@ -137,7 +138,6 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
                 boards: [
                     {
                         ...newBoard,
-                        data_nodes_count: 0,
                         widget_nodes_count: 0,
                         comment_nodes_count: 0,
                     },
@@ -178,9 +178,9 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
         }
     },
 
-    // Update board
-    updateBoard: async (id: string, data: BoardUpdate) => {
-        set({ isLoading: true, error: null })
+    // Update board (silent = true для автообновления превью без уведомления)
+    updateBoard: async (id: string, data: BoardUpdate, silent = false) => {
+        if (!silent) set({ isLoading: true, error: null })
         try {
             const response = await boardsAPI.update(id, data)
             const updatedBoard = response.data
@@ -191,11 +191,11 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
                 isLoading: false,
             }))
 
-            notify.success('Доска обновлена', { title: 'Успех' })
+            if (!silent) notify.success('Доска обновлена', { title: 'Успех' })
         } catch (error: any) {
             const message = error.response?.data?.detail || 'Не удалось обновить доску'
             set({ error: message, isLoading: false })
-            notify.error(message, { title: 'Ошибка обновления' })
+            if (!silent) notify.error(message, { title: 'Ошибка обновления' })
         }
     },
 
@@ -316,13 +316,19 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
         }
     },
 
-    deleteWidgetNode: async (boardId: string, widgetNodeId: string) => {
+    deleteWidgetNode: async (boardId: string, widgetNodeId: string, explicitProjectId?: string) => {
         try {
             await widgetNodesAPI.delete(boardId, widgetNodeId)
 
             set((state) => ({
                 widgetNodes: state.widgetNodes.filter((n) => n.id !== widgetNodeId),
             }))
+
+            // Remove from project library (use explicit projectId if provided, fallback to current board)
+            const projectId = explicitProjectId || get().currentBoard?.project_id
+            if (projectId) {
+                useLibraryStore.getState().removeWidgetByNodeId(projectId, widgetNodeId)
+            }
 
             notify.success('WidgetNode удален', { title: 'Успех' })
         } catch (error: any) {
@@ -485,8 +491,21 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
 
     createSourceNode: async (boardId: string, data: SourceNodeCreate) => {
         try {
+            console.log('[boardStore] createSourceNode - sending data:', {
+                'metadata': data.metadata,
+                'metadata?.name': data.metadata?.name,
+                'source_type': data.source_type,
+            })
             const response = await sourceNodesAPI.create({ ...data, board_id: boardId })
             const newNode = response.data
+
+            // Strategic logging for SourceNode naming
+            console.log('[boardStore] createSourceNode - response:', {
+                'metadata': newNode?.metadata,
+                'metadata?.name': newNode?.metadata?.name,
+                'node_metadata': (newNode as any)?.node_metadata,
+                'response keys': newNode ? Object.keys(newNode) : '<null>',
+            })
 
             set((state) => ({
                 sourceNodes: [...state.sourceNodes, newNode],
@@ -545,6 +564,13 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
             }))
 
             notify.success('SourceNode удален', { title: 'Успех' })
+
+            // Refresh project tree (Таблицы, Измерения sections in ProjectExplorer)
+            const projectId = get().currentBoard?.project_id
+            if (projectId) {
+                const boards = get().boards.filter(b => b.project_id === projectId)
+                useLibraryStore.getState().refreshProjectTree(projectId, boards)
+            }
         } catch (error: any) {
             const message = error.response?.data?.detail || 'Не удалось удалить SourceNode'
             notify.error(message, { title: 'Ошибка удаления' })
@@ -580,14 +606,15 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
 
         try {
             console.log('🔄 Starting extraction for source:', sourceNodeId)
-            const response = await sourceNodesAPI.extract(sourceNodeId, params)
+            const response = await sourceNodesAPI.extract(boardId, sourceNodeId, params)
             console.log('📦 Extraction response:', response.data)
 
-            // Response format: { content_node_id, status, message }
-            if (response.data.content_node_id) {
-                console.log('📥 Fetching ContentNode:', response.data.content_node_id)
+            // Response format: { content_node, extract_edge, summary }
+            const contentNodeId = response.data.content_node?.id || response.data.content_node_id
+            if (contentNodeId) {
+                console.log('📥 Fetching ContentNode:', contentNodeId)
                 // Fetch the created ContentNode
-                const contentNodeRes = await contentNodesAPI.get(response.data.content_node_id)
+                const contentNodeRes = await contentNodesAPI.get(contentNodeId)
                 const newContentNode = contentNodeRes.data
                 console.log('✅ Got ContentNode:', newContentNode)
 
@@ -598,6 +625,13 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
                 set((state) => ({
                     contentNodes: [...state.contentNodes, newContentNode],
                 }))
+
+                // Refresh project tree (Таблицы, Измерения appear in ProjectExplorer)
+                const projectId = get().currentBoard?.project_id
+                if (projectId) {
+                    const boards = get().boards.filter(b => b.project_id === projectId)
+                    useLibraryStore.getState().refreshProjectTree(projectId, boards)
+                }
 
                 notify.success('Данные успешно извлечены из источника', { title: 'Успех' })
                 return newContentNode
@@ -763,6 +797,13 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
             ])
 
             notify.success('ContentNode и зависимые узлы удалены', { title: 'Успех' })
+
+            // Refresh project tree (Таблицы, Измерения sections in ProjectExplorer)
+            const projectId = get().currentBoard?.project_id
+            if (projectId) {
+                const boards = get().boards.filter(b => b.project_id === projectId)
+                useLibraryStore.getState().refreshProjectTree(projectId, boards)
+            }
         } catch (error: any) {
             const message = error.response?.data?.detail || 'Не удалось удалить ContentNode'
             notify.error(message, { title: 'Ошибка удаления' })
@@ -802,7 +843,7 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
         }
     },
 
-    transformContent: async (contentNodeId: string, prompt: string, code?: string, transformationId?: string, targetNodeId?: string): Promise<ContentNode | null> => {
+    transformContent: async (contentNodeId: string, prompt: string, code?: string, transformationId?: string, targetNodeId?: string, chatHistory?: Array<{ role: string; content: string }>): Promise<ContentNode | null> => {
         try {
             const state = get()
             const boardId = state.currentBoard?.id
@@ -819,6 +860,7 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
                     transformation_id: transformationId,
                     description: prompt,
                     prompt: prompt,  // Save for editing later
+                    chat_history: chatHistory,  // Save chat history for editing later
                     target_node_id: targetNodeId,  // If provided, UPDATE existing node
                 })
             } else {
@@ -828,6 +870,16 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
             const contentNode = response.data.content_node
             const transformEdge = response.data.transform_edge
             const isUpdate = response.data.updated === true
+
+            // Strategic logging for ContentNode naming pipeline
+            console.log('[boardStore] transformContent response:', {
+                'contentNode.metadata': contentNode?.metadata,
+                'contentNode.metadata?.name': contentNode?.metadata?.name,
+                'contentNode.node_metadata': contentNode?.node_metadata,
+                'isUpdate': isUpdate,
+                'response.data keys': Object.keys(response.data),
+                'contentNode keys': contentNode ? Object.keys(contentNode) : '<null>',
+            })
 
             if (isUpdate) {
                 // UPDATE mode: replace existing node in array
@@ -841,14 +893,14 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
                         return e
                     })
                 }))
-                notify.success('Трансформация обновлена', { title: 'Успех' })
+                notify.success('Обработка обновлена', { title: 'Успех' })
             } else {
                 // CREATE mode: add new node
                 set((state) => ({
                     contentNodes: [...state.contentNodes, contentNode],
                     edges: transformEdge ? [...state.edges, transformEdge] : state.edges,
                 }))
-                notify.success('Трансформация создана', { title: 'Успех' })
+                notify.success('Обработка создана', { title: 'Успех' })
             }
 
             return contentNode
@@ -859,16 +911,41 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
         }
     },
 
-    transformContents: async (sourceContentIds: string[], code: string, description?: string): Promise<ContentNode | null> => {
+    transformContents: async (sourceContentIds: string[], code: string, description?: string, position?: { x: number, y: number }): Promise<ContentNode | null> => {
         try {
+            // 1. Execute transform — backend creates ContentNode and returns only its id
             const response = await contentNodesAPI.transform(sourceContentIds, code, description)
-            const newContentNode = response.data
+            const { content_node_id } = response.data as any
 
+            // 2. Fetch the full ContentNode
+            const contentNodeRes = await contentNodesAPI.get(content_node_id)
+            const newContentNode = contentNodeRes.data
+
+            // 3. Update canvas position if provided
+            if (position) {
+                await contentNodesAPI.update(content_node_id, { position })
+                newContentNode.position = position
+            }
+
+            // 4. Add to board state
             set((state) => ({
                 contentNodes: [...state.contentNodes, newContentNode],
             }))
 
-            notify.success('Трансформация выполнена', { title: 'Успех' })
+            // 5. Refresh edges (backend auto-creates TRANSFORMATION edge)
+            const boardId = get().currentBoard?.id
+            if (boardId) {
+                get().fetchEdges(boardId)
+            }
+
+            // 6. Refresh project tree (Таблицы, Измерения sections in ProjectExplorer)
+            const projectId = get().currentBoard?.project_id
+            if (projectId) {
+                const boards = get().boards.filter(b => b.project_id === projectId)
+                useLibraryStore.getState().refreshProjectTree(projectId, boards)
+            }
+
+            notify.success('Обработка выполнена', { title: 'Успех' })
             return newContentNode
         } catch (error: any) {
             const message = error.response?.data?.detail || 'Не удалось выполнить трансформацию'
@@ -903,6 +980,24 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
                 get().fetchWidgetNodes(boardId),
                 get().fetchEdges(boardId),
             ])
+
+            // Auto-save new widget to library (safety net if socket is disconnected)
+            const widgetNodeId = result.widget_node_id
+            if (widgetNodeId) {
+                const newWidget = get().widgetNodes.find(w => w.id === widgetNodeId)
+                const projectId = state.currentBoard?.project_id
+                if (newWidget && projectId && newWidget.html_code) {
+                    useLibraryStore.getState().syncWidgetToLibrary(projectId, newWidget.id, newWidget.board_id, {
+                        name: newWidget.name,
+                        description: newWidget.description,
+                        html_code: newWidget.html_code,
+                        css_code: newWidget.css_code,
+                        js_code: newWidget.js_code,
+                        widget_type: newWidget.config?.widget_type,
+                        source_content_node_id: newWidget.config?.sourceContentNodeId,
+                    })
+                }
+            }
 
             notify.success('Визуализация создана', { title: 'Успех' })
         } catch (error: any) {

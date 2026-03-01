@@ -1,16 +1,31 @@
 """
 Базовый класс для всех агентов Multi-Agent системы.
+
+V2: Все агенты возвращают AgentPayload вместо Dict[str, Any].
+См. docs/MULTI_AGENT_V2_CONCEPT.md
 """
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 from datetime import datetime
 import json
+
+T = TypeVar("T")
 
 from ..message_bus import AgentMessageBus
 from ..message_types import MessageType, AgentMessage
 from ..exceptions import MessageBusError, TimeoutError as AgentTimeoutError
+from ..schemas.agent_payload import (
+    AgentPayload,
+    CodeBlock,
+    Finding,
+    Narrative,
+    PayloadContentTable,
+    Plan,
+    Source,
+    ValidationResult,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -57,7 +72,7 @@ class BaseAgent(ABC):
         self,
         task: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+    ) -> AgentPayload:
         """
         Обрабатывает задачу от Planner или Orchestrator.
         
@@ -66,7 +81,7 @@ class BaseAgent(ABC):
             context: Дополнительный контекст (board_id, user_id, selected_nodes, etc.)
             
         Returns:
-            Результат выполнения задачи
+            AgentPayload — универсальный формат результата (V2).
         """
         pass
     
@@ -131,6 +146,9 @@ class BaseAgent(ABC):
             result = await self.process_task(task, context)
             execution_time = (datetime.now() - start_time).total_seconds()
             
+            # Сериализуем AgentPayload (V2) в dict для отправки
+            result_dict = result.model_dump() if isinstance(result, AgentPayload) else result
+            
             # Отправляем результат обратно
             from uuid import uuid4
             
@@ -147,8 +165,8 @@ class BaseAgent(ABC):
                 board_id=message.board_id,
                 parent_message_id=message.message_id,  # Link to request
                 payload={
-                    "status": "success",
-                    "result": result,
+                    "status": result_dict.get("status", "success"),
+                    "result": result_dict,
                     "execution_time": execution_time,
                     "agent": self.agent_name
                 }
@@ -208,17 +226,64 @@ class BaseAgent(ABC):
         self,
         error_message: str,
         suggestions: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
+    ) -> AgentPayload:
         """
-        Форматирует ответ об ошибке.
+        Форматирует ответ об ошибке как AgentPayload (V2).
         """
-        return {
-            "status": "error",
-            "error": error_message,
-            "suggestions": suggestions or [],
-            "agent": self.agent_name,
-            "timestamp": datetime.now().isoformat()
-        }
+        return AgentPayload.make_error(
+            agent=self.agent_name,
+            error_message=error_message,
+            suggestions=suggestions,
+        )
+    
+    # ------------------------------------------------------------------
+    # V2 AgentPayload helpers
+    # ------------------------------------------------------------------
+
+    def _success_payload(
+        self,
+        *,
+        narrative: Optional[Narrative] = None,
+        narrative_text: Optional[str] = None,
+        tables: Optional[List[PayloadContentTable]] = None,
+        code_blocks: Optional[List[CodeBlock]] = None,
+        sources: Optional[List[Source]] = None,
+        findings: Optional[List[Finding]] = None,
+        validation: Optional[ValidationResult] = None,
+        plan: Optional[Plan] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> AgentPayload:
+        """Создать успешный AgentPayload от имени этого агента.
+
+        Shortcuts:
+        - ``narrative_text="..."`` — создаст Narrative(text=..., format="markdown")
+        """
+        if narrative is None and narrative_text is not None:
+            narrative = Narrative(text=narrative_text)
+
+        return AgentPayload.success(
+            agent=self.agent_name,
+            narrative=narrative,
+            tables=tables,
+            code_blocks=code_blocks,
+            sources=sources,
+            findings=findings,
+            validation=validation,
+            plan=plan,
+            metadata=metadata,
+        )
+
+    def _error_payload(
+        self,
+        error_message: str,
+        suggestions: Optional[List[str]] = None,
+    ) -> AgentPayload:
+        """Создать AgentPayload с ошибкой от имени этого агента."""
+        return AgentPayload.make_error(
+            agent=self.agent_name,
+            error_message=error_message,
+            suggestions=suggestions,
+        )
     
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -230,6 +295,101 @@ class BaseAgent(ABC):
             "error_count": self.error_count,
             "error_rate": self.error_count / max(self.task_count, 1)
         }
+
+    # ============================================================
+    # GigaChat retry helper — повторный вызов при ошибке парсинга
+    # ============================================================
+
+    MAX_GIGACHAT_PARSE_RETRIES = 1  # 1 retry = максимум 2 вызова
+
+    async def _call_gigachat_with_json_retry(
+        self,
+        messages: List[Dict[str, str]],
+        parse_fn: Callable[[Any], T],
+        *,
+        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+        max_retries: Optional[int] = None,
+    ) -> T:
+        """Вызывает GigaChat и парсит ответ; при ошибке парсинга повторяет с уточнением.
+
+        Args:
+            messages: Список сообщений для GigaChat (будет мутирован при retry).
+            parse_fn: Функция парсинга ответа → результат. Должна бросить исключение
+                       (json.JSONDecodeError, ValueError, ...) при невалидном ответе.
+            temperature: Температура GigaChat.
+            max_tokens: Макс. токенов (если None — не передаётся).
+            max_retries: Сколько раз повторить (по умолчанию MAX_GIGACHAT_PARSE_RETRIES).
+
+        Returns:
+            Результат parse_fn(response) при успехе.
+
+        Raises:
+            Последнее исключение от parse_fn, если все попытки исчерпаны.
+        """
+        gigachat = getattr(self, "gigachat", None)
+        if gigachat is None:
+            raise RuntimeError(f"{self.agent_name}: gigachat service not initialized")
+
+        retries = max_retries if max_retries is not None else self.MAX_GIGACHAT_PARSE_RETRIES
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1 + retries):
+            kwargs: Dict[str, Any] = {"messages": messages, "temperature": temperature}
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+
+            response = await gigachat.chat_completion(**kwargs)
+
+            try:
+                return parse_fn(response)
+            except Exception as e:
+                last_error = e
+                if attempt < retries:
+                    # Добавляем ответ LLM + описание ошибки и просим исправить
+                    raw_text = response if isinstance(response, str) else str(response)
+                    # Обрезаем чтобы не раздуть промпт
+                    raw_text_short = raw_text[:1500] if len(raw_text) > 1500 else raw_text
+                    self.logger.warning(
+                        f"⚠️ [{self.agent_name}] Parse error (attempt {attempt + 1}): {e}. Retrying..."
+                    )
+                    messages.append({"role": "assistant", "content": raw_text_short})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Твой предыдущий ответ содержит синтаксическую ошибку и не может быть распознан: {e}\n"
+                            "Пожалуйста, верни исправленный ответ — ТОЛЬКО валидный JSON, без текста вне JSON."
+                        ),
+                    })
+                else:
+                    self.logger.error(
+                        f"❌ [{self.agent_name}] Parse failed after {attempt + 1} attempt(s): {e}"
+                    )
+
+        raise last_error  # type: ignore[misc]
+
+    # ============================================================
+    # Context helpers — reading agent_results (chronological list)
+    # См. docs/CONTEXT_ARCHITECTURE_PROPOSAL.md
+    # ============================================================
+
+    def _last_result(self, context: Optional[Dict[str, Any]], agent_name: str) -> Optional[Dict[str, Any]]:
+        """Последний результат указанного агента из хронологии agent_results."""
+        if not context:
+            return None
+        for r in reversed(context.get("agent_results", [])):
+            if isinstance(r, dict) and r.get("agent") == agent_name:
+                return r
+        return None
+
+    def _all_results(self, context: Optional[Dict[str, Any]], agent_name: str) -> List[Dict[str, Any]]:
+        """Все результаты указанного агента в хронологическом порядке."""
+        if not context:
+            return []
+        return [
+            r for r in context.get("agent_results", [])
+            if isinstance(r, dict) and r.get("agent") == agent_name
+        ]
 
     # ============================================================
     # Session Results - доступ к результатам других агентов

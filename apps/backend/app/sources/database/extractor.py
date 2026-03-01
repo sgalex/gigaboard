@@ -162,8 +162,8 @@ class DatabaseSource(BaseSource):
             return f"sqlite:///{config.get('path')}"
         
         driver_map = {
-            "postgresql": "postgresql+asyncpg",
-            "mysql": "mysql+aiomysql",
+            "postgresql": "postgresql+psycopg2",
+            "mysql": "mysql+pymysql",
         }
         driver = driver_map.get(db_type, db_type) if db_type else ""
         

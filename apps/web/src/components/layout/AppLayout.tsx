@@ -84,8 +84,8 @@ export function AppLayout({ children, showExplorer = true, sidebar, rightPanel }
                     </>
                 )}
 
-                {/* Main content area */}
-                <main className="flex-1 overflow-auto">
+                {/* Main content area — min-h-0 so flex item doesn't grow with content and cause page scroll */}
+                <main className="flex-1 min-h-0 overflow-auto">
                     {children}
                 </main>
 

@@ -453,24 +453,14 @@ class PromptExtractor(BaseExtractor):
     
     def _convert_to_content_tables(self, analyst_tables: list[dict]) -> list[dict]:
         """
-        Конвертирует таблицы из формата AnalystAgent в формат ContentTable.
+        Конвертирует таблицы из формата AnalystAgent в unified ContentTable format.
         
-        AnalystAgent format:
-            {
-                "name": "creation_year",
-                "columns": ["Language", "Year"],
-                "rows": [["Python", "1991"], ["Rust", "1998"]]
-            }
-        
-        ContentTable format:
+        Unified format:
             {
                 "id": "uuid",
-                "name": "creation_year",
-                "columns": [{"name": "Language", "type": "string"}, {"name": "Year", "type": "string"}],
-                "rows": [
-                    {"id": "uuid", "values": ["Python", "1991"]},
-                    {"id": "uuid", "values": ["Rust", "1998"]}
-                ]
+                "name": "table_name",
+                "columns": [{"name": "Column1", "type": "string"}, ...],
+                "rows": [{"Column1": "value1", "Column2": 123}, ...]
             }
         """
         from uuid import uuid4
@@ -479,31 +469,28 @@ class PromptExtractor(BaseExtractor):
         
         for table in analyst_tables:
             try:
-                name = table.get("name", "table")
+                name = table.get("name", "таблица")
                 columns = table.get("columns", [])
                 rows = table.get("rows", [])
                 
-                # Конвертируем колонки: ["Language", "Year"] → [{"name": "Language", "type": "string"}, ...]
+                # Normalize columns: ["Language", "Year"] → [{"name": "Language", "type": "string"}, ...]
                 if columns and isinstance(columns[0], str):
-                    # Простой формат (массив строк)
                     converted_columns = [
                         {"name": col, "type": "string"} 
                         for col in columns
                     ]
                 else:
-                    # Уже в правильном формате (массив dict)
                     converted_columns = columns
                 
-                # Конвертируем строки: [["Python", "1991"]] → [{"id": "...", "values": ["Python", "1991"]}]
-                if rows and isinstance(rows[0], list):
-                    # Простой формат (массив массивов)
-                    converted_rows = [
-                        {"id": str(uuid4()), "values": row}
-                        for row in rows
-                    ]
-                else:
-                    # Уже в правильном формате
-                    converted_rows = rows
+                col_names = [c["name"] for c in converted_columns]
+                
+                # Normalize rows to dict format
+                converted_rows = []
+                for row in rows:
+                    if isinstance(row, list):
+                        converted_rows.append({col_names[j]: v for j, v in enumerate(row) if j < len(col_names)})
+                    elif isinstance(row, dict):
+                        converted_rows.append(row)
                 
                 converted_table = {
                     "id": str(uuid4()),

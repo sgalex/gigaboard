@@ -84,26 +84,58 @@ class BaseExtractor(ABC):
     def _create_table(
         self,
         name: str,
-        columns: list[str],
-        rows: list[list[Any]],
+        columns: list[str] | list[dict[str, str]],
+        rows: list[list[Any]] | list[dict[str, Any]],
         metadata: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Helper to create table structure.
+        """Helper to create table structure in unified format.
         
-        Args:
-            name: Table name
-            columns: List of column names
-            rows: List of rows (each row is a list of values)
-            metadata: Optional table metadata
-            
-        Returns:
-            Table dict suitable for ContentNode
+        Принимает columns как list[str] или list[{name,type}],
+        rows как list[list] или list[dict].
+        Всегда выдаёт:
+          columns: [{name: str, type: str}, ...]
+          rows: [{col_name: value, ...}, ...]
         """
+        # Normalize columns to [{name, type}]
+        typed_columns = []
+        col_names = []
+        need_type_inference = False
+        for col in columns:
+            if isinstance(col, dict):
+                typed_columns.append({"name": col.get("name", ""), "type": col.get("type", "string")})
+                col_names.append(col.get("name", ""))
+            else:
+                col_names.append(str(col))
+                typed_columns.append({"name": str(col), "type": "string"})
+                need_type_inference = True
+        
+        # Normalize rows to [{col: val}, ...]
+        dict_rows = []
+        for row in rows:
+            if isinstance(row, dict):
+                dict_rows.append(row)
+            elif isinstance(row, (list, tuple)):
+                dict_rows.append({col_names[j]: v for j, v in enumerate(row) if j < len(col_names)})
+        
+        # Infer types from values if columns were plain strings
+        if need_type_inference and dict_rows:
+            for i, col_name in enumerate(col_names):
+                for row in dict_rows:
+                    val = row.get(col_name)
+                    if val is not None and val != "":
+                        if isinstance(val, bool):
+                            typed_columns[i]["type"] = "bool"
+                        elif isinstance(val, int):
+                            typed_columns[i]["type"] = "int"
+                        elif isinstance(val, float):
+                            typed_columns[i]["type"] = "float"
+                        break
+        
         return {
             "name": name,
-            "columns": columns,
-            "rows": rows,
-            "row_count": len(rows),
-            "column_count": len(columns),
+            "columns": typed_columns,
+            "rows": dict_rows,
+            "row_count": len(dict_rows),
+            "column_count": len(typed_columns),
             "metadata": metadata or {}
         }

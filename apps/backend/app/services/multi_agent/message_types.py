@@ -1,7 +1,8 @@
 """
 Message types и схемы для Multi-Agent коммуникации.
 
-См. docs/MULTI_AGENT_SYSTEM.md для полного описания типов сообщений.
+V2: AgentMessage.to_agent_payload() для десериализации AgentPayload из payload.
+См. docs/MULTI_AGENT_V2_CONCEPT.md, docs/MULTI_AGENT_SYSTEM.md
 """
 from enum import Enum
 from typing import Optional, Dict, Any, List
@@ -89,6 +90,40 @@ class AgentMessage(BaseModel):
                 "max_retries": 3
             }
         }
+
+    # ------------------------------------------------------------------
+    # V2: AgentPayload десериализация
+    # ------------------------------------------------------------------
+
+    def to_agent_payload(self) -> "AgentPayload":
+        """Извлечь AgentPayload из payload TASK_RESULT сообщения.
+
+        Ожидаемая структура payload::
+
+            {
+                "status": "success",
+                "result": { ... AgentPayload dict ... },
+                "execution_time": 1.23,
+                "agent": "analyst"
+            }
+
+        Если ``result`` содержит поле ``status`` — это AgentPayload dict.
+        Иначе оборачивает весь ``result`` в AgentPayload.success() для
+        обратной совместимости с V1 агентами.
+        """
+        from .schemas.agent_payload import AgentPayload as AP
+
+        result = self.payload.get("result", self.payload)
+
+        # V2 формат: result уже содержит AgentPayload fields
+        if isinstance(result, dict) and "status" in result and "agent" in result:
+            return AP.model_validate(result)
+
+        # V1 fallback: оборачиваем в AgentPayload
+        return AP.success(
+            agent=self.payload.get("agent", self.sender),
+            metadata={"legacy_result": result},
+        )
 
 
 class AcknowledgementMessage(BaseModel):

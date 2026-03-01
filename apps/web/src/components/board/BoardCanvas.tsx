@@ -1,4 +1,5 @@
-import { useCallback, useState, useEffect } from 'react'
+import { useCallback, useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import {
     ReactFlow,
     Background,
@@ -16,6 +17,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useBoardStore } from '@/store/boardStore'
+import { useLibraryStore } from '@/store/libraryStore'
 import { useAIAssistantStore } from '@/store/aiAssistantStore'
 import { useParams } from 'react-router-dom'
 import { WidgetNodeCard } from './WidgetNodeCard'
@@ -45,7 +47,8 @@ import {
     Search,
     Edit3,
     Radio,
-    ChevronDown
+    ChevronDown,
+    Camera,
 } from 'lucide-react'
 import {
     WidgetNode,
@@ -54,13 +57,13 @@ import {
     ContentNode,
     Edge,
     EdgeType,
-    DataSourceType,
     SourceType
 } from '@/types'
 import { useBoardSocket } from '@/hooks/useBoardSocket'
 import { notify } from '@/store/notificationStore'
 import { findFreePosition } from '@/lib/canvasUtils'
-import { contentNodesAPI } from '@/services/api'
+import { contentNodesAPI, filesAPI, getFileImageUrl } from '@/services/api'
+import { domToBlob } from 'modern-screenshot'
 import { findOptimalNodePosition, findNearestFreePosition, convertNodesToBounds, NodeBounds } from '@/lib/nodePositioning'
 
 // Source types configuration
@@ -244,6 +247,7 @@ export function BoardCanvas() {
         sourceNodes,
         contentNodes,
         edges: storeEdges,
+        currentBoard,
         updateWidgetNode,
         updateCommentNode,
         updateSourceNode,
@@ -263,6 +267,7 @@ export function BoardCanvas() {
         createCommentNode,
         createSourceNode,
         clearBoardData,
+        updateBoard,
     } = useBoardStore()
 
     const [nodes, setNodes] = useState<Node[]>([])
@@ -280,6 +285,10 @@ export function BoardCanvas() {
     const [selectedContentNodeForVisualize, setSelectedContentNodeForVisualize] = useState<ContentNode | null>(null)
     const [selectedSourceNodeForVisualize, setSelectedSourceNodeForVisualize] = useState<SourceNode | null>(null)
     const [newNodePosition, setNewNodePosition] = useState({ x: 100, y: 100 })
+    const flowContainerRef = useRef<HTMLDivElement>(null)
+    const thumbnailCaptureScheduled = useRef(false)
+    const initialLoadDone = useRef(false)
+    const [isCapturingThumbnail, setIsCapturingThumbnail] = useState(false)
 
     const { setSocket } = useAIAssistantStore()
 
@@ -397,6 +406,75 @@ export function BoardCanvas() {
         const reactFlowEdges = (storeEdges || []).map((edge) => edgeToReactFlowEdge(edge, handleTransformationEdit))
         setEdges(reactFlowEdges)
     }, [storeEdges, handleTransformationEdit])
+
+    /** Capture canvas as image, upload, set as board thumbnail (for project overview cards). */
+    const captureThumbnail = useCallback(async (silent = false) => {
+        const el = flowContainerRef.current
+        if (!el || !currentBoard?.id) {
+            if (!silent) notify.error('Канвас ещё не готов. Подождите загрузки.', { title: 'Превью' })
+            return
+        }
+        if (!silent) setIsCapturingThumbnail(true)
+        try {
+            const scale = Math.min(2, 800 / (el.offsetWidth || 1))
+            const blob = await domToBlob(el, {
+                scale,
+                type: 'image/png',
+                quality: 0.85,
+                backgroundColor: 'hsl(var(--background))',
+            })
+            if (!blob) throw new Error('Не удалось создать изображение')
+            const file = new File([blob], `board-${currentBoard.id}.png`, { type: 'image/png' })
+            const { data } = await filesAPI.upload(file)
+            const thumbnailUrl = getFileImageUrl(data.file_id)
+            await updateBoard(currentBoard.id, { thumbnail_url: thumbnailUrl }, true)
+        } catch (e) {
+            console.error('Board thumbnail capture failed:', e)
+            if (!silent) {
+                const msg = e instanceof Error ? e.message : 'Не удалось создать превью'
+                notify.error(msg, { title: 'Ошибка превью' })
+            }
+        } finally {
+            if (!silent) setIsCapturingThumbnail(false)
+        }
+    }, [currentBoard, updateBoard])
+
+    // Auto-update board thumbnail when nodes/edges change (debounced 3s, skip initial load)
+    const totalNodesCount = widgetNodes.length + commentNodes.length + sourceNodes.length + contentNodes.filter(n => n.node_type === 'content_node').length
+    const edgesLength = (storeEdges ?? []).length
+    useEffect(() => {
+        if (!boardId || totalNodesCount === 0) return
+        if (!initialLoadDone.current) {
+            initialLoadDone.current = true
+            return
+        }
+        if (thumbnailCaptureScheduled.current) return
+        thumbnailCaptureScheduled.current = true
+        const t = window.setTimeout(async () => {
+            thumbnailCaptureScheduled.current = false
+            const el = flowContainerRef.current
+            const board = useBoardStore.getState().currentBoard
+            const update = useBoardStore.getState().updateBoard
+            if (!el || !board?.id) return
+            try {
+                const scale = Math.min(2, 800 / (el.offsetWidth || 1))
+                const blob = await domToBlob(el, {
+                    scale,
+                    type: 'image/png',
+                    quality: 0.85,
+                    backgroundColor: 'hsl(var(--background))',
+                })
+                if (!blob) return
+                const file = new File([blob], `board-${board.id}.png`, { type: 'image/png' })
+                const { data } = await filesAPI.upload(file)
+                const thumbnailUrl = getFileImageUrl(data.file_id)
+                await update(board.id, { thumbnail_url: thumbnailUrl }, true)
+            } catch (e) {
+                console.error('Board thumbnail auto-capture failed:', e)
+            }
+        }, 3000)
+        return () => window.clearTimeout(t)
+    }, [boardId, totalNodesCount, edgesLength])
 
     const onNodesChange = useCallback(
         (changes: NodeChange[]) => {
@@ -797,16 +875,18 @@ export function BoardCanvas() {
         const selectedSourceNodeIds = nodes.filter((n) => n.selected && n.type === 'sourceNode')
 
         if (selectedSourceNodeIds.length > 0) {
-            const sourceNodeForTransform = sourceNodes.find(sn =>
-                sn.id === selectedSourceNodeIds[0].id && !!sn.content
+            // Collect ALL selected SourceNodes with content
+            const sourceNodesForTransform = sourceNodes.filter(sn =>
+                selectedSourceNodeIds.some(n => n.id === sn.id) && !!sn.content
             )
 
-            if (sourceNodeForTransform) {
-                setSelectedSourceNodeForTransform(sourceNodeForTransform)
-                setSelectedNodesForTransform([])
+            if (sourceNodesForTransform.length > 0) {
+                setSelectedNodesForTransform(sourceNodesForTransform as any)
+                setSelectedSourceNodeForTransform(null)
 
-                const node = selectedSourceNodeIds[0]
-                setNewNodePosition({ x: (node.position?.x || 0) + 300, y: node.position?.y || 0 })
+                const avgX = selectedSourceNodeIds.reduce((sum, n) => sum + (n.position?.x || 0), 0) / selectedSourceNodeIds.length
+                const avgY = selectedSourceNodeIds.reduce((sum, n) => sum + (n.position?.y || 0), 0) / selectedSourceNodeIds.length
+                setNewNodePosition({ x: avgX + 300, y: avgY })
 
                 setShowTransformDialog(true)
                 return
@@ -858,96 +938,113 @@ export function BoardCanvas() {
     // Can show transform/visualize buttons for ContentNodes OR SourceNodes with content
     const canTransformOrVisualize = hasSelectedContentNodes || hasSelectedSourceNodeWithContent
 
+    const topbarTarget = document.getElementById('topbar-context')
+
     return (
         <div className="relative w-full h-full">
-            {/* Quick Create Toolbar */}
-            <div className="absolute top-4 left-4 z-10 flex gap-2">
-                <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                        <Button
-                            size="sm"
-                            variant="outline"
-                            className="shadow-md"
-                        >
-                            <Plus className="mr-2 h-4 w-4" />
-                            Добавить источник
-                            <ChevronDown className="ml-2 h-3 w-3 opacity-50" />
-                        </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-56">
-                        {SOURCE_TYPES.map((source) => {
-                            const Icon = source.icon
-                            return (
-                                <DropdownMenuItem
-                                    key={source.type}
-                                    onClick={() => handleCreateSourceNode(source.type)}
-                                    disabled={source.disabled}
-                                    className="cursor-pointer"
-                                >
-                                    <Icon className={`mr-2 h-4 w-4 ${source.color}`} />
-                                    <span>{source.label}</span>
-                                    {source.disabled && (
-                                        <span className="ml-auto text-xs text-muted-foreground">скоро</span>
-                                    )}
-                                </DropdownMenuItem>
-                            )
-                        })}
-                    </DropdownMenuContent>
-                </DropdownMenu>
+            {/* Board toolbar rendered into TopBar via portal */}
+            {topbarTarget && createPortal(
+                <>
+                    <span className="font-medium text-sm truncate max-w-[200px]">
+                        {currentBoard?.name ?? 'Доска'}
+                    </span>
+                    <div className="w-px h-6 bg-border mx-1" />
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button size="sm" variant="outline" className="h-8 gap-1">
+                                <Plus className="h-3.5 w-3.5" />
+                                Добавить источник
+                                <ChevronDown className="ml-1 h-3 w-3 opacity-50" />
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" className="w-56">
+                            {SOURCE_TYPES.map((source) => {
+                                const Icon = source.icon
+                                return (
+                                    <DropdownMenuItem
+                                        key={source.type}
+                                        onClick={() => handleCreateSourceNode(source.type)}
+                                        disabled={source.disabled}
+                                        className="cursor-pointer"
+                                    >
+                                        <Icon className={`mr-2 h-4 w-4 ${source.color}`} />
+                                        <span>{source.label}</span>
+                                        {source.disabled && (
+                                            <span className="ml-auto text-xs text-muted-foreground">скоро</span>
+                                        )}
+                                    </DropdownMenuItem>
+                                )
+                            })}
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                    {canTransformOrVisualize && (
+                        <>
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={handleTransformSelected}
+                                className="h-8 gap-1 bg-blue-500/10 border-blue-500/30 hover:bg-blue-500/20 text-blue-700 dark:text-blue-300"
+                            >
+                                <Wand2 className="h-3.5 w-3.5" />
+                                Обработка
+                            </Button>
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={handleVisualizeSelected}
+                                className="h-8 gap-1 bg-purple-500/10 border-purple-500/30 hover:bg-purple-500/20 text-purple-700 dark:text-purple-300"
+                            >
+                                <TrendingUp className="h-3.5 w-3.5" />
+                                Визуализация
+                            </Button>
+                        </>
+                    )}
+                    <span className="flex-1 min-w-2" aria-hidden />
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 w-8 p-0 shrink-0"
+                        title="Обновить превью доски"
+                        onClick={() => captureThumbnail(false)}
+                        disabled={isCapturingThumbnail}
+                    >
+                        <Camera className="h-3.5 w-3.5" />
+                    </Button>
+                </>,
+                topbarTarget,
+            )}
 
-                {canTransformOrVisualize && (
-                    <>
-                        <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={handleTransformSelected}
-                            className="shadow-md bg-blue-500/10 border-blue-500/30 hover:bg-blue-500/20"
-                        >
-                            <Wand2 className="mr-2 h-4 w-4" />
-                            Трансформация
-                        </Button>
-                        <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={handleVisualizeSelected}
-                            className="shadow-md bg-purple-500/10 border-purple-500/30 hover:bg-purple-500/20"
-                        >
-                            <TrendingUp className="mr-2 h-4 w-4" />
-                            Визуализация
-                        </Button>
-                    </>
-                )}
+            {/* React Flow Canvas — ref для захвата превью доски */}
+            <div ref={flowContainerRef} className="w-full h-full">
+                <ReactFlow
+                    nodes={nodes}
+                    edges={edges}
+                    onNodesChange={onNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    onPaneClick={onPaneClick}
+                    onDrop={onDrop}
+                    onDragOver={onDragOver}
+                    nodeTypes={nodeTypes}
+                    edgeTypes={edgeTypes}
+                    minZoom={0.5}
+                    maxZoom={2}
+                    defaultViewport={{ x: 0, y: 0, zoom: 1 }}
+                    className="bg-muted/30"
+                    selectNodesOnDrag={false}
+                    panOnDrag={true}
+                    selectionOnDrag={false}
+                    selectionMode={SelectionMode.Partial}
+                    onlyRenderVisibleElements={false}
+                    selectionKeyCode="Shift"
+                    connectionMode="loose"
+                    connectOnClick={false}
+                    proOptions={{ hideAttribution: true }}
+                >
+                    <Background gap={20} size={1} />
+                    <Controls />
+                    <MiniMap nodeStrokeWidth={3} className="bg-background border border-border" />
+                </ReactFlow>
             </div>
-
-            {/* React Flow Canvas */}
-            <ReactFlow
-                nodes={nodes}
-                edges={edges}
-                onNodesChange={onNodesChange}
-                onEdgesChange={onEdgesChange}
-                onPaneClick={onPaneClick}
-                onDrop={onDrop}
-                onDragOver={onDragOver}
-                nodeTypes={nodeTypes}
-                edgeTypes={edgeTypes}
-                minZoom={0.5}
-                maxZoom={2}
-                defaultZoom={1}
-                className="bg-muted/30"
-                selectNodesOnDrag={false}
-                panOnDrag={true}
-                selectionOnDrag={false}
-                selectionMode={SelectionMode.Partial}
-                onlyRenderVisibleElements={false}
-                selectionKeyCode="Shift"
-                connectionMode="loose"
-                connectOnClick={false}
-                proOptions={{ hideAttribution: true }}
-            >
-                <Background gap={20} size={1} />
-                <Controls />
-                <MiniMap nodeStrokeWidth={3} className="bg-background border border-border" />
-            </ReactFlow>
 
             {/* Empty state */}
             {totalNodes === 0 && (
@@ -964,7 +1061,7 @@ export function BoardCanvas() {
             {/* Help text */}
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-xs text-muted-foreground/80 bg-background/40 backdrop-blur px-3 py-2 rounded-md border border-border/30 pointer-events-none text-center">
                 <p>️ Нажмите <kbd className="px-2 py-1 bg-muted rounded font-mono">Delete</kbd> для удаления</p>
-                <p>✨ Выберите ContentNodes и нажмите Transform для объединения данных</p>
+                <p>✨ Выберите несколько элементов и нажмите Обработка для объединения данных</p>
             </div>
 
             {/* Dialogs */}
@@ -989,10 +1086,10 @@ export function BoardCanvas() {
                     }}
                     sourceNodes={selectedNodesForTransform}
                     sourceNode={selectedSourceNodeForTransform as any}
-                    onTransform={async (code, transformationId, description) => {
+                    onTransform={async (code, transformationId, description, chatHistory) => {
                         if (!boardId) return
 
-                        console.log('🚀 onTransform called:', { code: code?.substring(0, 100), transformationId, description })
+                        console.log('🚀 onTransform called:', { code: code?.substring(0, 100), transformationId, description, chatHistoryLength: chatHistory?.length })
 
                         try {
                             // Use ContentNode or SourceNode as source
@@ -1015,6 +1112,7 @@ export function BoardCanvas() {
                                     transformation_id: transformationId,
                                     description: description || '',
                                     prompt: description || '',  // Save for editing later
+                                    chat_history: chatHistory || [],  // Save chat history for editing later
                                     selected_node_ids: selectedNodesForTransform.length > 0
                                         ? selectedNodesForTransform.map(n => n.id)
                                         : [sourceNodeId]
@@ -1022,12 +1120,19 @@ export function BoardCanvas() {
                             )
 
                             console.log('✅ transformExecute result:', result)
-                            notify.success('Трансформация выполнена успешно')
+                            notify.success('Обработка выполнена успешно')
                             setShowTransformDialog(false)
 
                             // Refresh content nodes and edges to show the new node
                             await fetchContentNodes(boardId)
                             await fetchEdges(boardId)
+
+                            // Refresh ProjectExplorer: Таблицы and Измерения sections
+                            const projectId = useBoardStore.getState().currentBoard?.project_id
+                            if (projectId) {
+                                const allBoards = useBoardStore.getState().boards.filter(b => b.project_id === projectId)
+                                useLibraryStore.getState().refreshProjectTree(projectId, allBoards)
+                            }
                         } catch (error) {
                             console.error('Transformation failed:', error)
                             notify.error('Ошибка выполнения трансформации')

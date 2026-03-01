@@ -50,33 +50,19 @@ class ExtractionResult:
     def to_content(self) -> dict[str, Any]:
         """Convert to ContentNode content format.
         
-        Frontend expects:
-        - columns: string[] (array of column names)
-        - rows: Array<Array<any>> (2D array of values)
+        Unified format:
+        - columns: [{name: str, type: str}, ...]
+        - rows: [{col_name: value, ...}, ...]
         - row_count, column_count
         """
         tables = []
         for t in self.tables:
-            # Extract column names
-            column_names = [col["name"] if isinstance(col, dict) else col for col in t.columns]
-            
-            # Convert rows from dict to array format
-            rows_array = []
-            for row in t.rows:
-                if isinstance(row, dict):
-                    # Row is a dict - convert to array in column order
-                    row_values = [row.get(col_name, "") for col_name in column_names]
-                else:
-                    # Row is already an array
-                    row_values = row
-                rows_array.append(row_values)
-            
             tables.append({
                 "name": t.name,
-                "columns": column_names,
-                "rows": rows_array,
-                "row_count": len(rows_array),
-                "column_count": len(column_names),
+                "columns": t.columns,
+                "rows": t.rows,
+                "row_count": len(t.rows),
+                "column_count": len(t.columns),
             })
         
         return {

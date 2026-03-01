@@ -1,6 +1,8 @@
 """
 Transform-related Pydantic schemas.
 """
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -32,10 +34,10 @@ class AgentPlanInfo(BaseModel):
 
 
 class PreviewTable(BaseModel):
-    """Preview table structure."""
+    """Preview table structure (unified format)."""
     name: str
-    columns: list[str]
-    rows: list[list]
+    columns: list[dict[str, str]]
+    rows: list[dict[str, Any]]
     row_count: int
     preview_row_count: int
 
@@ -69,8 +71,10 @@ class TransformSuggestion(BaseModel):
     id: str
     label: str = Field(..., description="Short label (2-4 words)")
     prompt: str = Field(..., description="Full prompt for AI")
-    category: str = Field(..., description="filter|aggregate|merge|reshape|compute")
-    confidence: float = Field(..., description="0.0-1.0")
+    type: str = Field(..., description="filter|aggregation|calculation|sorting|cleaning|merge|reshape")
+    relevance: float = Field(..., ge=0.0, le=1.0, description="Relevance score 0.0-1.0")
+    category: str = Field(..., description="Legacy: filter|aggregate|merge|reshape|compute")
+    confidence: float = Field(..., description="Legacy: 0.0-1.0")
     description: str | None = Field(None, description="Detailed description")
     reasoning: str | None = Field(None, description="Why this suggestion")
 

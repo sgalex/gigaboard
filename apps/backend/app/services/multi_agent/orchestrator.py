@@ -1,647 +1,1118 @@
 """
-MultiAgentOrchestrator - центральный координатор Multi-Agent системы.
+Orchestrator V2 — единый координатор Multi-Agent системы.
 
-Отвечает за:
-- Приём запросов от AIService
-- Создание и управление сессиями
-- Декомпозицию задач через Planner Agent
-- Маршрутизацию задач к агентам через Message Bus
-- Агрегацию результатов
-- Валидацию через CriticAgent
-- Возврат финального ответа
+**Ключевые изменения** по сравнению с V1:
+- Единый путь (Engine упразднён, вся логика здесь)
+- Агенты инициализируются внутри Orchestrator (перенесено из Engine)
+- Нулевой маппинг: ``agent_results: list[dict]`` передаётся
+  агентам как есть, каждый агент сам берёт нужные секции
+- QualityGateAgent для pipeline-level validation
+- Возвращает ``AgentPayload`` (а не raw dict)
+- Поддержка adaptive planning и retry/replan
+
+См. docs/MULTI_AGENT_V2_CONCEPT.md
 """
-import logging
-import asyncio
-import time
-from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, AsyncGenerator
-from uuid import UUID
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.agent_session import AgentSessionStatus
-from .session import AgentSessionManager
+import asyncio
+import json
+import logging
+import os
+import re
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
+
+from app.core.redis import init_redis, close_redis
+from app.services.gigachat_service import GigaChatService
+from app.services.executors.python_executor import PythonExecutor
+from .config import TimeoutConfig
 from .message_bus import AgentMessageBus
 from .message_types import MessageType, AgentMessage
-from .exceptions import MessageBusError
-from .agents.critic import CriticAgent, determine_expected_outcome, ExpectedOutcome
+from .schemas.agent_payload import AgentPayload, Plan, PlanStep
 
 logger = logging.getLogger(__name__)
 
+# Retry / replan limits
+MAX_REPLAN_ATTEMPTS = 3
+MAX_RETRY_ATTEMPTS = 1
+MAX_VALIDATION_ITERATIONS = 3
 
-class MultiAgentOrchestrator:
+
+class Orchestrator:
     """
-    Orchestrator для координации Multi-Agent обработки запросов.
-    
-    Workflow:
-    1. Создать AgentSession
-    2. Отправить запрос Planner Agent для декомпозиции
-    3. Получить план задач
-    4. Последовательно/параллельно отправлять задачи агентам
-    5. Собрать результаты
-    6. Агрегировать финальный ответ
-    7. Валидировать через CriticAgent
-    8. Обновить сессию (или перепланировать)
+    V2 Orchestrator — единый путь выполнения Multi-Agent запросов.
+
+    Жизненный цикл::
+
+        orchestrator = Orchestrator(
+            gigachat_api_key="...",
+            enable_agents=["planner", "discovery", "research", ...],
+        )
+        await orchestrator.initialize()   # Redis → GigaChat → Agents
+        result = await orchestrator.process_request(...)
+        await orchestrator.shutdown()
+
+    При инициализации создаёт инстансы всех включённых агентов, подписывает
+    их на MessageBus (``start_listening``). ``process_request()`` вызывает
+    агентов напрямую через ``agent.process_task()`` — все агенты in-process.
     """
-    
-    # Константы для CriticAgent
-    MAX_CRITIC_ITERATIONS = 5  # Максимум итераций перепланирования
-    CRITIC_TIMEOUT = 30        # Timeout для CriticAgent (секунды)
-    CONFIDENCE_THRESHOLD = 0.7 # Ниже этого — считаем invalid
-    
-    def __init__(self, db: AsyncSession, message_bus: AgentMessageBus):
-        """
-        Args:
-            db: SQLAlchemy async session
-            message_bus: AgentMessageBus instance для общения с агентами
-        """
-        self.db = db
-        self.message_bus = message_bus
-        self.session_manager = AgentSessionManager(db)
-        self._critic_agent: Optional[CriticAgent] = None
-        self.current_session_id: Optional[UUID] = None  # Для доступа к последней сессии
-    
-    async def process_user_request(
+
+    def __init__(
         self,
-        user_id: UUID,
-        board_id: UUID,
-        user_message: str,
-        chat_session_id: Optional[str] = None,
-        selected_node_ids: Optional[List[UUID]] = None,
-    ) -> AsyncGenerator[str, None]:
-        """
-        Обработать запрос пользователя через Multi-Agent систему.
-        
-        Args:
-            user_id: ID пользователя
-            board_id: ID доски
-            user_message: Сообщение пользователя
-            chat_session_id: ID чат-сессии (для связи с ChatMessage)
-            selected_node_ids: Выбранные ноды (контекст)
-            
-        Yields:
-            str: Streaming chunks ответа
-        """
-        session = None
-        
-        try:
-            # 1. Создать сессию
-            session = await self.session_manager.create_session(
-                user_id=user_id,
-                board_id=board_id,
-                user_message=user_message,
-                chat_session_id=chat_session_id,
-                selected_node_ids=selected_node_ids,
-            )
-            
-            # Сохраняем session_id для доступа извне (например, из PromptExtractor)
-            self.current_session_id = session.id
-            
-            logger.info(f"🤖 Starting Multi-Agent processing for session {session.id}")
-            yield f"🔄 Начинаю обработку запроса...\n\n"
-            
-            # 2. Определить, нужна ли Multi-Agent обработка
-            # Пока используем простую эвристику: если запрос длинный или содержит keywords
-            needs_multi_agent = await self._needs_multi_agent_processing(user_message)
-            
-            if not needs_multi_agent:
-                # Простой запрос - отвечаем напрямую без декомпозиции
-                logger.info(f"💬 Simple request, skipping Multi-Agent")
-                await self.session_manager.update_status(session.id, AgentSessionStatus.COMPLETED)
-                yield "✅ Это простой запрос, обрабатываю напрямую.\n\n"
-                return
-            
-            # 3. Отправить запрос Planner Agent для декомпозиции
-            await self.session_manager.update_status(session.id, AgentSessionStatus.PLANNING)
-            yield "🧠 Planner Agent анализирует запрос и создаёт план...\n\n"
-            
-            plan = await self._request_plan(session.id, user_message, board_id, selected_node_ids)
-            
-            if not plan or "steps" not in plan:
-                logger.warning(f"⚠️ Planner Agent returned empty plan")
-                await self.session_manager.fail_session(
-                    session.id,
-                    "Planner Agent не смог создать план выполнения"
-                )
-                yield "❌ Не удалось создать план выполнения.\n\n"
-                return
-            
-            await self.session_manager.update_plan(session.id, plan)
-            
-            steps = plan.get("steps", [])
-            yield f"📋 План создан: {len(steps)} шагов\n\n"
-            
-            # Отправляем детали каждого шага плана
-            for i, step in enumerate(steps, 1):
-                agent_name = step.get("agent", "unknown")
-                task_desc = step.get("task", {}).get("description", "No description")
-                task_type = step.get("task", {}).get("type", "unknown")
-                dependencies = step.get("dependencies", [])
-                
-                yield f"   {i}. [{agent_name.upper()}] {task_desc}\n"
-                yield f"      Тип: {task_type}\n"
-                if dependencies:
-                    yield f"      Зависимости: {', '.join(dependencies)}\n"
-                yield "\n"
-            
-            # 4. Выполнить задачи
-            await self.session_manager.update_status(session.id, AgentSessionStatus.PROCESSING)
-            
-            all_results = []
-            # Накапливаем previous_results для передачи между агентами
-            previous_results: Dict[str, Any] = {}
-            
-            for i, step in enumerate(steps):
-                agent_name = step.get("agent", "unknown")
-                task_desc = step.get("task", {}).get("description", "unknown")
-                task_type = step.get("task", {}).get("type", "unknown")
-                
-                yield f"⚙️ Шаг {i+1}/{len(steps)}: {task_desc} (Agent: {agent_name})\n"
-                
-                # Замеряем время выполнения
-                start_time = time.time()
-                result = await self._execute_task(session.id, i, step, previous_results)
-                execution_time_ms = int((time.time() - start_time) * 1000)
-                
-                all_results.append(result)
-                
-                # Сохраняем результат для следующих шагов
-                if result.get("status") == "completed" and result.get("result"):
-                    agent_result = result.get("result")
-                    previous_results[agent_name] = agent_result
-                    logger.info(f"📦 Saved result for {agent_name}: keys={list(agent_result.keys() if isinstance(agent_result, dict) else [])}")
-                    
-                    # Обогащаем результат метаинформацией для Redis
-                    enriched_result = {
-                        **agent_result,
-                        "_meta": {
-                            "agent_name": agent_name,
-                            "task_type": task_type,
-                            "task_description": task_desc,
-                            "step_index": i,
-                            "total_steps": len(steps),
-                            "execution_time_ms": execution_time_ms,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "status": result.get("status")
-                        }
-                    }
-                    
-                    # Сохраняем в Redis для доступа другим агентам
-                    await self.message_bus.store_session_result(
-                        session_id=str(session.id),
-                        agent_name=agent_name,
-                        result=enriched_result
-                    )
-                
-                await self.session_manager.update_results(session.id, i, result)
-                
-                if result.get("status") == "completed":
-                    yield f"✅ Задача {i+1} выполнена\n\n"
-                else:
-                    yield f"⚠️ Задача {i+1} завершена с предупреждениями\n\n"
-            
-            # 5. Агрегировать результаты
-            await self.session_manager.update_status(session.id, AgentSessionStatus.AGGREGATING)
-            yield "🔗 Собираю результаты...\n\n"
-            
-            final_response = await self._aggregate_results(user_message, all_results)
-            
-            # 6. Валидация через CriticAgent
-            expected_outcome = determine_expected_outcome(user_message)
-            
-            # Собираем результаты в формате для CriticAgent
-            critic_results = {
-                result.get("agent", f"agent_{i}"): result.get("result", {})
-                for i, result in enumerate(all_results)
-                if result.get("status") == "completed"
-            }
-            
-            validation_result = await self._validate_with_critic(
-                user_message=user_message,
-                aggregated_result=critic_results,
-                expected_outcome=expected_outcome,
-                iteration=1
-            )
-            
-            if not validation_result.get("valid", True):
-                confidence = validation_result.get("confidence", 0)
-                issues = validation_result.get("issues", [])
-                
-                yield f"🔍 Валидация результата: confidence={confidence:.0%}\n"
-                
-                if issues:
-                    for issue in issues[:3]:  # Показываем до 3 проблем
-                        severity = issue.get("severity", "info")
-                        message = issue.get("message", "Unknown issue")
-                        yield f"   ⚠️ [{severity}] {message}\n"
-                    yield "\n"
-                
-                # Если есть рекомендации по перепланированию — можно расширить
-                # Пока просто предупреждаем пользователя
-                recommendations = validation_result.get("recommendations", [])
-                if recommendations:
-                    yield "💡 Рекомендации:\n"
-                    for rec in recommendations[:2]:
-                        desc = rec.get("description", str(rec))
-                        yield f"   • {desc}\n"
-                    yield "\n"
-            else:
-                yield "✅ Валидация пройдена\n\n"
-            
-            # 7. Завершить сессию
-            await self.session_manager.complete_session(session.id, final_response)
-            
-            # Очищаем результаты сессии из Redis (они уже агрегированы)
-            await self.message_bus.clear_session_results(str(session.id))
-            
-            yield "✅ Обработка завершена!\n\n"
-            yield final_response
-            
-            logger.info(f"✅ Multi-Agent processing completed for session {session.id}")
-            
-        except Exception as e:
-            logger.error(f"❌ Error in Multi-Agent processing: {e}", exc_info=True)
-            
-            if session:
-                await self.session_manager.fail_session(
-                    session.id,
-                    f"Internal error: {str(e)}"
-                )
-            
-            yield f"❌ Ошибка при обработке: {str(e)}\n\n"
-    
-    async def _needs_multi_agent_processing(self, user_message: str) -> bool:
-        """
-        Определить, нужна ли Multi-Agent обработка.
-        
-        Пока простая эвристика:
-        - Длинные сообщения (> 100 символов)
-        - Содержат keywords: "создай", "трансформируй", "визуализируй", "найди данные"
-        
-        TODO: В будущем использовать LLM classifier
-        """
-        keywords = [
-            "создай", "сгенерируй", "построй",
-            "трансформируй", "преобразуй", "обработай",
-            "визуализируй", "построй график", "покажи",
-            "найди", "найди данные", "загрузи данные", "получи данные", "поиск",
-            "проанализируй", "рассчитай", "вычисли",
+        gigachat_api_key: Optional[str] = None,
+        enable_agents: Optional[List[str]] = None,
+        adaptive_planning: bool = True,
+    ):
+        self.gigachat_api_key = gigachat_api_key or os.getenv("GIGACHAT_API_KEY")
+        self.enable_agents = enable_agents or [
+            "planner", "discovery", "research", "structurizer",
+            "analyst", "transform_codex", "widget_codex", "reporter", "validator",
         ]
-        
-        message_lower = user_message.lower()
-        
-        # Проверка keywords
-        has_keyword = any(keyword in message_lower for keyword in keywords)
-        
-        # Проверка длины
-        is_long = len(user_message) > 100
-        
-        return has_keyword or is_long
-    
-    async def _request_plan(
-        self,
-        session_id: UUID,
-        user_message: str,
-        board_id: UUID,
-        selected_node_ids: Optional[List[UUID]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Запросить план выполнения у Planner Agent.
-        
-        Args:
-            session_id: ID сессии
-            user_message: Сообщение пользователя
-            board_id: ID доски
-            selected_node_ids: Выбранные ноды
-            
-        Returns:
-            Dict с планом или None
-        """
+        self.adaptive_planning = adaptive_planning
+
+        self.gigachat: Optional[GigaChatService] = None
+        self.message_bus: Optional[AgentMessageBus] = None
+        self.agents: Dict[str, Any] = {}
+        self.is_initialized = False
+
+        self._logger = logging.getLogger(f"{__name__}.Orchestrator")
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def initialize(self) -> None:
+        """Инициализирует Redis → GigaChat → MessageBus → агенты."""
+        if self.is_initialized:
+            self._logger.warning("Orchestrator already initialized")
+            return
+
+        self._logger.info("🚀 Initializing Orchestrator V2...")
+
         try:
-            # Отправить запрос Planner Agent
-            from uuid import uuid4 as gen_uuid
+            # 1. Redis
+            await init_redis()
+            self._logger.info("✅ Redis initialized")
+
+            # 2. GigaChat
+            if not self.gigachat_api_key:
+                raise ValueError("GIGACHAT_API_KEY not provided")
+            self.gigachat = GigaChatService(api_key=self.gigachat_api_key)
+            self._logger.info("✅ GigaChat initialized")
+
+            # 3. MessageBus
+            self.message_bus = AgentMessageBus()
+            await self.message_bus.connect()
+            self._logger.info("✅ MessageBus connected")
             
-            message = AgentMessage(
-                message_id=str(gen_uuid()),
-                message_type=MessageType.TASK_REQUEST,
-                sender="orchestrator",
-                receiver="planner",
-                session_id=str(session_id),
-                board_id=str(board_id),
-                payload={
-                    "task": {
-                        "type": "create_plan",
-                        "user_request": user_message,
-                    },
-                    "context": {
-                        "session_id": str(session_id),
-                        "board_id": str(board_id),
-                        "selected_node_ids": [str(nid) for nid in selected_node_ids] if selected_node_ids else [],
-                    }
-                }
-            )
-            
-            # Отправляем запрос Planner Agent через Message Bus
-            logger.info("📤 Sending plan request to Planner Agent")
-            
-            try:
-                response = await self.message_bus.request_response(
-                    message=message,
-                    timeout=self._get_agent_timeout("planner", "create_plan")
-                )
-                
-                logger.info(f"📥 Received response from Planner Agent: type={type(response)}")
-                if response:
-                    logger.info(f"   Response has payload: {hasattr(response, 'payload')}")
-                    if hasattr(response, 'payload'):
-                        logger.info(f"   Payload type: {type(response.payload)}")
-                        logger.info(f"   Payload keys: {response.payload.keys() if isinstance(response.payload, dict) else 'N/A'}")
-                
-                if response and response.payload.get("status") == "success":
-                    # План находится в payload.result.plan (двойная вложенность из-за BaseAgent wrapper)
-                    result = response.payload.get("result", {})
-                    plan = result.get("plan")
-                    if plan:
-                        logger.info(f"✅ Received plan with {len(plan.get('steps', []))} steps")
-                        return plan
-                    else:
-                        logger.error("❌ No plan in result")
-                        return None
-                else:
-                    error_msg = response.payload.get("error", "Unknown error") if response else "No response"
-                    logger.error(f"❌ Planner Agent failed: {error_msg}")
-                    return None
-                    
-            except asyncio.TimeoutError:
-                logger.error("⏱️ Planner Agent timeout")
-                return None
-            except MessageBusError as e:
-                logger.error(f"❌ Message bus error: {e}")
-                return None
-            
+            # 3.5. PythonExecutor для ValidatorAgent
+            self.executor = PythonExecutor()
+            self._logger.info("✅ PythonExecutor initialized")
+
+            # 4. Агенты
+            await self._initialize_agents()
+            self._logger.info(f"✅ {len(self.agents)} agents initialized")
+
+            self.is_initialized = True
+            self._logger.info("✅ Orchestrator V2 ready")
+
         except Exception as e:
-            logger.error(f"❌ Error requesting plan from Planner Agent: {e}")
-            return None
-    
-    async def _execute_task(
-        self,
-        session_id: UUID,
-        task_index: int,
-        task: Dict[str, Any],
-        previous_results: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Выполнить одну задачу через соответствующего агента.
-        
-        Args:
-            session_id: ID сессии
-            task_index: Индекс задачи
-            task: Описание задачи из плана
-            previous_results: Результаты предыдущих шагов (по имени агента)
-            
-        Returns:
-            Dict с результатом
-        """
+            self._logger.error(f"❌ Orchestrator init failed: {e}", exc_info=True)
+            await self.shutdown()
+            raise RuntimeError(f"Orchestrator initialization failed: {e}")
+
+    async def _initialize_agents(self) -> None:
+        """Создаёт и запускает агентов на основе ``self.enable_agents``."""
+        # Lazy imports — агенты могут ещё не существовать на ранних фазах
+        agent_registry: Dict[str, Any] = {}
+
+        # --- V2 core agents ---
         try:
-            agent_name = task.get("agent", "unknown")
-            task_data = task.get("task", {})
-            
-            # Отправить задачу агенту
-            from uuid import uuid4 as gen_uuid
-            
-            message = AgentMessage(
-                message_id=str(gen_uuid()),
-                message_type=MessageType.TASK_REQUEST,
-                sender="orchestrator",
-                receiver=agent_name,
-                session_id=str(session_id),
-                board_id="unknown",  # TODO: Pass board_id through context
-                payload={
-                    "task": task_data,
-                    "context": {
-                        "session_id": str(session_id),
-                        "task_index": task_index,
-                        "previous_results": previous_results or {},
-                    }
-                }
+            from .agents.planner import PlannerAgent
+            agent_registry["planner"] = lambda: PlannerAgent(
+                message_bus=self.message_bus, gigachat_service=self.gigachat,
             )
-            
-            # Отправляем задачу агенту через Message Bus
-            logger.info(f"📤 Sending task {task_index} to {agent_name} agent")
-            logger.info(f"📦 previous_results keys: {list((previous_results or {}).keys())}")
-            
-            try:
-                timeout = self._get_agent_timeout(agent_name, task_data.get("type", "default"))
-                
-                response = await self.message_bus.request_response(
-                    message=message,
-                    timeout=timeout
-                )
-                
-                if response and response.payload.get("status") == "success":
-                    result = response.payload.get("result", {})
-                    logger.info(f"✅ Task {task_index} completed by {agent_name}")
-                    return {
-                        "status": "completed",
-                        "agent": agent_name,
-                        "result": result
-                    }
-                else:
-                    error_msg = response.payload.get("error", "Unknown error") if response else "No response"
-                    logger.error(f"❌ Task {task_index} failed: {error_msg}")
-                    return {
-                        "status": "error",
-                        "agent": agent_name,
-                        "error": error_msg
-                    }
-                    
-            except asyncio.TimeoutError:
-                logger.error(f"⏱️ Task {task_index} timeout for agent {agent_name}")
-                return {
-                    "status": "error",
-                    "agent": agent_name,
-                    "error": f"Agent {agent_name} timeout"
-                }
-            except MessageBusError as e:
-                logger.error(f"❌ Message bus error for task {task_index}: {e}")
-                return {
-                    "status": "error",
-                    "agent": agent_name,
-                    "error": str(e)
-                }
-            
+        except ImportError:
+            self._logger.debug("PlannerAgent not available")
+
+        try:
+            from .agents.discovery import DiscoveryAgent
+            agent_registry["discovery"] = lambda: DiscoveryAgent(
+                message_bus=self.message_bus, gigachat_service=self.gigachat,
+            )
         except Exception as e:
-            logger.error(f"❌ Error executing task {task_index}: {e}")
-            return {
-                "status": "failed",
-                "error": str(e),
-            }
-    
-    def _get_agent_timeout(self, agent_name: str, task_type: str) -> int:
-        """
-        Получить timeout для агента в зависимости от типа задачи.
-        
-        Args:
-            agent_name: Имя агента
-            task_type: Тип задачи
-            
-        Returns:
-            int: Timeout в секундах
-        """
-        # Разные агенты требуют разного времени
-        timeouts = {
-            "planner": 30,
-            "researcher": 120,
-            "analyst": 60,
-            "transformation": 90,
-            "reporter": 60,
-            "developer": 180,
-            "executor": 300,
-            "form_generator": 30,
-            "data_discovery": 120,
-        }
-        
-        return timeouts.get(agent_name, 60)  # Default 60 секунд
-    
-    async def _aggregate_results(
-        self,
-        user_message: str,
-        results: List[Dict[str, Any]],
-    ) -> str:
-        """
-        Агрегировать результаты всех задач в финальный ответ.
-        
-        Args:
-            user_message: Исходный запрос пользователя
-            results: Результаты от агентов
-            
-        Returns:
-            str: Финальный ответ пользователю
-        """
-        # Пока простая агрегация - объединение всех результатов
-        # TODO: В будущем использовать LLM для генерации связного ответа
-        
-        response_parts = []
-        
-        for i, result in enumerate(results):
-            status = result.get("status", "unknown")
-            agent = result.get("agent", "unknown")
-            
-            if status == "completed":
-                result_data = result.get("result", {})
-                
-                # Извлекаем детальный результат в зависимости от агента
-                if isinstance(result_data, dict):
-                    # Если есть message - используем его
-                    if "message" in result_data:
-                        message = result_data["message"]
-                    # Для researcher - показываем информацию о данных
-                    elif "content_type" in result_data:
-                        content_type = result_data.get("content_type", "unknown")
-                        row_count = result_data.get("statistics", {}).get("row_count", 0)
-                        message = f"Получены данные типа '{content_type}' ({row_count} строк)"
-                        if "note" in result_data:
-                            message += f"\nNote: {result_data['note']}"
-                    # Для analyst - показываем инсайты
-                    elif "insights" in result_data:
-                        insights = result_data.get("insights", [])
-                        if insights:
-                            # Insights могут быть dict или str (fallback)
-                            insight_texts = []
-                            for ins in insights[:3]:
-                                if isinstance(ins, dict):
-                                    insight_texts.append(f"- {ins.get('title', 'N/A')}")
-                                else:
-                                    insight_texts.append(f"- {str(ins)}")
-                            message = f"Найдено {len(insights)} инсайтов:\n" + "\n".join(insight_texts)
-                        else:
-                            message = "Анализ выполнен"
-                    # Для reporter - показываем информацию о визуализации
-                    elif "widget_type" in result_data:
-                        widget_type = result_data.get("widget_type", "unknown")
-                        description = result_data.get("description", "")
-                        message = f"Создана визуализация типа '{widget_type}': {description}"
-                    else:
-                        # Дефолтное сообщение
-                        message = "Задача выполнена"
-                else:
-                    message = str(result_data) if result_data else "Задача выполнена"
-                
-                response_parts.append(f"**{agent.capitalize()}**: {message}")
+            self._logger.warning(f"DiscoveryAgent not available: {type(e).__name__}: {e}")
+
+        try:
+            from .agents.research import ResearchAgent
+            agent_registry["research"] = lambda: ResearchAgent(
+                message_bus=self.message_bus, gigachat_service=self.gigachat,
+            )
+        except Exception as e:
+            self._logger.warning(f"ResearchAgent not available: {type(e).__name__}: {e}")
+
+        try:
+            from .agents.structurizer import StructurizerAgent
+            agent_registry["structurizer"] = lambda: StructurizerAgent(
+                message_bus=self.message_bus, gigachat_service=self.gigachat,
+            )
+        except ImportError:
+            self._logger.debug("StructurizerAgent not available")
+
+        try:
+            from .agents.analyst import AnalystAgent
+            agent_registry["analyst"] = lambda: AnalystAgent(
+                message_bus=self.message_bus, gigachat_service=self.gigachat,
+            )
+        except ImportError:
+            self._logger.debug("AnalystAgent not available")
+
+        try:
+            from .agents.transform_codex import TransformCodexAgent
+            agent_registry["transform_codex"] = lambda: TransformCodexAgent(
+                message_bus=self.message_bus, gigachat_service=self.gigachat,
+            )
+        except ImportError:
+            self._logger.debug("TransformCodexAgent not available")
+
+        try:
+            from .agents.widget_codex import WidgetCodexAgent
+            agent_registry["widget_codex"] = lambda: WidgetCodexAgent(
+                message_bus=self.message_bus, gigachat_service=self.gigachat,
+            )
+        except ImportError:
+            self._logger.debug("WidgetCodexAgent not available")
+
+        try:
+            from .agents.reporter import ReporterAgent
+            agent_registry["reporter"] = lambda: ReporterAgent(
+                message_bus=self.message_bus, gigachat_service=self.gigachat,
+            )
+        except ImportError:
+            self._logger.debug("ReporterAgent not available")
+
+        try:
+            from .agents.quality_gate import QualityGateAgent
+            agent_registry["validator"] = lambda: QualityGateAgent(
+                message_bus=self.message_bus,
+                gigachat_service=self.gigachat,
+                executor=self.executor,
+            )
+        except ImportError:
+            self._logger.debug("QualityGateAgent not available")
+
+        # Создаём только запрошенные агенты
+        self._logger.info(f"  📋 Registry keys: {list(agent_registry.keys())}")
+        self._logger.info(f"  📋 Enable agents: {self.enable_agents}")
+        for name in self.enable_agents:
+            factory = agent_registry.get(name)
+            if factory:
+                try:
+                    self.agents[name] = factory()
+                    await self.agents[name].start_listening()
+                    self._logger.info(f"  ✅ {name} agent listening")
+                except Exception as e:
+                    self._logger.warning(f"  ⚠️ Failed to init {name}: {e}")
             else:
-                error = result.get("error", "Unknown error")
-                response_parts.append(f"**{agent.capitalize()}**: ⚠️ {error}")
-        
-        final_response = "\n\n".join(response_parts)
-        
-        return final_response
-    
-    async def _validate_with_critic(
+                self._logger.warning(f"  ⚠️ Agent '{name}' not found in registry, skipping")
+
+    async def shutdown(self) -> None:
+        """Останавливает Orchestrator и освобождает ресурсы."""
+        self._logger.info("🛑 Shutting down Orchestrator V2...")
+        try:
+            if self.message_bus:
+                await self.message_bus.disconnect()
+                self._logger.info("✅ MessageBus disconnected")
+            await close_redis()
+            self._logger.info("✅ Redis closed")
+        except Exception as e:
+            self._logger.error(f"⚠️ Error during shutdown: {e}", exc_info=True)
+        self.is_initialized = False
+        self._logger.info("✅ Orchestrator V2 shutdown complete")
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def process_request(
         self,
-        user_message: str,
-        aggregated_result: Dict[str, Any],
-        expected_outcome: str,
-        iteration: int = 1
+        user_request: str,
+        board_id: str,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        skip_validation: bool = False,
+        execution_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Валидирует результаты через CriticAgent.
+        Обрабатывает пользовательский запрос через Multi-Agent pipeline.
+
+        Цикл выполнения::
+
+            PlannerAgent → [execute steps] → ValidatorAgent
+                                             ├── valid   → return
+                                             └── invalid → replan (до MAX)
+
+        Нулевой маппинг: ``agent_results`` передаётся агентам как есть.
+        Каждый агент сам берёт нужные секции из ``AgentPayload``.
+
+        Args:
+            user_request: Текст запроса пользователя
+            board_id: ID доски
+            user_id: ID пользователя
+            session_id: ID сессии (если None — создаётся)
+            context: Дополнительный контекст (selected_node_ids, content_nodes_data, etc.)
+            skip_validation: Пропустить ValidatorAgent
+
+        Returns:
+            Dict с результатом:
+            - status: "success" | "error"
+            - session_id: ID сессии
+            - plan: План выполнения
+            - results: dict[str, AgentPayload serialized]
+            - execution_time: Время в секундах
+        """
+        if not self.is_initialized:
+            raise RuntimeError("Orchestrator not initialized. Call initialize() first.")
+
+        session_id = session_id or f"session_{uuid4().hex[:12]}"
+        start_time = datetime.now()
+
+        self._logger.info(f"🎬 [{session_id}] Processing: {user_request[:120]}...")
+
+        try:
+            # См. docs/CONTEXT_ARCHITECTURE_PROPOSAL.md — один мутабельный pipeline_context
+            pipeline_context: Dict[str, Any] = {
+                "session_id": session_id,
+                "board_id": board_id,
+                "user_id": user_id,
+                "user_request": user_request,
+                **(context or {}),
+                "agent_results": [],  # append-only, последний ключ (Изменение #2)
+            }
+
+            # ============================================================
+            # STEP 1: PlannerAgent — создание плана
+            # ============================================================
+            self._logger.info(f"📋 [{session_id}] Step 1: Planning...")
+
+            plan_payload = await self._execute_agent(
+                "planner",
+                task={
+                    "type": "create_plan",
+                    "user_request": user_request,
+                    "board_context": pipeline_context.get("board_context", {}),
+                    "selected_node_ids": pipeline_context.get("selected_node_ids", []),
+                },
+                context=pipeline_context,
+            )
+            # Записываем результат планнера в хронологию
+            pipeline_context["agent_results"].append(
+                plan_payload.model_dump() if isinstance(plan_payload, AgentPayload) else plan_payload
+            )
+
+            # Извлекаем план
+            plan = self._extract_plan(plan_payload)
+            if not plan or not plan.get("steps"):
+                return self._error_result(
+                    session_id, start_time,
+                    "Planner Agent не смог создать план выполнения",
+                )
+
+            steps = plan.get("steps", [])
+            self._logger.info(f"✅ [{session_id}] Plan: {len(steps)} steps")
+
+            # ============================================================
+            # STEP 2 & 3: Execution + Validation Loop
+            # Master loop для поддержки replanning после валидации
+            # ============================================================
+            raw_results: Dict[str, Any] = {"plan": plan}
+            replan_count = 0
+            
+            # Индекс начала результатов текущего плана в agent_results.
+            # При replan сдвигаем, чтобы _validate_results агрегировала
+            # только результаты текущего цикла, а не старые сломанные code_blocks.
+            current_plan_results_start = len(pipeline_context.get("agent_results", []))
+            # FIX: Записываем в pipeline_context, чтобы reporter и другие агенты
+            # могли читать только результаты текущего плана (без стейла прошлых replan).
+            pipeline_context["current_plan_results_start"] = current_plan_results_start
+            
+            # Master execution loop - продолжается пока не выполнится успешно или не кончатся попытки
+            while replan_count <= MAX_REPLAN_ATTEMPTS:
+                step_index = 0
+
+                # ============================================================
+                # STEP 2: Последовательное выполнение шагов (zero mapping)
+                # ============================================================
+                while step_index < len(steps):
+                    step = steps[step_index]
+                    agent_name = step.get("agent", "unknown")
+                    task_data = step.get("task", {})
+                    step_id = step.get("step_id", str(step_index + 1))
+
+                    self._logger.info(
+                        f"⚙️ [{session_id}] Step {step_index + 1}/{len(steps)}: "
+                        f"{agent_name} — {task_data.get('type', task_data.get('description', 'N/A'))}"
+                    )
+
+                    # Проверяем наличие агента; если имя неизвестное —
+                    # пытаемся вывести реальный agent из описания задачи
+                    if agent_name not in self.agents:
+                        resolved = self._resolve_agent_name(agent_name, task_data)
+                        if resolved:
+                            self._logger.info(
+                                f"🔀 Resolved unknown agent '{agent_name}' → '{resolved}'"
+                            )
+                            agent_name = resolved
+                        else:
+                            self._logger.warning(f"⚠️ Agent '{agent_name}' not enabled, skipping")
+                            step_index += 1
+                            continue
+
+                    # Изменение #6: QualityGate получает execution_context (полные DataFrame)
+                    if agent_name == "validator" and execution_context:
+                        agent_ctx = {**pipeline_context, **execution_context}
+                    else:
+                        agent_ctx = pipeline_context
+
+                    # Выполняем с retry
+                    step_payload = await self._execute_with_retry(
+                        agent_name, task_data, agent_ctx,
+                    )
+
+                    # Проверяем качество результата агента
+                    # Если данные некорректные или парсинг провалился → попытка replan
+                    if step_payload.status == "error" and replan_count < MAX_REPLAN_ATTEMPTS:
+                        self._logger.warning(
+                            f"⚠️ [{session_id}] {agent_name} failed with error: {step_payload.error}"
+                        )
+                        
+                        # FIX: Сохраняем ошибочный результат в agent_results ПЕРЕД replan,
+                        # чтобы агенты в новом плане видели, что пошло не так.
+                        # Ранее `continue` пропускал append → ошибка терялась из общего контекста.
+                        error_result_dict = (
+                            step_payload.model_dump()
+                            if isinstance(step_payload, AgentPayload)
+                            else step_payload
+                        )
+                        pipeline_context["agent_results"].append(error_result_dict)
+                        
+                        # FIX: Инжектируем ошибку в pipeline_context,
+                        # чтобы codex мог прочитать previous_error напрямую из context.
+                        pipeline_context["previous_error"] = step_payload.error
+                        pipeline_context["error_retry"] = True
+                        pipeline_context["failed_agent"] = agent_name
+                        
+                        # FIX: Инжектируем previous_code из последнего code_block,
+                        # чтобы Codex видел какой код не сработал и мог исправить именно его.
+                        failed_code = self._extract_last_code(pipeline_context.get("agent_results", []))
+                        if failed_code:
+                            pipeline_context["previous_code"] = failed_code
+                            self._logger.info(
+                                f"📎 [{session_id}] Injected previous_code ({len(failed_code)} chars) for Codex replan"
+                            )
+                        
+                        # Попытка replanning для исправления ошибки
+                        replan_count += 1
+                        self._logger.info(
+                            f"🔄 [{session_id}] Replanning after agent error "
+                            f"({replan_count}/{MAX_REPLAN_ATTEMPTS}): {step_payload.error}"
+                        )
+                        
+                        new_plan = await self._replan(
+                            plan, 
+                            pipeline_context, 
+                            {
+                                "last_error": step_payload.error,
+                                "failed_agent": agent_name,
+                            }
+                        )
+                        
+                        if new_plan and new_plan.get("steps"):
+                            plan = new_plan
+                            steps = plan["steps"]
+                            raw_results["plan"] = plan
+                            raw_results[f"replan_{replan_count}"] = {
+                                "after_step": step_index + 1,
+                                "reason": f"Agent {agent_name} error: {step_payload.error}",
+                                "type": "error_recovery",
+                            }
+                            # Новый план выполняется с начала
+                            current_plan_results_start = len(pipeline_context.get("agent_results", []))
+                            pipeline_context["current_plan_results_start"] = current_plan_results_start
+                            step_index = 0
+                            continue
+                        else:
+                            self._logger.warning(f"⚠️ [{session_id}] Replanning failed, continuing with error")
+                            # Ошибочный результат уже в agent_results (append выше).
+                            # Сохраняем в raw_results и Redis, затем переходим к следующему шагу.
+                            if agent_name in raw_results:
+                                run_num = 2
+                                while f"{agent_name}_{run_num}" in raw_results:
+                                    run_num += 1
+                                raw_results[f"{agent_name}_{run_num}"] = error_result_dict
+                            else:
+                                raw_results[agent_name] = error_result_dict
+                            step_index += 1
+                            continue
+
+                    # Изменение #2: append в agent_results (chronological list)
+                    result_dict = step_payload.model_dump() if isinstance(step_payload, AgentPayload) else step_payload
+                    pipeline_context["agent_results"].append(result_dict)
+
+                    # raw_results: append-only для обратной совместимости (return format)
+                    if agent_name in raw_results:
+                        run_num = 2
+                        while f"{agent_name}_{run_num}" in raw_results:
+                            run_num += 1
+                        raw_results[f"{agent_name}_{run_num}"] = result_dict
+                    else:
+                        raw_results[agent_name] = result_dict
+
+                    # Сохраняем в Redis для межагентного доступа
+                    if self.message_bus:
+                        try:
+                            await self.message_bus.store_session_result(
+                                session_id=session_id,
+                                agent_name=agent_name,
+                                result=result_dict,
+                            )
+                        except Exception as e:
+                            self._logger.warning(f"⚠️ Failed to store result in Redis: {e}")
+
+                    if step_payload.status == "error":
+                        self._logger.warning(f"⚠️ [{session_id}] {agent_name} returned error: {step_payload.error}")
+
+                    self._logger.info(f"✅ [{session_id}] {agent_name} done (status={step_payload.status})")
+
+                    # Adaptive planning: проверяем необходимость replan
+                    # Adaptive replanning: intelligently decide when to replan
+                    # ВАЖНО: Делаем replan ТОЛЬКО в критических случаях:
+                    # - Есть suggested_steps от ValidatorAgent (ошибки валидации)
+                    # - Discovery нашёл дополнительные источники данных
+                    # - Structurizer извлёк неожиданную структуру
+                    # НЕ делаем replan для simple успешных шагов (analyst → reporter в discussion mode)
+                    should_check_replan = False
+                    
+                    # Проверяем есть ли suggested_steps от валидатора (ошибки validation/execution)
+                    if pipeline_context.get("suggested_steps") or pipeline_context.get("validation_issues"):
+                        should_check_replan = True
+                    
+                    # Discovery нашёл источники - может понадобиться research/structurizer
+                    if step.get("agent") == "discovery" and step_payload.sources:
+                        should_check_replan = True
+                    
+                    # Structurizer извлёк таблицы - может понадобиться дополнительный анализ
+                    if step.get("agent") == "structurizer" and step_payload.tables:
+                        should_check_replan = True
+                    
+                    if (
+                        self.adaptive_planning
+                        and should_check_replan
+                        and step_payload.status == "success"
+                        and replan_count < MAX_REPLAN_ATTEMPTS
+                        and step_index < len(steps) - 1
+                    ):
+                        replan_decision = await self._should_replan(
+                            plan, step, step_index, step_payload, pipeline_context,
+                        )
+                        if replan_decision.get("replan"):
+                            replan_count += 1
+                            self._logger.info(
+                                f"🔄 [{session_id}] Replanning ({replan_count}/{MAX_REPLAN_ATTEMPTS}): "
+                                f"{replan_decision.get('reason', 'N/A')}"
+                            )
+                            new_plan = await self._replan(plan, pipeline_context)
+                            if new_plan and new_plan.get("steps"):
+                                plan = new_plan
+                                steps = plan["steps"]
+                                raw_results["plan"] = plan
+                                raw_results[f"replan_{replan_count}"] = {
+                                    "after_step": step_index + 1,
+                                    "reason": replan_decision.get("reason"),
+                                    "type": "adaptive",
+                                }
+                                # Новый план выполняется с начала,
+                                # agent_results сохранены для контекста агентов
+                                current_plan_results_start = len(pipeline_context.get("agent_results", []))
+                                pipeline_context["current_plan_results_start"] = current_plan_results_start
+                                step_index = 0
+                                continue
+
+                    step_index += 1
+
+                # ============================================================
+                # STEP 3: ValidatorAgent — валидация результатов
+                # ============================================================
+                if not skip_validation and "validator" in self.agents:
+                    self._logger.info(f"🔍 [{session_id}] Validating results...")
+                    # Изменение #6: QualityGate получает execution_context (полные DataFrame)
+                    validation_payload = await self._validate_results(
+                        user_request, pipeline_context, execution_context,
+                        current_plan_results_start=current_plan_results_start,
+                    )
+                    # Записываем результат валидации в хронологию
+                    val_result_dict = (
+                        validation_payload.model_dump()
+                        if isinstance(validation_payload, AgentPayload)
+                        else validation_payload
+                    )
+                    pipeline_context["agent_results"].append(val_result_dict)
+                    raw_results["validator"] = val_result_dict
+                    
+                    # Проверяем результат валидации
+                    if validation_payload.validation:
+                        val_result = validation_payload.validation
+                        
+                        if not val_result.valid:
+                            self._logger.warning(
+                                f"⚠️ [{session_id}] Validation failed: {val_result.message}"
+                            )
+                            
+                            # Если есть suggested_replan и не превышен лимит → replan
+                            if val_result.suggested_replan and replan_count < MAX_REPLAN_ATTEMPTS:
+                                replan_count += 1
+                                self._logger.info(
+                                    f"🔄 [{session_id}] Replanning after validation failure "
+                                    f"({replan_count}/{MAX_REPLAN_ATTEMPTS}): {val_result.suggested_replan.reason}"
+                                )
+                                
+                                # Создаём новый план на основе рекомендаций валидатора
+                                replan_context = {
+                                    "validation_failed": True,
+                                    "validation_message": val_result.message,
+                                    "validation_issues": [
+                                        issue.model_dump() if hasattr(issue, 'model_dump') else issue 
+                                        for issue in (val_result.issues or [])
+                                    ],
+                                    "suggested_steps": [
+                                        step.model_dump() if hasattr(step, 'model_dump') else step
+                                        for step in (val_result.suggested_replan.additional_steps or [])
+                                    ],
+                                }
+                                
+                                # FIX GAP 4: Транслируем error_details из suggested_replan
+                                # в pipeline_context, чтобы codex мог прочитать при retry.
+                                # QualityGate кладёт error_details в task каждого suggested step,
+                                # но PlannerAgent (LLM) может их потерять при генерации нового плана.
+                                # Дублируем в context как fallback.
+                                for step_data in replan_context.get("suggested_steps", []):
+                                    task_data = step_data.get("task", {}) if isinstance(step_data, dict) else {}
+                                    ed = task_data.get("error_details")
+                                    if ed:
+                                        pipeline_context["previous_error"] = ed.get("error", "")
+                                        pipeline_context["error_retry"] = True
+                                        self._logger.info(
+                                            f"📎 [{session_id}] Injected error_details into pipeline_context: "
+                                            f"{ed.get('error', '')[:100]}"
+                                        )
+                                        break
+                                
+                                # FIX: Инжектируем previous_code из последнего code_block,
+                                # чтобы Codex при replan видел неудачный код и мог исправить.
+                                failed_code = self._extract_last_code(pipeline_context.get("agent_results", []))
+                                if failed_code:
+                                    pipeline_context["previous_code"] = failed_code
+                                    self._logger.info(
+                                        f"📎 [{session_id}] Injected previous_code ({len(failed_code)} chars) for validation replan"
+                                    )
+                                
+                                new_plan = await self._replan(plan, pipeline_context, replan_context)
+                                
+                                if new_plan and new_plan.get("steps"):
+                                    # Выполняем новый план
+                                    plan = new_plan
+                                    steps = plan["steps"]
+                                    raw_results[f"replan_{replan_count}"] = {
+                                        "reason": val_result.suggested_replan.reason,
+                                        "type": "validation_recovery",
+                                        "validation_issues": val_result.issues,
+                                    }
+                                    raw_results["plan"] = plan
+                                    
+                                    # Изменение #2: agent_results является append-only,
+                                    # история сохраняется для контекста агентов
+                                    
+                                    self._logger.info(
+                                        f"🔄 [{session_id}] Re-executing with new plan: "
+                                        f"{len(steps)} steps, agent_results has {len(pipeline_context['agent_results'])} entries"
+                                    )
+                                    
+                                    current_plan_results_start = len(pipeline_context.get("agent_results", []))
+                                    pipeline_context["current_plan_results_start"] = current_plan_results_start
+                                    step_index = 0
+                                    # Продолжаем цикл while с начала нового плана
+                                    continue
+                                else:
+                                    self._logger.warning(f"⚠️ [{session_id}] Validation-based replanning failed")
+                                    # Replanning провалился → завершаем с текущими результатами
+                                    break
+                            else:
+                                # FIX: Валидация не прошла, но нет suggested_replan
+                                # или лимит replan исчерпан → завершаем с текущими результатами.
+                                # БЕЗ этого break цикл while бесконечно повторяет
+                                # execute → validate → fail → execute → ...
+                                self._logger.warning(
+                                    f"⚠️ [{session_id}] Validation failed without replan suggestion "
+                                    f"(replan_count={replan_count}/{MAX_REPLAN_ATTEMPTS}), "
+                                    f"finishing with current results"
+                                )
+                                break
+                        else:
+                            self._logger.info(f"✅ [{session_id}] Validation passed")
+                            # Валидация прошла → завершаем успешно
+                            break
+                    else:
+                        self._logger.info(f"✅ [{session_id}] Validation passed")
+                        # Валидация прошла → завершаем успешно
+                        break
+                else:
+                    # Валидация не запускалась → завершаем
+                    break
+
+            # ============================================================
+            # Cleanup & Return (после выхода из master loop)
+            # ============================================================
+            # Добавляем replan metadata в plan для прозрачности
+            # Это позволяет тестам и клиентам видеть историю перепланирования
+            plan["replan_count"] = replan_count
+            if replan_count > 0:
+                plan["replan_history"] = [
+                    v for k, v in raw_results.items()
+                    if k.startswith("replan_") and isinstance(v, dict)
+                ]
+                plan["agent_results_at_replan"] = len(
+                    pipeline_context.get("agent_results", [])
+                )
+
+            # Очищаем Redis session
+            if self.message_bus:
+                try:
+                    await self.message_bus.clear_session_results(session_id)
+                except Exception:
+                    pass
+
+            execution_time = (datetime.now() - start_time).total_seconds()
+            self._logger.info(
+                f"✅ [{session_id}] Completed in {execution_time:.2f}s "
+                f"(replans: {replan_count})"
+            )
+
+            return {
+                "status": "success",
+                "session_id": session_id,
+                "plan": plan,
+                "results": raw_results,
+                "execution_time": execution_time,
+            }
+
+        except Exception as e:
+            self._logger.error(f"❌ [{session_id}] Failed: {e}", exc_info=True)
+            return self._error_result(session_id, start_time, str(e))
+
+    def get_agent(self, agent_name: str) -> Optional[Any]:
+        """Возвращает агента по имени."""
+        return self.agents.get(agent_name)
+
+    @staticmethod
+    def _extract_last_code(agent_results: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        Извлекает код из последнего успешного code_block в agent_results.
+        Используется для инжекции previous_code при replan,
+        чтобы Codex видел неудачный код и мог его исправить.
+        """
+        # Итерируем с конца — берём последний code_block
+        for result in reversed(agent_results):
+            if not isinstance(result, dict):
+                continue
+            code_blocks = result.get("code_blocks", [])
+            for cb in reversed(code_blocks):
+                if isinstance(cb, dict) and cb.get("code", "").strip():
+                    return cb["code"]
+        return None
+
+    def list_agents(self) -> List[str]:
+        """Список активных агентов."""
+        return list(self.agents.keys())
+
+    @property
+    def ready(self) -> bool:
+        """Orchestrator готов к работе."""
+        return (
+            self.is_initialized
+            and self.gigachat is not None
+            and self.message_bus is not None
+        )
+
+    # ------------------------------------------------------------------
+    # Internal: agent name resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_agent_name(
+        self, unknown_name: str, task_data: Dict[str, Any]
+    ) -> Optional[str]:
+        """Попытка вывести реальное имя агента, если LLM вернул невалидное.
+
+        GigaChat иногда ставит step_id или произвольное имя в поле agent.
+        Эвристика: ищем ключевые слова в description/type задачи.
+        """
+        desc = (
+            task_data.get("description", "")
+            + " "
+            + task_data.get("type", "")
+        ).lower()
+
+        # Карта ключевых слов → реальный agent
+        keyword_map = [
+            (["transform", "код", "code", "fix", "исправ", "ошибк", "error",
+              "python", "pandas", "трансформ"], "transform_codex"),
+            (["виджет", "widget", "визуализ", "chart", "echarts", "график"],
+             "widget_codex"),
+            (["анализ", "analys", "insight", "finding"], "analyst"),
+            (["structur", "структур", "extract", "извлеч"], "structurizer"),
+            (["report", "отчёт", "отчет", "итог", "summary"], "reporter"),
+        ]
+
+        for keywords, agent in keyword_map:
+            if agent in self.agents and any(kw in desc for kw in keywords):
+                return agent
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Internal: step execution
+    # ------------------------------------------------------------------
+
+    async def _execute_agent(
+        self,
+        agent_name: str,
+        task: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> AgentPayload:
+        """Вызывает ``agent.process_task()`` с таймаутом. Возвращает AgentPayload."""
+        agent = self.agents.get(agent_name)
+        if not agent:
+            return AgentPayload.make_error(
+                agent=agent_name,
+                error_message=f"Agent '{agent_name}' not available",
+            )
+
+        timeout = TimeoutConfig.get_timeout(MessageType.TASK_REQUEST, agent_name)
+
+        try:
+            result = await asyncio.wait_for(
+                agent.process_task(task=task, context=context),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            self._logger.error(f"⏱️ {agent_name} timeout after {timeout}s")
+            return AgentPayload.make_error(
+                agent=agent_name,
+                error_message=f"Agent '{agent_name}' timeout ({timeout}s)",
+                suggestions=["Попробуйте упростить запрос"],
+            )
+        except Exception as e:
+            self._logger.error(f"❌ {agent_name} error: {e}", exc_info=True)
+            return AgentPayload.make_error(
+                agent=agent_name,
+                error_message=str(e),
+            )
+
+        # Если агент вернул dict (V1 legacy) — оборачиваем в AgentPayload
+        if isinstance(result, dict):
+            return self._wrap_legacy_result(agent_name, result)
+
+        return result
+
+    async def _execute_with_retry(
+        self,
+        agent_name: str,
+        task: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> AgentPayload:
+        """Выполняет шаг с retry (MAX_RETRY_ATTEMPTS).
+
+        При ошибке инжектирует информацию об ошибке в context,
+        чтобы агент мог учесть её при повторной генерации.
+        """
+        last_result: Optional[AgentPayload] = None
+
+        for attempt in range(MAX_RETRY_ATTEMPTS + 1):
+            result = await self._execute_agent(agent_name, task, context)
+            last_result = result
+
+            if result.status != "error":
+                # Очищаем retry-контекст при успехе
+                context.pop("_retry_attempt", None)
+                return result
+
+            if attempt < MAX_RETRY_ATTEMPTS:
+                self._logger.warning(
+                    f"🔁 Retrying {agent_name} (attempt {attempt + 2}/{MAX_RETRY_ATTEMPTS + 1}): "
+                    f"{result.error}"
+                )
+                # FIX: Инжектируем ошибку в context, чтобы агент видел причину провала
+                # и мог скорректировать генерацию (например, codex исправит SyntaxError).
+                # Используем ключи previous_error/error_retry, которые codex уже читает.
+                context["previous_error"] = result.error
+                context["error_retry"] = True
+                context["_retry_attempt"] = attempt + 2
+                # Если агент вернул code_blocks — сохраняем неудачный код
+                if result.code_blocks:
+                    last_code = result.code_blocks[-1]
+                    code_text = last_code.code if hasattr(last_code, "code") else (last_code.get("code", "") if isinstance(last_code, dict) else "")
+                    if code_text:
+                        context["previous_code"] = code_text
+            else:
+                self._logger.warning(
+                    f"❌ All retries exhausted for {agent_name}: {result.error}"
+                )
+                # Очищаем retry-контекст
+                context.pop("_retry_attempt", None)
+
+        return last_result  # type: ignore[return-value]
+
+    # ------------------------------------------------------------------
+    # Internal: plan extraction & replanning
+    # ------------------------------------------------------------------
+
+    def _extract_plan(self, payload: AgentPayload) -> Optional[Dict[str, Any]]:
+        """Извлекает план из AgentPayload PlannerAgent.
+
+        Поддерживает как V2 формат (``payload.plan``), так и V1 legacy
+        (``plan`` в dict-результате).
+        """
+        # V2: AgentPayload.plan
+        if isinstance(payload, AgentPayload) and payload.plan:
+            return payload.plan.model_dump()
+
+        # V1 legacy: dict с ключом "plan"
+        if isinstance(payload, AgentPayload) and payload.metadata:
+            legacy = payload.metadata.get("legacy_result", {})
+            if isinstance(legacy, dict):
+                plan = legacy.get("plan", legacy)
+                if "steps" in plan:
+                    return plan
+
+        # Fallback: весь payload.model_dump() если есть status=success
+        if isinstance(payload, AgentPayload) and payload.status == "success":
+            dumped = payload.model_dump()
+            if "plan" in dumped and dumped["plan"] and "steps" in dumped["plan"]:
+                return dumped["plan"]
+
+        # Ещё один fallback для V1: payload мог быть dict напрямую
+        if isinstance(payload, dict):
+            if "plan" in payload:
+                plan = payload["plan"]
+                if isinstance(plan, dict) and "steps" in plan:
+                    return plan
+            if "steps" in payload:
+                return payload
+
+        self._logger.warning("⚠️ Could not extract plan from Planner result")
+        return None
+
+    async def _should_replan(
+        self,
+        current_plan: Dict[str, Any],
+        step: Dict[str, Any],
+        step_index: int,
+        step_result: AgentPayload,
+        pipeline_context: Dict[str, Any],
+    ) -> Dict[str, bool]:
+        """Определяет, нужно ли пересматривать план после успешного шага.
+        
+        Включает расширенный контекст: результат текущего шага и
+        накопленные результаты (agent_results) для информированного решения.
+        См. docs/ADAPTIVE_PLANNING.md
+        """
+        if not self.gigachat:
+            return {"replan": False}
+
+        try:
+            remaining_steps = current_plan.get("steps", [])[step_index + 1:]
+            
+            # Сериализуем накопленные результаты (agent_results) для контекста
+            accumulated_summary = []
+            for r in pipeline_context.get("agent_results", []):
+                if isinstance(r, dict):
+                    accumulated_summary.append(
+                        f"  - {r.get('agent', '?')}: status={r.get('status')}, "
+                        f"findings={len(r.get('findings', []))}, "
+                        f"tables={len(r.get('tables', []))}, "
+                        f"code_blocks={len(r.get('code_blocks', []))}"
+                    )
+            accumulated_text = "\n".join(accumulated_summary) if accumulated_summary else "  (пока нет)"
+
+            # Описываем результат текущего шага
+            step_output_parts = []
+            if step_result.findings:
+                step_output_parts.append(f"findings: {len(step_result.findings)}")
+            if step_result.tables:
+                step_output_parts.append(f"tables: {len(step_result.tables)}")
+            if step_result.sources:
+                step_output_parts.append(f"sources: {len(step_result.sources)}")
+            if step_result.code_blocks:
+                step_output_parts.append(f"code_blocks: {len(step_result.code_blocks)}")
+            step_output = ", ".join(step_output_parts) if step_output_parts else "no output data"
+
+            # Описываем оставшиеся шаги
+            remaining_agents = [s.get("agent", "?") for s in remaining_steps]
+
+            prompt = (
+                f"Ты - AI планировщик. Анализируй, нужно ли пересмотреть план.\n\n"
+                f"ТЕКУЩИЙ ШАГ #{step_index + 1}:\n"
+                f"  Агент: {step.get('agent')}\n"
+                f"  Статус: {step_result.status}\n"
+                f"  Результат: {step_output}\n\n"
+                f"НАКОПЛЕННЫЕ РЕЗУЛЬТАТЫ АГЕНТОВ:\n{accumulated_text}\n\n"
+                f"ОСТАВШИЕСЯ ШАГИ ({len(remaining_steps)}):\n"
+                f"  Агенты: {', '.join(remaining_agents) if remaining_agents else 'нет'}\n\n"
+                f"Нужно ли пересмотреть план? Учитывай:\n"
+                f"- Агент нашёл неожиданные данные → план может измениться\n"
+                f"- Агент нашёл новые источники → нужны дополнительные шаги\n"
+                f"- Оставшиеся шаги уже не актуальны\n\n"
+                f"Ответь JSON: {{\"replan\": true/false, \"reason\": \"...\"}}"
+            )
+
+            response = await self.gigachat.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=300,
+            )
+
+            json_match = re.search(r"\{.*\}", response, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+        except Exception as e:
+            self._logger.debug(f"Replan analysis failed: {e}")
+
+        return {"replan": False}
+
+    async def _replan(
+        self,
+        current_plan: Dict[str, Any],
+        pipeline_context: Dict[str, Any],
+        extra_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Вызывает PlannerAgent для перепланирования."""
+        if "planner" not in self.agents:
+            return None
+
+        try:
+            # Изменение #2: сериализуем agent_results для контекста планировщика
+            serialized_results = []
+            for r in pipeline_context.get("agent_results", []):
+                if isinstance(r, dict):
+                    serialized_results.append({
+                        "status": r.get("status"),
+                        "agent": r.get("agent"),
+                        "findings_count": len(r.get("findings", [])),
+                        "tables_count": len(r.get("tables", [])),
+                        "code_blocks_count": len(r.get("code_blocks", [])),
+                        "sources_count": len(r.get("sources", [])),
+                        "has_narrative": r.get("narrative") is not None,
+                    })
+
+            # Извлекаем suggested_steps из extra_context если есть
+            suggested_steps = (extra_context or {}).get("suggested_steps", [])
+            validation_issues = (extra_context or {}).get("validation_issues", [])
+            
+            replan_payload = await self._execute_agent(
+                "planner",
+                task={
+                    "type": "replan",
+                    "original_plan": current_plan,
+                    "current_results": serialized_results,
+                    "reason": (extra_context or {}).get("last_error", "Adaptive replanning"),
+                    "failed_step": (extra_context or {}).get("failed_agent"),
+                    "suggested_steps": suggested_steps,
+                    "validation_issues": validation_issues,
+                },
+                context=pipeline_context,
+            )
+            return self._extract_plan(replan_payload)
+        except Exception as e:
+            self._logger.warning(f"⚠️ Replanning failed: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Internal: validation
+    # ------------------------------------------------------------------
+
+    async def _validate_results(
+        self,
+        user_request: str,
+        pipeline_context: Dict[str, Any],
+        execution_context: Optional[Dict[str, Any]] = None,
+        current_plan_results_start: int = 0,
+    ) -> AgentPayload:
+        """Вызывает ValidatorAgent для валидации результатов.
         
         Args:
-            user_message: Исходный запрос пользователя
-            aggregated_result: Результаты от всех агентов
-            expected_outcome: Ожидаемый тип результата
-            iteration: Номер итерации валидации
-            
-        Returns:
-            Dict с результатом валидации:
-            {
-                "valid": bool,
-                "confidence": float,
-                "issues": [...],
-                "recommendations": [...],
-                "suggested_replan": {...}  # если valid=false
-            }
+            current_plan_results_start: индекс в agent_results,
+                с которого начинаются результаты текущего плана.
+                Используется чтобы не агрегировать старые сломанные
+                code_blocks из предыдущих replan-циклов.
         """
-        try:
-            # Lazy инициализация CriticAgent
-            if self._critic_agent is None:
-                from app.services.gigachat_service import GigaChatService
-                gigachat = GigaChatService()
-                self._critic_agent = CriticAgent(
-                    message_bus=None,  # Standalone режим, без Message Bus
-                    gigachat_service=gigachat
-                )
-            
-            logger.info(
-                f"🔍 Validating with CriticAgent: expected={expected_outcome}, "
-                f"iteration={iteration}/{self.MAX_CRITIC_ITERATIONS}"
+        # Агрегируем только результаты текущего плана,
+        # а не ВСЕ agent_results (включая сломанные code_blocks из прошлых replan)
+        all_results = pipeline_context.get("agent_results", [])
+        current_results = all_results[current_plan_results_start:]
+        
+        aggregated_payload = AgentPayload.success(agent="orchestrator")
+        for result in current_results:
+            if isinstance(result, dict) and result.get("status") != "error":
+                temp = AgentPayload(**result) if "agent" in result else None
+                if temp:
+                    aggregated_payload.merge_from(temp)
+
+        # Изменение #6: QualityGate получает execution_context (полные DataFrame)
+        if execution_context:
+            validation_ctx = {**pipeline_context, **execution_context}
+        else:
+            validation_ctx = pipeline_context
+
+        return await self._execute_agent(
+            "validator",
+            task={
+                "type": "validate",
+                "user_request": user_request,
+                "aggregated_payload": aggregated_payload.model_dump(),
+            },
+            context=validation_ctx,
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _wrap_legacy_result(agent_name: str, result: Dict[str, Any]) -> AgentPayload:
+        """Оборачивает V1 dict-результат в AgentPayload для совместимости."""
+        status = result.get("status", "success")
+        if status == "error":
+            return AgentPayload.make_error(
+                agent=agent_name,
+                error_message=result.get("error", "Unknown error"),
+                suggestions=result.get("suggestions"),
             )
-            
-            result = await asyncio.wait_for(
-                self._critic_agent.validate(
-                    user_message=user_message,
-                    aggregated_result=aggregated_result,
-                    expected_outcome=expected_outcome,
-                    iteration=iteration,
-                    max_iterations=self.MAX_CRITIC_ITERATIONS
-                ),
-                timeout=self.CRITIC_TIMEOUT
-            )
-            
-            logger.info(f"📋 CriticAgent result: valid={result.get('valid')}, confidence={result.get('confidence', 0):.2f}")
-            
-            return result
-            
-        except asyncio.TimeoutError:
-            logger.warning(f"⏱️ CriticAgent timeout after {self.CRITIC_TIMEOUT}s")
-            return {
-                "valid": True,  # Default to valid on timeout
-                "confidence": 0.5,
-                "message": "Validation skipped due to timeout"
-            }
-        except Exception as e:
-            logger.error(f"❌ CriticAgent error: {e}", exc_info=True)
-            return {
-                "valid": True,  # Default to valid on error
-                "confidence": 0.5,
-                "message": f"Validation error: {str(e)}"
-            }
+        return AgentPayload.success(
+            agent=agent_name,
+            metadata={"legacy_result": result},
+        )
+
+    @staticmethod
+    def _error_result(
+        session_id: str,
+        start_time: datetime,
+        error: str,
+    ) -> Dict[str, Any]:
+        return {
+            "status": "error",
+            "session_id": session_id,
+            "error": error,
+            "execution_time": (datetime.now() - start_time).total_seconds(),
+        }
+
+

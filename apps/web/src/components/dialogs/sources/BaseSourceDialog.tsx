@@ -28,6 +28,7 @@ interface BaseSourceDialogProps {
     onSubmit: () => void
     submitLabel?: string
     className?: string  // For custom width
+    contentClassName?: string  // For custom content area styles
 }
 
 export function BaseSourceDialog({
@@ -42,26 +43,28 @@ export function BaseSourceDialog({
     onSubmit,
     submitLabel = 'Создать',
     className = 'max-w-2xl',
+    contentClassName,
 }: BaseSourceDialogProps) {
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className={`${className} max-h-[90vh] overflow-y-auto`}>
-                <DialogHeader>
-                    <DialogTitle className="flex items-center gap-2">
+            <DialogContent className={`${className} max-h-[calc(100vh-2rem)] flex flex-col overflow-hidden p-4 gap-2`}>
+                <DialogHeader className="space-y-0.5">
+                    <DialogTitle className="flex items-center gap-2 text-sm">
                         {icon}
                         {title}
                     </DialogTitle>
                     {description && (
-                        <DialogDescription>{description}</DialogDescription>
+                        <DialogDescription className="text-xs">{description}</DialogDescription>
                     )}
                 </DialogHeader>
 
-                <div className="space-y-4 py-4">
+                <div className={`min-h-0 flex-1 flex flex-col py-1 ${contentClassName || 'overflow-y-auto'}`}>
                     {children}
                 </div>
 
-                <DialogFooter>
+                <DialogFooter className="pt-1">
                     <Button
+                        size="sm"
                         variant="outline"
                         onClick={() => onOpenChange(false)}
                         disabled={isLoading}
@@ -69,6 +72,7 @@ export function BaseSourceDialog({
                         Отмена
                     </Button>
                     <Button
+                        size="sm"
                         onClick={onSubmit}
                         disabled={isLoading || !isValid}
                     >

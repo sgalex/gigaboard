@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 """Development server runner for GigaBoard Backend"""
+import os
 import uvicorn
+
+os.environ["PYTHONUNBUFFERED"] = "1"
 
 if __name__ == "__main__":
     uvicorn.run(

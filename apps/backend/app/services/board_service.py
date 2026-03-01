@@ -120,13 +120,64 @@ class BoardService:
         result = await db.execute(query)
         
         boards_with_counts = []
+        board_ids = []
         for board, source_nodes_count, content_nodes_count, widget_nodes_count, comment_nodes_count in result:
             board_dict = board.__dict__.copy()
             board_dict['source_nodes_count'] = source_nodes_count
             board_dict['content_nodes_count'] = content_nodes_count
             board_dict['widget_nodes_count'] = widget_nodes_count
             board_dict['comment_nodes_count'] = comment_nodes_count
+            board_dict['tables_count'] = 0
+            board_dict['columns_count'] = 0
             boards_with_counts.append(board_dict)
+            board_ids.append(board.id)
+        
+        if board_ids:
+            from sqlalchemy import text
+            t_result = await db.execute(
+                text("""
+                    SELECT n.board_id, COALESCE(SUM(
+                        COALESCE(jsonb_array_length(cn.content->'tables'), 0)
+                    ), 0)::bigint AS c
+                    FROM content_nodes cn
+                    JOIN nodes n ON n.id = cn.id
+                    WHERE n.board_id = ANY(:board_ids)
+                    GROUP BY n.board_id
+                """),
+                {"board_ids": list(board_ids)},
+            )
+            t_map = {row[0]: int(row[1]) for row in t_result}
+            col_result = await db.execute(
+                text("""
+                    WITH expanded AS (
+                        SELECT n.board_id,
+                            CASE
+                                WHEN jsonb_typeof(tbl->'columns') = 'array' THEN
+                                    COALESCE(jsonb_array_length(tbl->'columns'), 0)
+                                WHEN tbl ? 'column_count' AND jsonb_typeof(tbl->'column_count') = 'number' THEN
+                                    GREATEST(0, (tbl->>'column_count')::int)
+                                ELSE 0
+                            END AS col_count
+                        FROM content_nodes cn
+                        JOIN nodes n ON n.id = cn.id,
+                        LATERAL jsonb_array_elements(
+                            CASE WHEN jsonb_typeof(cn.content->'tables') = 'array'
+                                THEN cn.content->'tables'
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS tbl
+                        WHERE n.board_id = ANY(:board_ids)
+                    )
+                    SELECT board_id, COALESCE(SUM(col_count), 0)::bigint AS c
+                    FROM expanded
+                    GROUP BY board_id
+                """),
+                {"board_ids": list(board_ids)},
+            )
+            col_map = {row[0]: int(row[1]) for row in col_result}
+            for b in boards_with_counts:
+                b['tables_count'] = t_map.get(b['id'], 0)
+                b['columns_count'] = col_map.get(b['id'], 0)
         
         return boards_with_counts
     
@@ -145,6 +196,10 @@ class BoardService:
             board.name = board_data.name
         if board_data.description is not None:
             board.description = board_data.description
+        if board_data.settings is not None:
+            board.settings = board_data.settings
+        if board_data.thumbnail_url is not None:
+            board.thumbnail_url = board_data.thumbnail_url
         
         await db.commit()
         await db.refresh(board)

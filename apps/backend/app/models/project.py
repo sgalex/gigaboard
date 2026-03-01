@@ -11,6 +11,11 @@ from app.core import Base
 if TYPE_CHECKING:
     from app.models.user import User
     from app.models.board import Board
+    from app.models.dashboard import Dashboard
+    from app.models.project_widget import ProjectWidget
+    from app.models.project_table import ProjectTable
+    from app.models.dimension import Dimension
+    from app.models.filter_preset import FilterPreset
 
 
 class Project(Base):
@@ -37,6 +42,22 @@ class Project(Base):
     # Relationships
     user: Mapped["User"] = relationship(back_populates="projects")
     boards: Mapped[list["Board"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    dashboards: Mapped[list["Dashboard"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    project_widgets: Mapped[list["ProjectWidget"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    project_tables: Mapped[list["ProjectTable"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    # Cross-filter system
+    dimensions: Mapped[list["Dimension"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    filter_presets: Mapped[list["FilterPreset"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
     

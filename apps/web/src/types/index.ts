@@ -1,6 +1,6 @@
 /**
  * TypeScript types for GigaBoard entities
- * Architecture: Data-Centric Canvas with DataNode/WidgetNode/CommentNode
+ * Architecture: Data-Centric Canvas with SourceNode/ContentNode/WidgetNode/CommentNode
  */
 
 // Project
@@ -25,6 +25,13 @@ export interface Project {
 
 export interface ProjectWithBoards extends Project {
     boards_count: number;
+    dashboards_count?: number;
+    sources_count?: number;
+    content_nodes_count?: number;
+    widgets_count?: number;
+    tables_count?: number;
+    dimensions_count?: number;
+    filters_count?: number;
 }
 
 export interface ProjectCreate {
@@ -44,14 +51,18 @@ export interface Board {
     user_id: string;
     name: string;
     description: string | null;
+    thumbnail_url?: string | null;
     created_at: string;
     updated_at: string;
 }
 
 export interface BoardWithNodes extends Board {
-    data_nodes_count: number;
+    source_nodes_count?: number;
+    content_nodes_count?: number;
     widget_nodes_count: number;
     comment_nodes_count: number;
+    tables_count?: number;
+    columns_count?: number;
 }
 
 export interface BoardCreate {
@@ -63,6 +74,7 @@ export interface BoardCreate {
 export interface BoardUpdate {
     name?: string;
     description?: string;
+    thumbnail_url?: string | null;
 }
 
 // Edge (Connection between nodes)
@@ -71,7 +83,7 @@ export interface Edge {
     board_id: string;
     source_node_id: string;
     target_node_id: string;
-    source_node_type: string;  // 'data_node', 'widget_node', 'comment_node'
+    source_node_type: string;  // 'source_node', 'content_node', 'widget_node', 'comment_node'
     target_node_type: string;
     edge_type: EdgeType;
     label: string | null;
@@ -122,9 +134,8 @@ export interface EdgeListResponse {
 
 // Node Types
 export enum NodeType {
-    DATA_NODE = 'data_node',
-    SOURCE_NODE = 'source_node',     // 🆕 Source-Content Architecture
-    CONTENT_NODE = 'content_node',   // 🆕 Source-Content Architecture
+    SOURCE_NODE = 'source_node',
+    CONTENT_NODE = 'content_node',
     WIDGET_NODE = 'widget_node',
     COMMENT_NODE = 'comment_node',
 }
@@ -142,17 +153,7 @@ export interface BaseNode {
     updated_at: string;
 }
 
-// Data Source Types
-export enum DataSourceType {
-    SQL_QUERY = 'sql_query',
-    API_CALL = 'api_call',
-    CSV_UPLOAD = 'csv_upload',
-    JSON_UPLOAD = 'json_upload',
-    WEB_SCRAPING = 'web_scraping',
-    FILE_SYSTEM = 'file_system',
-    STREAMING = 'streaming',
-    AI_GENERATED = 'ai_generated',
-}
+
 
 // ============================================
 // SOURCE-CONTENT NODE ARCHITECTURE (FR-14) 🆕
@@ -203,8 +204,8 @@ export interface SourceNodeUpdate {
 // ContentNode - result of data processing
 export interface ContentTable {
     name: string;
-    columns: string[];
-    rows: Array<Array<any>>;
+    columns: Array<{ name: string; type: string }>;
+    rows: Array<Record<string, any>>;
     row_count: number;
     column_count: number;
     metadata?: Record<string, any>;

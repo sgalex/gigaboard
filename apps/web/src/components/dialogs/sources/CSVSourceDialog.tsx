@@ -42,6 +42,8 @@ export function CSVSourceDialog({ open, onOpenChange, initialPosition, existingS
     const [isAnalyzing, setIsAnalyzing] = useState(false)
     const [analysisResult, setAnalysisResult] = useState<CSVAnalysisResult | null>(null)
     const [selectedColumns, setSelectedColumns] = useState<Set<string>>(new Set())
+    const [columnRenames, setColumnRenames] = useState<Record<string, string>>({})
+    const [editingColumn, setEditingColumn] = useState<string | null>(null)
     const [showManualSettings, setShowManualSettings] = useState(false)
 
     // Manual settings
@@ -70,20 +72,11 @@ export function CSVSourceDialog({ open, onOpenChange, initialPosition, existingS
                 has_header: config.has_header !== undefined ? config.has_header : true,
                 rows_count: config.rows_count || 0,
                 columns: existingSource.content?.tables?.[0]?.columns?.map((col: any) => ({
-                    name: typeof col === 'string' ? col : col.name,
+                    name: col.name,
                     type: 'текст',
                     sample_values: []
                 })) || [],
-                preview_rows: existingSource.content?.tables?.[0]?.rows?.slice(0, 10).map((row: any) => {
-                    const values = Array.isArray(row) ? row : row.values || []
-                    const columns = existingSource.content?.tables?.[0]?.columns || []
-                    const rowObj: Record<string, any> = {}
-                    columns.forEach((col: any, idx: number) => {
-                        const colName = typeof col === 'string' ? col : col.name
-                        rowObj[colName] = values[idx]
-                    })
-                    return rowObj
-                }) || [],
+                preview_rows: existingSource.content?.tables?.[0]?.rows?.slice(0, 10) || [],
                 file_id: config.file_id
             }
 
@@ -103,6 +96,8 @@ export function CSVSourceDialog({ open, onOpenChange, initialPosition, existingS
         setFile(null)
         setAnalysisResult(null)
         setSelectedColumns(new Set())
+        setColumnRenames({})
+        setEditingColumn(null)
         setShowManualSettings(false)
     }
 
@@ -240,6 +235,22 @@ export function CSVSourceDialog({ open, onOpenChange, initialPosition, existingS
         })
     }
 
+    const getDisplayName = (originalName: string) => columnRenames[originalName] || originalName
+
+    const commitRename = (originalName: string, newName: string) => {
+        const trimmed = newName.trim()
+        setColumnRenames(prev => {
+            const next = { ...prev }
+            if (!trimmed || trimmed === originalName) {
+                delete next[originalName]
+            } else {
+                next[originalName] = trimmed
+            }
+            return next
+        })
+        setEditingColumn(null)
+    }
+
     const handleSubmit = async () => {
         if (!analysisResult) {
             notify.error(mode === 'edit' ? 'Данные не загружены' : 'Загрузите и проанализируйте CSV файл')
@@ -260,6 +271,7 @@ export function CSVSourceDialog({ open, onOpenChange, initialPosition, existingS
                 encoding: showManualSettings ? manualEncoding : analysisResult.encoding,
                 has_header: showManualSettings ? manualHasHeader : analysisResult.has_header,
                 selected_columns: Array.from(selectedColumns),
+                column_renames: Object.keys(columnRenames).length > 0 ? columnRenames : undefined,
                 rows_count: analysisResult.rows_count,
             }
 
@@ -321,16 +333,17 @@ export function CSVSourceDialog({ open, onOpenChange, initialPosition, existingS
             onSubmit={handleSubmit}
             submitLabel={mode === 'edit' ? 'Сохранить' : 'Создать'}
             className="max-w-6xl"
+            contentClassName="overflow-hidden"
         >
-            <div className="grid grid-cols-2 gap-6 min-h-[400px]">
+            <div className="grid grid-cols-2 gap-6 flex-1 min-h-0">
                 {/* Left Panel - Upload & Analysis */}
-                <div className="space-y-4">
+                <div className="flex flex-col gap-4 min-h-0 overflow-y-auto">
                     {/* Drag & Drop Zone (only in create mode) */}
                     {!file && mode === 'create' && (
                         <div
                             onDragOver={(e) => e.preventDefault()}
                             onDrop={handleFileDrop}
-                            className="border-2 border-dashed border-border rounded-lg p-8 text-center hover:border-primary/50 transition-colors cursor-pointer"
+                            className="border-2 border-dashed border-border rounded-lg p-8 text-center hover:border-primary/50 transition-colors cursor-pointer shrink-0"
                             onClick={() => document.getElementById('csv-file-input')?.click()}
                         >
                             <Upload className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
@@ -348,7 +361,7 @@ export function CSVSourceDialog({ open, onOpenChange, initialPosition, existingS
 
                     {/* File Info */}
                     {file && (
-                        <div className="flex items-center gap-2 p-3 bg-muted/50 rounded-lg">
+                        <div className="flex items-center gap-2 p-3 bg-muted/50 rounded-lg shrink-0">
                             <FileSpreadsheet className="h-4 w-4 text-green-500" />
                             <div className="flex-1 min-w-0">
                                 <p className="text-sm font-medium truncate">{file.name}</p>
@@ -373,14 +386,14 @@ export function CSVSourceDialog({ open, onOpenChange, initialPosition, existingS
 
                     {/* AI Analysis Results */}
                     {isAnalyzing && (
-                        <div className="flex items-center gap-3 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                        <div className="flex items-center gap-3 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg shrink-0">
                             <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
                             <span className="text-sm">Анализ файла...</span>
                         </div>
                     )}
 
                     {analysisResult && !isAnalyzing && (
-                        <div className="space-y-2 p-4 bg-green-500/10 border border-green-500/20 rounded-lg">
+                        <div className="space-y-2 p-4 bg-green-500/10 border border-green-500/20 rounded-lg shrink-0">
                             <div className="flex items-center gap-2 mb-3">
                                 <Check className="h-5 w-5 text-green-500" />
                                 <span className="font-medium text-sm">AI-анализ завершён</span>
@@ -412,7 +425,7 @@ export function CSVSourceDialog({ open, onOpenChange, initialPosition, existingS
 
                     {/* Manual Settings (Collapsible) */}
                     {analysisResult && (
-                        <div className="border border-border rounded-lg">
+                        <div className="border border-border rounded-lg shrink-0">
                             <button
                                 className="w-full flex items-center gap-2 p-3 hover:bg-muted/50 transition-colors"
                                 onClick={() => setShowManualSettings(!showManualSettings)}
@@ -490,56 +503,80 @@ export function CSVSourceDialog({ open, onOpenChange, initialPosition, existingS
                 </div>
 
                 {/* Right Panel - Column Selection & Preview */}
-                <div className="space-y-4">
+                <div className="flex flex-col gap-3 min-h-0 overflow-hidden">
                     {analysisResult && (
                         <>
-                            {/* Column Selection */}
-                            <div className="border border-border rounded-lg">
-                                <div className="p-3 border-b bg-muted/50">
+                            {/* Column Selection - compact chips */}
+                            <div className="shrink-0">
+                                <div className="flex items-baseline justify-between mb-1.5">
                                     <h4 className="text-sm font-medium">Выбор столбцов</h4>
                                     <p className="text-xs text-muted-foreground">
                                         Выбрано: {selectedColumns.size} из {analysisResult.columns.length}
                                     </p>
                                 </div>
-                                <div className="p-3 max-h-48 overflow-y-auto space-y-2">
-                                    {analysisResult.columns.map((col) => (
-                                        <div key={col.name} className="flex items-start gap-2">
-                                            <Checkbox
-                                                id={`col-${col.name}`}
-                                                checked={selectedColumns.has(col.name)}
-                                                onCheckedChange={() => toggleColumn(col.name)}
-                                            />
-                                            <div className="flex-1 min-w-0">
-                                                <label
-                                                    htmlFor={`col-${col.name}`}
-                                                    className="text-sm font-medium cursor-pointer block truncate"
-                                                >
-                                                    {col.name}
-                                                </label>
-                                                <p className="text-xs text-muted-foreground">
-                                                    {col.type}
-                                                </p>
-                                            </div>
-                                        </div>
-                                    ))}
+                                <div className="flex flex-wrap gap-1.5">
+                                    {analysisResult.columns.map((col) => {
+                                        const isSelected = selectedColumns.has(col.name)
+                                        return (
+                                            <button
+                                                key={col.name}
+                                                type="button"
+                                                onClick={() => toggleColumn(col.name)}
+                                                className={`
+                                                    inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium
+                                                    border transition-colors cursor-pointer select-none
+                                                    ${isSelected
+                                                        ? 'bg-primary/10 border-primary/40 text-primary hover:bg-primary/20'
+                                                        : 'bg-muted/40 border-border text-muted-foreground hover:bg-muted/80 line-through opacity-60'
+                                                    }
+                                                `}
+                                                title={`${col.name} — ${col.type}`}
+                                            >
+                                                {isSelected && <Check className="h-3 w-3 shrink-0" />}
+                                                <span className="truncate max-w-[140px]">{getDisplayName(col.name)}</span>
+                                                <span className="text-[10px] opacity-60">{col.type}</span>
+                                            </button>
+                                        )
+                                    })}
                                 </div>
                             </div>
 
                             {/* Preview Table */}
-                            <div className="border border-border rounded-lg">
-                                <div className="p-3 border-b bg-muted/50">
+                            <div className="border border-border rounded-lg flex flex-col min-h-0 flex-1">
+                                <div className="p-3 border-b bg-muted/50 shrink-0">
                                     <h4 className="text-sm font-medium">Предпросмотр данных</h4>
                                     <p className="text-xs text-muted-foreground">
                                         Показано {analysisResult.preview_rows.length} из {analysisResult.rows_count}
                                     </p>
                                 </div>
-                                <div className="overflow-auto max-h-64">
+                                <div className="overflow-auto flex-1">
                                     <table className="w-full text-xs">
                                         <thead className="bg-muted/50 sticky top-0">
                                             <tr>
                                                 {Array.from(selectedColumns).map((col) => (
                                                     <th key={col} className="p-2 text-left font-medium border-b">
-                                                        {col}
+                                                        {editingColumn === col ? (
+                                                            <input
+                                                                type="text"
+                                                                autoFocus
+                                                                defaultValue={getDisplayName(col)}
+                                                                className="bg-transparent border-b-2 border-primary outline-none text-xs font-medium w-full min-w-[60px]"
+                                                                onBlur={(e) => commitRename(col, e.target.value)}
+                                                                onKeyDown={(e) => {
+                                                                    if (e.key === 'Enter') commitRename(col, e.currentTarget.value)
+                                                                    if (e.key === 'Escape') setEditingColumn(null)
+                                                                }}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                            />
+                                                        ) : (
+                                                            <span
+                                                                className="cursor-pointer hover:text-primary transition-colors"
+                                                                onClick={() => setEditingColumn(col)}
+                                                                title="Нажмите для переименования"
+                                                            >
+                                                                {getDisplayName(col)}
+                                                            </span>
+                                                        )}
                                                     </th>
                                                 ))}
                                             </tr>

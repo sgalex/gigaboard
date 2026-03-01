@@ -94,7 +94,7 @@
   ↓
 Файл загружается (progress bar)
   ↓
-Автоматически создаётся DataNode на канвасе:
+Автоматически создаётся SourceNode на канвасе:
 
 ┌──────────────────────┐
 │ 📊 sales_data.csv    │
@@ -144,7 +144,7 @@ AI (Reporter Agent): "Анализирую данные..."
   ↓
 На канвасе появляется:
 
-DataNode (center) ──VISUALIZATION──> WidgetNode (right)
+SourceNode (center) ──VISUALIZATION──> WidgetNode (right)
 
 ┌──────────────────────┐         ┌──────────────────────┐
 │ 📊 sales_data.csv    │────────>│ 📈 Sales Trend       │
@@ -154,7 +154,7 @@ DataNode (center) ──VISUALIZATION──> WidgetNode (right)
 └──────────────────────┘         │ [Graph визуализация] │
                                 │                     │
                                 └──────────────────────┘
-                                Позиция: справа от DataNode
+                                Позиция: справа от SourceNode
 
   ↓
 AI: "✅ Создал линейный график продаж по месяцам!
@@ -204,7 +204,7 @@ AI: "✅ Создал линейный график продаж по месяц
   ↓
 API call выполняется
   ↓
-Создаётся DataNode:
+Создаётся SourceNode:
 
 ┌──────────────────────┐
 │ 🔗 Stripe Charges    │
@@ -268,7 +268,7 @@ SQL Query Editor Dialog:
 
 Шаг 2: Query выполняется → 4 строки результата
   ↓
-Создаётся DataNode:
+Создаётся SourceNode:
 
 ┌──────────────────────┐
 │ 💾 Sales by Region   │
@@ -342,21 +342,21 @@ AI начинает параллельный сбор данных:
 
 "✅ Шаг 1/6: GitHub API
    Получаю топ UI библиотек...
-   → Создан DataNode: 'GitHub UI Stats'
+   → Создан SourceNode: 'GitHub UI Stats'
 
 ✅ Шаг 2/6: Reddit API
    Анализирую r/webdev...
-   → Создан DataNode: 'Reddit Discussions'
+   → Создан SourceNode: 'Reddit Discussions'
 
 ✅ Шаг 3/6: Web Scraping
    Парсинг CSS-Tricks...
-   → Создан DataNode: 'UI Articles'
+   → Создан SourceNode: 'UI Articles'
 
 ..." (и так далее)
 
 ──────────────────────────────────────────────
 
-После завершения на канвасе появляется 6 DataNodes:
+После завершения на канвасе появляется 6 SourceNodes:
 
 ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
 │ GitHub UI   │  │ Reddit      │  │ CSS-Tricks  │
@@ -368,7 +368,7 @@ AI начинает параллельный сбор данных:
 │ Trends      │  │ Designs     │  │ Overflow    │
 └─────────────┘  └─────────────┘  └─────────────┘
 
-AI: "Все данные собраны! 6 DataNodes на канвасе.
+AI: "Все данные собраны! 6 SourceNodes на канвасе.
 
 [⚙️ Объединить и создать сводный отчёт]
 [📊 Создать визуализации]"
@@ -396,7 +396,7 @@ AI: "Все данные собраны! 6 DataNodes на канвасе.
 [📤 Загрузить файл]
 
 После загрузки я автоматически создам:
-1. DataNode с вашими данными
+1. SourceNode с вашими данными
 2. WidgetNode с линейным графиком тренда
 3. WidgetNode с таблицей топ-5 продуктов
 
@@ -412,7 +412,7 @@ AI: "✅ Файл загружен! Создаю визуализации..."
   ↓
 Автоматически создаётся на канвасе:
 
-1. DataNode: sales.csv (center)
+1. SourceNode: sales.csv (center)
 2. WidgetNode: Sales Trend (right)
 3. WidgetNode: Top 5 Products (bottom-right)
 4. VISUALIZATION edges связывают их
@@ -470,7 +470,7 @@ AI: "✅ Готово! Я создал:
   ↓
 AI: "Загружаю демо-данные e-commerce..."
   ↓
-Создаётся DataNode с демо-данными (center)
+Создаётся SourceNode с демо-данными (center)
   ↓
 AI: "✅ Готово! Демо-данные загружены.
 
@@ -493,7 +493,7 @@ AI (Planner → Reporter Agent): "Создаю дашборд..."
   ↓
 Автоматически создаётся на канвасе:
 
-                  DataNode (center)
+                  SourceNode (center)
                        │
          ┌─────────────┼─────────────┬─────────────┐
          │             │             │             │
@@ -521,19 +521,19 @@ AI: "✅ Дашборд готов!
 
 ---
 
-## Следующие шаги после первого DataNode
+## Следующие шаги после первого SourceNode
 
-После создания первого DataNode пользователь может:
+После создания первого SourceNode пользователь может:
 
-### 1. Выделить DataNode → открыть контекстное меню
+### 1. Выделить SourceNode → открыть контекстное меню
 
 ```
-Клик на DataNode
+Клик на SourceNode
   ↓
 Появляется контекстное меню справа:
 
 ┌────────────────────────────┐
-│ DataNode: sales.csv        │
+│ SourceNode: sales.csv       │
 ├────────────────────────────┤
 │ 📊 Предпросмотр            │
 │ 🎨 Создать визуализацию    │
@@ -573,7 +573,7 @@ AI: "✅ Дашборд готов!
   ↓
 Reporter Agent генерирует WidgetNode
   ↓
-Узел появляется справа от DataNode + VISUALIZATION edge
+Узел появляется справа от SourceNode + VISUALIZATION edge
 ```
 
 ### 3. Создать трансформацию
@@ -598,7 +598,7 @@ Transformation Agent генерирует Python код
   ↓
 Executor Agent выполняет
   ↓
-Новый DataNode создаётся ниже + TRANSFORMATION edge
+Новый ContentNode создаётся ниже + TRANSFORMATION edge
 ```
 
 ### 4. Добавить комментарий
@@ -613,7 +613,7 @@ Executor Agent выполняет
 └────────────────────────────────┘
   ↓
 Если [🤖 AI-инсайт]:
-  Analyst Agent анализирует DataNode
+  Analyst Agent анализирует SourceNode
   ↓
   CommentNode создаётся + COMMENT edge
 ```
@@ -634,7 +634,7 @@ AI видит всю доску (все узлы)
 AI видит только выбранные узлы
 
 Пример:
-1. Пользователь выделяет 2 DataNodes (sales_q1, sales_q2)
+1. Пользователь выделяет 2 SourceNodes (sales_q1, sales_q2)
 2. AI Panel: "📍 Контекст: 2 узла"
 3. Пользователь: "Сравни эти кварталы"
 4. AI анализирует ТОЛЬКО выбранные 2 узла
@@ -653,7 +653,7 @@ AI видит только выбранные узлы
 ```
 Путь:
 1. [Загрузить файл] → выбор файла
-2. Файл загружен → DataNode создан
+2. Файл загружен → SourceNode создан
 3. [Создать визуализацию автоматически] → WidgetNode создан
 
 Время: < 1 минута
@@ -674,7 +674,7 @@ AI видит только выбранные узлы
 - Автоматические визуализации
 
 **Уровень 2 (опытный):**
-- Контекстное меню DataNode
+- Контекстное меню SourceNode
 - Ручная настройка трансформаций
 - Множественный выбор узлов
 
@@ -688,9 +688,9 @@ AI видит только выбранные узлы
 ```
 Действие → Немедленный feedback
 
-Загрузка файла    → Progress bar → DataNode fade-in
+Загрузка файла    → Progress bar → SourceNode fade-in
 Создание виджета  → "Генерирую..." → WidgetNode + edge animation
-Трансформация     → Progress → Новый DataNode + connecting edge
+Трансформация     → Progress → Новый ContentNode + connecting edge
 ```
 
 ### 5. Никогда не показывать пустоту
@@ -713,7 +713,7 @@ AI видит только выбранные узлы
 0:00 - Открытие пустого канваса
 0:10 - Клик [Загрузить файл]
 0:20 - Выбор файла + загрузка
-0:30 - DataNode создан
+0:30 - SourceNode создан
 0:40 - Клик [Создать визуализацию автоматически]
 0:50 - WidgetNode создан
 1:00 - Результат на экране ✅
@@ -724,7 +724,7 @@ AI видит только выбранные узлы
 ```
 100% - Открыли пустой канвас
  90% - Начали создание первого узла
- 80% - Создали первый DataNode
+ 80% - Создали первый SourceNode
  70% - Создали первую визуализацию
  60% - Создали трансформацию
  50% - Продолжили работу на 2+ сессии
@@ -784,7 +784,7 @@ Welcome screen:
   ↓
 AI: "Вы присоединились к доске 'Q1 Sales Analysis'.
 На доске уже есть:
-• 5 DataNodes
+• 5 SourceNodes
 • 8 WidgetNodes
 • 3 трансформации
 
@@ -895,7 +895,7 @@ useEffect(() => {
 ## Связанные документы
 
 - [AI_ASSISTANT.md](AI_ASSISTANT.md) - AI Assistant спецификация с контекстным выбором
-- [DATANODE_CONTEXT_MENU.md](DATANODE_CONTEXT_MENU.md) - Контекстное меню DataNode
+- [DATANODE_CONTEXT_MENU.md](DATANODE_CONTEXT_MENU.md) - Контекстное меню SourceNode
 - [UI_DESIGN.md](UI_DESIGN.md) - UI дизайн система
 - [MULTI_AGENT_SYSTEM.md](MULTI_AGENT_SYSTEM.md) - Multi-agent архитектура
 - [DATA_DISCOVERY_AGENT.md](MULTI_AGENT_SYSTEM.md#9-data-discovery-agent-new) - Data Discovery агент

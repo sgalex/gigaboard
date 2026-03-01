@@ -38,20 +38,11 @@ async def create_widget_node(
             db, board_id, current_user.id, widget_node_data
         )
         
-        # Broadcast to all clients in the board room
+        # Broadcast full node data to all clients in the board room
+        node_response = WidgetNodeResponse.model_validate(widget_node)
         await sio.emit(
             "widget_node_created",
-            {
-                "id": str(widget_node.id),
-                "board_id": str(widget_node.board_id),
-                "name": widget_node.name,
-                "x": widget_node.x,
-                "y": widget_node.y,
-                "width": widget_node.width,
-                "height": widget_node.height,
-                "created_at": widget_node.created_at.isoformat() if widget_node.created_at else None,
-                "updated_at": widget_node.updated_at.isoformat() if widget_node.updated_at else None,
-            },
+            node_response.model_dump(mode='json'),
             room=f"board:{board_id}"
         )
         
@@ -112,19 +103,11 @@ async def update_widget_node(
             db, widget_node_id, current_user.id, widget_node_data
         )
         
-        # Broadcast to all clients in the board room
+        # Broadcast full node data to all clients in the board room
+        node_response = WidgetNodeResponse.model_validate(widget_node)
         await sio.emit(
             "widget_node_updated",
-            {
-                "id": str(widget_node.id),
-                "board_id": str(widget_node.board_id),
-                "name": widget_node.name,
-                "x": widget_node.x,
-                "y": widget_node.y,
-                "width": widget_node.width,
-                "height": widget_node.height,
-                "updated_at": widget_node.updated_at.isoformat() if widget_node.updated_at else None,
-            },
+            node_response.model_dump(mode='json'),
             room=f"board:{board_id}"
         )
         

@@ -2,13 +2,13 @@
 
 ## Фаза 1: Планирование и документация ✓
 
-**Статус**: В процессе
+**Статус**: Завершена
 
 **Задачи**:
 - [x] Определить требования
 - [x] Спроектировать архитектуру
-- [ ] Утвердить документацию (README/ARCHITECTURE/SPECIFICATIONS/API)
-- [ ] Подготовить окружение разработки (.venv, базовые requirements/lockfiles)
+- [x] Утвердить документацию (README/ARCHITECTURE/SPECIFICATIONS/API)
+- [x] Подготовить окружение разработки (.venv, uv, pyproject.toml)
 
 **Дата завершения**: 2026-02-15
 
@@ -19,35 +19,44 @@
 **Статус**: В процессе
 
 **Задачи**:
-- [ ] Frontend: канвас на React Flow, Zustand state, Socket.IO клиент
-- [ ] Backend: FastAPI + Socket.IO сервер, CRUD бордов/виджетов
+- [x] Frontend: канвас на React Flow (@xyflow/react), Zustand state, Socket.IO клиент
+- [x] Backend: FastAPI + Socket.IO сервер, CRUD бордов/узлов
 - [x] Настроить PostgreSQL + SQLAlchemy, Redis для pub/sub
-- [x] **AI Multi-Agent System**: Planner, Analyst, Developer, Researcher, Executor, Reporter, Transformation, Data Discovery
-- [x] **Adaptive Planning**: Интеллектуальное перепланирование с GigaChat после каждого успешного шага
+- [x] **Multi-Agent V2 System** (9 core agents + 5 controllers):
+  - [x] AgentPayload — универсальный формат данных
+  - [x] Orchestrator V2 — Single Path (Planner → Steps → Validator)
+  - [x] 9 Core Agents: Planner, Structurizer, Analyst, TransformCodex, WidgetCodex, Reporter, Discovery, Research, Validator
+  - [x] 5 Satellite Controllers: Transformation, Widget, AIAssistant, TransformSuggestions, WidgetSuggestions
+  - [x] Zero-mapping agent_results (хронологический list), adaptive replanning
+  - [x] 112 unit + integration тестов (pytest) ✅
+  - [x] Legacy V1 cleanup (12 файлов, ~145KB удалено)
+- [x] **Adaptive Planning**: Интеллектуальное перепланирование с GigaChat после каждого шага
 - [x] **AI-Powered Error Evaluation**: Умная классификация ошибок для retry/replan/abort/continue
-- [ ] **🆕 Source-Content Node Architecture**: Разделение источников данных и результатов обработки
-  - [ ] SourceNode (file, database, api, prompt, stream)
-  - [ ] ContentNode (text + N tables)
-  - [ ] Streaming support с архивированием
-  - [ ] Migration с DataNode
+- [x] **Source-Content Node Architecture**: SourceNode → ContentNode → WidgetNode
+  - [x] SourceNode (csv, json, excel, document, api, database, research, manual, stream)
+  - [x] ContentNode (text + N tables)
+  - [x] PromptExtractor для text-to-table
+  - [x] 6 Extractors: File, Manual, API, Database, Prompt, Stream (stub)
+- [x] **Интеграция с GigaChat API** (langchain-gigachat)
+- [x] **Widget Generation System**: WidgetCodexAgent генерирует HTML/CSS/JS виджеты
+- [x] **Transform Dialog Chat System**: итеративный AI-чат для трансформаций
+- [x] **Dashboard System**: дашборды, элементы (виджет/таблица/текст/изображение/линия), библиотека виджетов и таблиц проекта
+- [x] **Cross-Filter System**: измерения (Dimensions), активные фильтры досок/дашбордов, пресеты, click-to-filter из виджетов
+- [ ] **E2E тестирование**: Проверка полного pipeline с реальным GigaChat
+- [ ] **Frontend тесты**: Vitest для React компонентов
 - [ ] **Form Generator Agent**: динамическая генерация форм ввода
 - [ ] **Data Discovery Agent**: поиск публичных датасетов (Kaggle, OECD, World Bank)
-- [ ] **Data Source Scanner**: автопоиск данных (БД, файлы, API, Cloud)
-- [ ] **Smart Suggestions Engine**: умные подсказки на основе анализа данных
-- [ ] **Dynamic Form Components**: React компоненты с conditional logic
-- [ ] **Public Data Connectors**: интеграция с Kaggle, OECD, World Bank, Yahoo Finance
-- [ ] Интеграция с GigaChat API
-- [ ] Написать юнит- и интеграционные тесты (pytest, Vitest)
 
 **Ключевые фичи MVP**:
 - ✅ FR-1 до FR-6: Базовая доска + AI Assistant Panel
-- ✅ FR-7: Multi-Agent System (8 агентов включая Data Discovery)
-- ✅ FR-8: Dynamic Tool Development
-- ✅ FR-12: Dynamic Form Generation
-- ✅ FR-13: Public Data Discovery & Integration
-- 🆕 **FR-14: Source-Content Node System** (10-15 дней разработки)
+- ✅ FR-7: Multi-Agent V2 System (9 agents, Single Path Orchestrator, 5 controllers)
+- ✅ FR-9: WidgetNode Generation (WidgetCodexAgent + WidgetController)
+- ✅ FR-11: Connection Types (TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN)
+- 🔄 FR-8: Dynamic Tool Development (частично — TransformCodexAgent/WidgetCodexAgent покрывает code generation)
+- 🔄 FR-12: Dynamic Form Generation (концепт)
+- ⏳ FR-13: Public Data Discovery & Integration (DiscoveryAgent — базовый, без внешних датасетов)
 
-**Дата завершения**: 2026-04-15 (обновлено с учётом новой фичи)
+**Дата завершения**: 2026-04-15
 
 ---
 
@@ -200,4 +209,4 @@
 
 ---
 
-**Последнее обновление**: 2026-01-24
+**Последнее обновление**: 2026-02-06

@@ -6,7 +6,7 @@
 
 ### Ключевые архитектурные решения
 - **4 типа узлов**: SourceNode (источники) → ContentNode (данные) → WidgetNode (визуализации) + CommentNode (аннотации)
-- **6 типов связей**: EXTRACT, TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
+- **5 типов связей**: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
 - **Multi-Agent система**: 9 специализированных AI агентов для автоматизации аналитики
 - **Real-time first**: Socket.IO + Redis pub/sub для мгновенной синхронизации
 - **Streaming support**: WebSocket/SSE источники с аккумуляцией и архивированием
@@ -27,13 +27,12 @@ UI представляет бесконечное полотно (React Flow), 
 4. **CommentNode** - комментарии и аннотации к любым узлам
 
 **Связи между узлами** означают преобразования и отношения:
-- **EXTRACT** 🆕 - извлечение данных (SourceNode → ContentNode)
 - **TRANSFORMATION** - преобразование данных (ContentNode(s) → ContentNode) через произвольный Python код
 - **VISUALIZATION** - визуализация данных (ContentNode → WidgetNode)
 - **COMMENT** - комментирование (CommentNode → любой узел)
 - **REFERENCE**, **DRILL_DOWN** - ссылки и детализация
 
-> **🆕 Новая архитектура (FR-14)**: Вместо универсальной DataNode используется явное разделение на SourceNode (источники) и ContentNode (результаты). Это обеспечивает чёткий data lineage, упрощает refresh/replay операций и поддерживает real-time streaming с архивированием. См. [SOURCE_CONTENT_NODE_CONCEPT.md](SOURCE_CONTENT_NODE_CONCEPT.md) для деталей.
+> **Архитектура Source-Content**: SourceNode **наследует** ContentNode и содержит как конфигурацию источника, так и извлечённые данные. Отдельный тип связи EXTRACT не нужен — данные хранятся непосредственно в SourceNode. См. [SOURCE_NODE_CONCEPT_V2.md](SOURCE_NODE_CONCEPT_V2.md) для деталей.
 
 Сервер обеспечивает API для управления узлами и связями, real-time обновления через Socket.IO, мультиагентную оркестрацию через GigaChat (langchain-gigachat) и безопасное выполнение трансформаций в sandbox.
 
@@ -43,7 +42,7 @@ UI представляет бесконечное полотно (React Flow), 
 **Назначение**: UI-полотно, редактирование и взаимодействие с SourceNode/ContentNode/WidgetNode/CommentNode, чат с AI.
 **Ответственность**: 
 - Рендер бесконечного канваса (React Flow) с четырьмя типами узлов: SourceNode, ContentNode, WidgetNode, CommentNode
-- Визуализация связей: EXTRACT, TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
+- Визуализация связей: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
 - Локальное состояние доски (Zustand) + кэш запросов (TanStack Query)
 - Real-time синхронизация по Socket.IO client
 - UI-кит ShadCN (формы, панели, модальные окна)
@@ -67,59 +66,160 @@ UI представляет бесконечное полотно (React Flow), 
 **Назначение**: События совместного редактирования и обновлений состояния узлов.
 **Ответственность**:
 - Комнаты по boardId, события добавления/перемещения/удаления узлов (SourceNode/ContentNode/WidgetNode/CommentNode)
-- События создания/удаления связей (EXTRACT, TRANSFORMATION, VISUALIZATION, COMMENT)
+- События создания/удаления связей (TRANSFORMATION, VISUALIZATION, COMMENT)
 - **Streaming events**: real-time обновления ContentNode от streaming источников
 - События выполнения трансформаций и обновления данных
 - Транзит событий через Redis pub/sub для масштабирования по инстансам
 **Интерфейсы**: Socket.IO (ws + fallback), Redis pub/sub.
 
-### 4. Multi-Agent Orchestration Layer (LangChain + GigaChat)
-**Назначение**: Интерпретация естественного языка, управление командой специализированных AI агентов, динамическое создание инструментов, выполнение аналитических задач в контексте текущей доски, активное редактирование досок.
+### 4. Multi-Agent Orchestration Layer V2 (GigaChat + Redis MessageBus)
+**Назначение**: Интерпретация естественного языка, управление командой специализированных AI агентов через единый Orchestrator, генерация кода трансформаций и виджетов, анализ данных.
 
-**Статус**: 🚧 В разработке. LangChain и langchain-gigachat зависимости будут добавлены в процессе реализации FR-6 (AI Assistant Panel).
+**Статус**: ✅ Реализовано (Multi-Agent V2). См. [`docs/MULTI_AGENT.md`](MULTI_AGENT.md) для полной спецификации.
 
-**Компоненты**:
-- **Planner Agent**: Разбивает сложные запросы на подзадачи, маршрутизирует к специализированным агентам
-- **Researcher Agent**: Получает данные из БД, API, веб-сайтов
-- **Analyst Agent**: Анализирует данные, находит закономерности, генерирует инсайты
-- **Developer Agent**: Пишет код для инструментов на Python/SQL/JS
-- **Executor Agent**: Выполняет инструменты в sandboxed окружении
-- **Form Generator Agent**: Генерирует динамические формы для ввода данных
-- **Reporter Agent**: Анализирует ContentNode и генерирует HTML/CSS/JS код для визуализации, создает WidgetNode на канвасе, связывает через VISUALIZATION edge, **строит доски (добавляет узлы, создает связи)**
-- **Data Discovery Agent**: Находит и интегрирует публичные датасеты, создаёт SourceNode для внешних источников
-- **Transformation Agent**: Генерирует произвольный Python код для преобразования ContentNode, принимает один или несколько source ContentNode и текстовое описание задачи, создаёт новые ContentNode с сохранением data lineage и кода трансформации для автоматизации
+#### Архитектура V2
+
+```mermaid
+flowchart TB
+    subgraph Routes["FastAPI Routes"]
+        R1["content_nodes.py"]
+        R2["ai_assistant.py"]
+    end
+
+    subgraph Controllers["Satellite Controllers"]
+        C1["TransformationController"]
+        C2["WidgetController"]
+        C3["AIAssistantController"]
+        C4["TransformSuggestionsController"]
+        C5["WidgetSuggestionsController"]
+    end
+
+    subgraph Orchestrator["Orchestrator V2 (Single Path)"]
+        O["process_request()"]
+        P["PlannerAgent → Plan"]
+        E["Execute Steps (zero-mapping)"]
+        V["ValidatorAgent → Validate"]
+        O --> P --> E --> V
+    end
+
+    subgraph Agents["9 Core Agents"]
+        A1["PlannerAgent"]
+        A2["StructurizerAgent"]
+        A3["AnalystAgent"]
+        A4["TransformCodexAgent"]
+        A4b["WidgetCodexAgent"]
+        A5["ReporterAgent"]
+        A6["DiscoveryAgent"]
+        A7["ResearchAgent"]
+        A8["ValidatorAgent"]
+    end
+
+    R1 --> C1 & C2
+    R2 --> C3
+    C1 & C2 & C3 & C4 & C5 --> O
+    E --> A1 & A2 & A3 & A4 & A4b & A5 & A6 & A7 & A8
+```
+
+#### Ключевые компоненты
+
+**AgentPayload** — универсальный формат данных для всех агентов:
+- `narrative` — текстовый ответ (markdown)
+- `tables` — структурированные таблицы (PayloadContentTable)
+- `code_blocks` — блоки кода (CodeBlock с purpose: transformation/widget/analysis)
+- `findings` — инсайты, предупреждения, рекомендации
+- `plan` — план выполнения (Plan + PlanStep)
+- `validation` — результат валидации (ValidationResult)
+- `sources` — источники данных
+- `suggestions` — предложения пользователю
+
+**Orchestrator V2** — единый путь выполнения:
+1. PlannerAgent создаёт план (список шагов с агентами)
+2. Последовательное выполнение шагов: каждый агент получает `pipeline_context` (мутабельный dict) и `agent_results` (хронологический list всех предыдущих AgentPayload)
+3. `execution_context` — отдельный канал для тяжёлых данных (DataFrame), не попадающих в промпты
+4. ValidatorAgent проверяет результат
+5. Adaptive replanning при необходимости
+
+**9 Core Agents**:
+| Агент        | Класс                 | Роль                                         |
+| ------------ | --------------------- | -------------------------------------------- |
+| planner      | `PlannerAgent`        | Декомпозиция запроса на план выполнения      |
+| structurizer | `StructurizerAgent`   | Извлечение таблиц из текста/данных           |
+| analyst      | `AnalystAgent`        | Анализ данных, инсайты, паттерны             |
+| codex        | `TransformCodexAgent` | Генерация Python кода (трансформации данных) |
+| widget_codex | `WidgetCodexAgent`    | Генерация HTML/CSS/JS виджетов               |
+| reporter     | `ReporterAgent`       | Финальный отчёт в markdown                   |
+| discovery    | `DiscoveryAgent`      | Поиск и каталогизация источников данных      |
+| research     | `ResearchAgent`       | Глубокое исследование темы                   |
+| validator    | `ValidatorAgent`      | Валидация результатов pipeline               |
+
+**5 Satellite Controllers** (stateless wrappers → Orchestrator):
+| Контроллер                       | Роль                                      |
+| -------------------------------- | ----------------------------------------- |
+| `TransformationController`       | Генерация/выполнение Python трансформаций |
+| `WidgetController`               | Генерация HTML виджетов                   |
+| `AIAssistantController`          | Чат-ассистент (панель AI)                 |
+| `TransformSuggestionsController` | Предложения трансформаций                 |
+| `WidgetSuggestionsController`    | Предложения виджетов                      |
 
 **Ответственность**:
-- Парсинг пользовательских запросов
-- Управление межагентной коммуникацией через Message Bus (Redis pub/sub)
-- Динамическое создание и выполнение инструментов (код-генерация + песочница)
-- Контекстный анализ доски (текущие узлы, данные, связи, граф трансформаций)
-- **Генерация произвольного Python кода для трансформаций ContentNode**
-- **Активное редактирование досок: добавление/удаление узлов (SourceNode/ContentNode/WidgetNode/CommentNode), создание/удаление связей (EXTRACT/TRANSFORMATION/VISUALIZATION/COMMENT)**
-- **Построение оптимальных лэйаутов для узлов на канвасе**
-- **Управление автоматизацией: replay трансформаций при обновлении source ContentNode, refresh ContentNode при обновлении SourceNode**
-- Сохранение истории диалога, метрик выполнения, кода трансформаций
-- Обеспечение безопасности при выполнении пользовательского кода в sandbox
+- Парсинг пользовательских запросов через PlannerAgent
+- Управление межагентной коммуникацией через Redis MessageBus (pub/sub)
+- Генерация Python кода для трансформаций (TransformCodexAgent)
+- Генерация HTML/CSS/JS виджетов (WidgetCodexAgent)
+- Анализ данных и генерация инсайтов (AnalystAgent)
+- Структуризация данных в таблицы (StructurizerAgent)
+- Валидация результатов (ValidatorAgent)
+- Adaptive replanning при неудачных шагах
+- Retry с exponential backoff для агентов
+- Сохранение истории диалога, метрик выполнения
 
-**Интерфейсы**: Внутренний сервис, вызовы к GigaChat через langchain-gigachat, Redis Message Bus.
+**Файловая структура**:
+```
+apps/backend/app/services/
+├── multi_agent/
+│   ├── orchestrator.py          # Orchestrator V2
+│   ├── message_bus.py           # Redis pub/sub
+│   ├── schemas/
+│   │   └── agent_payload.py     # AgentPayload (универсальный формат)
+│   └── agents/
+│       ├── base.py              # BaseAgent
+│       ├── planner.py           # PlannerAgent
+│       ├── structurizer.py      # StructurizerAgent
+│       ├── analyst.py           # AnalystAgent
+│       ├── transform_codex.py   # TransformCodexAgent
+│       ├── widget_codex.py      # WidgetCodexAgent
+│       ├── reporter.py          # ReporterAgent
+│       ├── discovery.py         # DiscoveryAgent
+│       ├── research.py          # ResearchAgent
+│       └── validator.py         # ValidatorAgent
+├── controllers/
+│   ├── base_controller.py       # BaseController + ControllerResult
+│   ├── transformation_controller.py
+│   ├── widget_controller.py
+│   ├── ai_assistant_controller.py
+│   ├── transform_suggestions_controller.py
+│   └── widget_suggestions_controller.py
+```
+
+**Интерфейсы**: Controllers → Orchestrator → Agents → GigaChat (через GigaChatService), Redis MessageBus.
 
 ### 5. Data Layer
-**Назначение**: Хранение бордов, узлов (SourceNode/ContentNode/WidgetNode/CommentNode), связей, трансформаций, пользовательских профилей.
+**Назначение**: Хранение бордов, узлов (SourceNode/ContentNode/WidgetNode/CommentNode), связей, трансформаций, дашбордов, фильтров, пользовательских профилей.
 **Технологии**: PostgreSQL + SQLAlchemy.
 **Ответственность**:
 - Схемы БД:
-  - **boards**: проекты/доски
-  - **source_nodes**: 🆕 источники данных (file, database, api, stream, prompt, manual)
-  - **content_nodes**: 🆕 обработанные данные (text + N tables)
-  - **widget_nodes**: визуализации (HTML/CSS/JS код)
-  - **comment_nodes**: комментарии пользователей
-  - **edges**: связи между узлами (EXTRACT, TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN)
-  - **transformations**: метаданные трансформаций (код, prompt, source nodes, target node, execution metadata)
-  - **assets**: файлы и бинарные данные
-  - **users**, **sessions**: пользователи и сессии
-  - **board_history**: история изменений доски
-  - **stream_archives**: 🆕 архив streaming данных
-- Миграции: Alembic (базовая структура реализована, требует обновления под Source-Content модель)
+  - **boards**, **projects**: каталог проектов и досок
+  - **source_nodes**, **content_nodes**, **widget_nodes**, **comment_nodes**: узлы канваса (Source-Content архитектура)
+  - **edges**: связи между узлами (TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN)
+  - **uploaded_files**: загруженные файлы
+  - **users**, **user_sessions**: пользователи и сессии
+  - **agent_sessions**, **chat_messages**: сессии AI и чат
+  - **dashboards**, **dashboard_items**: дашборды и элементы (виджет/таблица/текст/изображение/линия)
+  - **dashboard_share**: шаринг дашбордов (публичный URL)
+  - **project_widget**, **project_table**: библиотека виджетов и таблиц проекта
+  - **dimensions**, **dimension_column_mappings**: измерения для Cross-Filter (см. [CROSS_FILTER_SYSTEM.md](CROSS_FILTER_SYSTEM.md))
+  - **filter_presets**: сохраняемые наборы фильтров по проекту
+- Миграции: Alembic
 
 ### 6. Tool Sandbox & Execution Environment
 **Назначение**: Безопасное выполнение кода трансформаций и инструментов, написанных Transformation Agent и Developer Agent (Python, SQL, JavaScript).
@@ -148,7 +248,7 @@ UI представляет бесконечное полотно (React Flow), 
 - **ContentNode Manager**: 🆕 CRUD для обработанных данных (text + N tables)
 - **WidgetNode Manager**: Управление визуализациями (создание из ContentNode, обновление кода, удаление)
 - **CommentNode Manager**: Управление комментариями (создание, редактирование, удаление)
-- **Edge Manager**: Управление связями между узлами (типы: EXTRACT, TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN)
+- **Edge Manager**: Управление связями между узлами (типы: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN)
 - **Transformation Manager**: Управление трансформациями (создание, выполнение, replay, версионирование)
 - **Layout Planner**: Генерирует оптимальные лэйауты узлов (flow, grid, hierarchy, freeform)
 - **Board History**: Отслеживает изменения доски, поддерживает версионирование
@@ -193,15 +293,16 @@ flowchart TB
     RT --> REDIS
     MA --> REDIS
     
-    MA --> PA[Planner Agent]
-    MA --> RA[Researcher Agent]
-    MA --> AA[Analyst Agent]
-    MA --> DA[Developer Agent]
-    MA --> EA[Executor Agent]
-    MA --> REP[Reporter Agent]
-    MA --> TRA[Transformation Agent]
+    MA --> PA[PlannerAgent]
+    MA --> DA[DiscoveryAgent]
+    MA --> RA[ResearchAgent]
+    MA --> SA[StructurizerAgent]
+    MA --> AA[AnalystAgent]
+    MA --> CX[TransformCodexAgent]
+    MA --> WC[WidgetCodexAgent]
+    MA --> REP[ReporterAgent]
+    MA --> VA[ValidatorAgent]
     
-    EA -->|Execute code| SB[Sandbox]
     MA -->|LangChain| GC[GigaChat API]
     
     style MA fill:#e1f5ff
@@ -252,7 +353,17 @@ flowchart TB
 - REST API P95 < 300 мс на CRUD-операции бордов/виджетов
 - Горизонтальное масштабирование real-time через Redis pub/sub и несколько приложений FastAPI/Socket.IO
 
+### 10. Cross-Filter System
+**Назначение**: Глобальная фильтрация данных на досках и дашбордах по измерениям (Dimensions), click-to-filter из виджетов, пресеты фильтров.
+**Компоненты**: DimensionService, FilterPresetService, FilterEngine; API: `/api/v1/boards/{id}/filters`, `/api/v1/dashboards/{id}/filters`, `/api/v1/projects/{id}/dimensions`, `/api/v1/projects/{id}/filter-presets`.
+**Детали**: см. [CROSS_FILTER_SYSTEM.md](CROSS_FILTER_SYSTEM.md).
+
+### 11. Dashboard System
+**Назначение**: Презентационный слой — дашборды из виджетов/таблиц/текста/изображений/линий с свободным размещением, z-order, вращением.
+**Компоненты**: DashboardService, ShareService; API: `/api/v1/dashboards`, `/api/v1/public/dashboards/{token}`.
+**Детали**: см. [DASHBOARD_SYSTEM.md](DASHBOARD_SYSTEM.md).
+
 ---
 
-**Состояние**: Draft  
-**Последнее обновление**: 2026-01-29 (актуализация под Source-Content Node Architecture)
+**Состояние**: Актуализировано  
+**Последнее обновление**: 2026-03-01 (Cross-Filter, Dashboard, Data Layer, диаграмма агентов)

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { Loader2, Filter, BarChart2, Lightbulb, Shuffle, Calculator, AlertCircle, FileText, List, Table2, Search, Wand2 } from 'lucide-react'
+import { Loader2, Filter, BarChart2, Calculator, ArrowUpDown, Eraser, Shuffle, Grid3x3, AlertCircle, Lightbulb } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { contentNodesAPI } from '@/services/api'
@@ -9,8 +9,10 @@ interface TransformSuggestion {
     id: string
     label: string
     prompt: string
-    category: 'filter' | 'aggregate' | 'merge' | 'reshape' | 'compute' | 'extract' | 'summarize' | 'structure' | 'analyze' | 'transform'
-    confidence: number
+    type: 'filter' | 'aggregation' | 'calculation' | 'sorting' | 'cleaning' | 'merge' | 'reshape'
+    relevance: number  // 0.0-1.0
+    category: string  // Legacy field
+    confidence: number  // Legacy field
     description?: string
     reasoning?: string
 }
@@ -22,49 +24,43 @@ interface TransformSuggestionsPanelProps {
     onSuggestionClick: (prompt: string) => void
 }
 
-const CATEGORY_ICONS: Record<TransformSuggestion['category'], React.ComponentType<{ className?: string }>> = {
-    // Табличные операции
+const TYPE_ICONS: Record<TransformSuggestion['type'], React.ComponentType<{ className?: string }>> = {
     filter: Filter,
-    aggregate: BarChart2,
+    aggregation: BarChart2,
+    calculation: Calculator,
+    sorting: ArrowUpDown,
+    cleaning: Eraser,
     merge: Shuffle,
-    reshape: Shuffle,
-    compute: Calculator,
-    // Текстовые операции
-    extract: Search,
-    summarize: FileText,
-    structure: Table2,
-    analyze: Lightbulb,
-    transform: Wand2,
+    reshape: Grid3x3,
 }
 
-const CATEGORY_LABELS: Record<TransformSuggestion['category'], string> = {
-    // Табличные операции
+const TYPE_LABELS: Record<TransformSuggestion['type'], string> = {
     filter: 'Фильтрация',
-    aggregate: 'Агрегация',
+    aggregation: 'Агрегация',
+    calculation: 'Вычисления',
+    sorting: 'Сортировка',
+    cleaning: 'Очистка',
     merge: 'Объединение',
     reshape: 'Перестройка',
-    compute: 'Вычисления',
-    // Текстовые операции
-    extract: 'Извлечение',
-    summarize: 'Суммаризация',
-    structure: 'Структурирование',
-    analyze: 'Анализ',
-    transform: 'Преобразование',
 }
 
-const CATEGORY_COLORS: Record<TransformSuggestion['category'], string> = {
-    // Табличные операции
+const TYPE_COLORS: Record<TransformSuggestion['type'], string> = {
     filter: 'bg-blue-500 text-white hover:bg-blue-600',
-    aggregate: 'bg-green-500 text-white hover:bg-green-600',
-    merge: 'bg-purple-500 text-white hover:bg-purple-600',
-    reshape: 'bg-orange-500 text-white hover:bg-orange-600',
-    compute: 'bg-pink-500 text-white hover:bg-pink-600',
-    // Текстовые операции
-    extract: 'bg-cyan-500 text-white hover:bg-cyan-600',
-    summarize: 'bg-teal-500 text-white hover:bg-teal-600',
-    structure: 'bg-indigo-500 text-white hover:bg-indigo-600',
-    analyze: 'bg-amber-500 text-white hover:bg-amber-600',
-    transform: 'bg-violet-500 text-white hover:bg-violet-600',
+    aggregation: 'bg-green-500 text-white hover:bg-green-600',
+    calculation: 'bg-purple-500 text-white hover:bg-purple-600',
+    sorting: 'bg-orange-500 text-white hover:bg-orange-600',
+    cleaning: 'bg-pink-500 text-white hover:bg-pink-600',
+    merge: 'bg-cyan-500 text-white hover:bg-cyan-600',
+    reshape: 'bg-amber-500 text-white hover:bg-amber-600',
+}
+
+// Relevance-based badge colors (border/text, not background)
+const getRelevanceBadgeColor = (relevance: number): string => {
+    if (relevance >= 0.9) return 'border-red-500 text-red-700 bg-red-50'  // Critical
+    if (relevance >= 0.7) return 'border-orange-500 text-orange-700 bg-orange-50'  // High
+    if (relevance >= 0.5) return 'border-yellow-500 text-yellow-700 bg-yellow-50'  // Medium
+    if (relevance >= 0.3) return 'border-gray-400 text-gray-600 bg-gray-50'  // Low
+    return 'border-gray-300 text-gray-500 bg-gray-50'  // Very low
 }
 
 export const TransformSuggestionsPanel = ({
@@ -167,7 +163,7 @@ export const TransformSuggestionsPanel = ({
             {/* Compact tag view with tooltips */}
             <div className="flex flex-wrap gap-1.5">
                 {suggestions.map((suggestion) => {
-                    const Icon = CATEGORY_ICONS[suggestion.category] || Lightbulb
+                    const Icon = TYPE_ICONS[suggestion.type] || Lightbulb
 
                     return (
                         <div
@@ -186,7 +182,7 @@ export const TransformSuggestionsPanel = ({
                             <Badge
                                 className={cn(
                                     'cursor-pointer text-[10px] px-2 py-0.5 flex items-center gap-1 transition-all max-w-[140px]',
-                                    CATEGORY_COLORS[suggestion.category]
+                                    TYPE_COLORS[suggestion.type]
                                 )}
                                 onClick={() => onSuggestionClick(suggestion.prompt)}
                             >
@@ -210,7 +206,7 @@ export const TransformSuggestionsPanel = ({
                     {(() => {
                         const suggestion = suggestions.find(s => s.id === hoveredSuggestion)
                         if (!suggestion) return null
-                        const Icon = CATEGORY_ICONS[suggestion.category] || Lightbulb
+                        const Icon = TYPE_ICONS[suggestion.type] || Lightbulb
 
                         return (
                             <>
@@ -222,17 +218,17 @@ export const TransformSuggestionsPanel = ({
                                                 {suggestion.label}
                                             </h4>
                                             <Badge
-                                                variant="secondary"
+                                                variant="outline"
                                                 className={cn(
-                                                    'text-xs px-1.5 py-0',
-                                                    CATEGORY_COLORS[suggestion.category]
+                                                    'text-xs px-1.5 py-0 border',
+                                                    getRelevanceBadgeColor(suggestion.relevance)
                                                 )}
                                             >
-                                                {CATEGORY_LABELS[suggestion.category]}
+                                                {Math.round(suggestion.relevance * 100)}%
                                             </Badge>
                                         </div>
                                         <p className="text-xs text-gray-500 mb-1">
-                                            Уверенность: {Math.round(suggestion.confidence * 100)}%
+                                            {TYPE_LABELS[suggestion.type]}
                                         </p>
                                     </div>
                                 </div>

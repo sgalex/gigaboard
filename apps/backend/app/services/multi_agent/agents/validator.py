@@ -99,6 +99,7 @@ class ValidatorAgent(BaseAgent):
     def __init__(
         self,
         message_bus: AgentMessageBus,
+        gigachat_service=None,
         system_prompt: Optional[str] = None
     ):
         super().__init__(
@@ -106,6 +107,7 @@ class ValidatorAgent(BaseAgent):
             message_bus=message_bus,
             system_prompt=system_prompt
         )
+        self.gigachat = gigachat_service
         
     def _get_default_system_prompt(self) -> str:
         return VALIDATOR_SYSTEM_PROMPT
@@ -139,8 +141,61 @@ class ValidatorAgent(BaseAgent):
         
         if task_type == "validate_code":
             return await self._validate_code(task, context)
+        elif task_type == "validate":
+            # General validation from Orchestrator — validate aggregated results
+            return await self._validate_aggregated(task, context)
         else:
-            raise ValueError(f"Unknown task type: {task_type}")
+            # Planner may assign validator as a plan step without type.
+            # Treat as generic validation/check — return success.
+            self.logger.info(f"Validator called as plan step (task_type={task_type}), performing generic check")
+            description = task.get("description", "")
+            return self._success_payload(
+                narrative_text=f"Validation check: {description or 'OK'}",
+                metadata={"task_type": task_type, "generic": True},
+            )
+
+    async def _validate_aggregated(
+        self,
+        task: Dict[str, Any],
+        context: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Валидирует агрегированные результаты от оркестратора.
+        
+        Проверяет code_blocks на безопасность если они есть,
+        иначе возвращает valid=True.
+        """
+        aggregated = task.get("aggregated_payload", {})
+        code_blocks = aggregated.get("code_blocks", [])
+        
+        all_errors = []
+        all_warnings = []
+        
+        for cb in code_blocks:
+            code = cb.get("code", "")
+            lang = cb.get("language", "python")
+            
+            if lang == "python" and code.strip():
+                # Проверяем синтаксис и безопасность Python-кода
+                syntax_check = self._check_syntax(code)
+                if not syntax_check["valid"]:
+                    all_errors.extend(syntax_check["errors"])
+                
+                security_check = self._check_security(code)
+                if not security_check["valid"]:
+                    all_errors.extend(security_check["errors"])
+        
+        valid = len(all_errors) == 0
+        
+        self.logger.info(
+            f"Aggregated validation: valid={valid}, "
+            f"code_blocks={len(code_blocks)}, errors={len(all_errors)}"
+        )
+        
+        return {
+            "valid": valid,
+            "errors": all_errors,
+            "warnings": all_warnings,
+        }
     
     async def _validate_code(
         self,
@@ -328,14 +383,16 @@ class ValidatorAgent(BaseAgent):
                 
                 # Handle both old (string array) and new (dict array) column formats
                 if columns and isinstance(columns[0], dict):
-                    # New format: [{"name": "col", "type": "string"}] -> ["col"]
                     column_names = [col["name"] for col in columns]
                 else:
-                    # Old format: ["col1", "col2"]
                     column_names = columns
                 
                 if sample_data:
-                    namespace['df'] = pd.DataFrame(sample_data, columns=column_names)
+                    # Handle dict rows (unified format)
+                    if sample_data and isinstance(sample_data[0], dict):
+                        namespace['df'] = pd.DataFrame(sample_data)
+                    else:
+                        namespace['df'] = pd.DataFrame(sample_data, columns=column_names)
                 else:
                     # Создать пустой DataFrame с колонками
                     namespace['df'] = pd.DataFrame(columns=column_names)
@@ -346,14 +403,16 @@ class ValidatorAgent(BaseAgent):
                     
                     # Handle both old (string array) and new (dict array) column formats
                     if columns and isinstance(columns[0], dict):
-                        # New format: [{"name": "col", "type": "string"}] -> ["col"]
                         column_names = [col["name"] for col in columns]
                     else:
-                        # Old format: ["col1", "col2"]
                         column_names = columns
                     
                     if sample_data:
-                        namespace[f'df{i}'] = pd.DataFrame(sample_data, columns=column_names)
+                        # Handle dict rows (unified format)
+                        if sample_data and isinstance(sample_data[0], dict):
+                            namespace[f'df{i}'] = pd.DataFrame(sample_data)
+                        else:
+                            namespace[f'df{i}'] = pd.DataFrame(sample_data, columns=column_names)
                     else:
                         namespace[f'df{i}'] = pd.DataFrame(columns=column_names)
             

@@ -1,2 +1,7 @@
 [tool.uv.workspace]
 members = ["apps/backend"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests that call GigaChat (may take 10-60s each)",
+]

@@ -792,10 +792,9 @@ async def ai_resolve_batch_stream(...):
 
 ## 📖 См. также
 
-- [MULTI_AGENT_SYSTEM.md](./MULTI_AGENT_SYSTEM.md) — общая архитектура агентов
+- [MULTI_AGENT.md](./MULTI_AGENT.md) — общая архитектура агентов
 - [DATA_NODE_SYSTEM.md](./DATA_NODE_SYSTEM.md) — система узлов данных
 - [API.md](./API.md#post-apiv1airesolve) — REST endpoint для AI Resolver
-- [DEVELOPER_CHECKLIST.md](./DEVELOPER_CHECKLIST.md) — чеклист для разработчиков
 
 ---
 

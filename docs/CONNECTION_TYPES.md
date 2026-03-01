@@ -5,112 +5,25 @@
 Система связей между узлами на досках GigaBoard обеспечивает создание **направленного ациклического графа (DAG)** data pipelines с автоматическим распространением изменений.
 
 ### Ключевые концепции
-- **6 типов связей**: EXTRACT, TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
+- **5 типов связей**: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
 - **Автоматическая propagation**: изменения в SourceNode → обновление ContentNode → перерисовка WidgetNode
-- **Executable edges**: EXTRACT и TRANSFORMATION содержат исполняемый код
+- **Executable edges**: TRANSFORMATION содержит исполняемый код
 - **Data lineage**: полная прозрачность происхождения данных
+- **SourceNode = ContentNode + config**: SourceNode наследует ContentNode и хранит данные напрямую, отдельный EXTRACT edge не нужен
 
 ### Типы связей
 
-1. **EXTRACT** 🆕 (SourceNode → ContentNode) — извлечение данных из источников (файлы, API, БД, streams)
-2. **TRANSFORMATION** (ContentNode → ContentNode) — преобразование данных через Python код (поддержка N источников)
-3. **VISUALIZATION** (ContentNode → WidgetNode) — визуализация данных (авто-обновление при изменении ContentNode)
-4. **COMMENT** (CommentNode → любой узел) — аннотации и инсайты
-5. **REFERENCE** (любой → любой) — справочные связи и документирование
-6. **DRILL_DOWN** (Content/Widget → Content/Widget) — детализация от сводных к детальным данным
-
----
-
-> **✅ Обновлено (29.01.2026)**: Документ актуализирован для Source-Content Node Architecture (FR-14/FR-23). Добавлен тип связи **EXTRACT** для работы с SourceNode. См. [SOURCE_CONTENT_NODE_CONCEPT.md](SOURCE_CONTENT_NODE_CONCEPT.md) для полной спецификации.
+1. **TRANSFORMATION** (SourceNode/ContentNode → ContentNode) — преобразование данных через Python код (поддержка N источников)
+2. **VISUALIZATION** (ContentNode/SourceNode → WidgetNode) — визуализация данных (авто-обновление при изменении ContentNode)
+3. **COMMENT** (CommentNode → любой узел) — аннотации и инсайты
+4. **REFERENCE** (любой → любой) — справочные связи и документирование
+5. **DRILL_DOWN** (Content/Widget → Content/Widget) — детализация от сводных к детальным данным
 
 ---
 
 ## Core Connection Types
 
-### 1. EXTRACT (SourceNode → ContentNode) 🆕
-
-**Purpose**: Extract structured data from source and create ContentNode with text description + N tables
-
-**Characteristics**:
-- **Single source**: One SourceNode extracts to one ContentNode
-- **Multiple tables**: ContentNode can contain N tables from extraction
-- **Auto-refresh**: ContentNode updates when SourceNode refreshes (for api/database/stream types)
-- **Streaming support**: Real-time accumulation with archiving strategy
-- **Extraction method**: Varies by SourceNode type (file parsing, SQL query, API call, AI generation, manual input)
-
-```mermaid
-flowchart LR
-    SN1[SourceNode: CSV file] -->|EXTRACT| CN1[ContentNode: sales_data]
-    SN2[SourceNode: API] -->|EXTRACT| CN2[ContentNode: weather]
-    SN3[SourceNode: Stream] -->|EXTRACT| CN3[ContentNode: sensor_logs]
-    
-    style SN1 fill:#f3e5f5
-    style SN2 fill:#f3e5f5
-    style SN3 fill:#f3e5f5
-    style CN1 fill:#e3f2fd
-    style CN2 fill:#e3f2fd
-    style CN3 fill:#e3f2fd
-```
-
-**Metadata Structure**:
-
-```python
-extract_edge = {
-    "id": "uuid",
-    "edge_type": "EXTRACT",
-    "from_node_id": "source_node_123",    # SourceNode
-    "to_node_id": "content_node_456",     # ContentNode
-    
-    "visual_config": {
-        "color": "#9C27B0",      # Purple
-        "line_style": "solid",
-        "arrow_type": "extract",
-        "animation": "flow",
-        "label": "Extract Data"
-    },
-    
-    "metadata": {
-        "extraction_method": "csv_parse",  # or sql_query, api_call, ai_generate, manual_input
-        "last_extract": "2026-01-29T10:30:00Z",
-        "rows_extracted": 1500,
-        "tables_created": 2
-    },
-    
-    "created_at": "2026-01-29T10:00:00Z"
-}
-```
-
-<details>
-<summary>📋 Implementation (развернуть)</summary>
-
-```python
-class ExtractEdge:
-    """SourceNode → ContentNode extraction edge"""
-    
-    edge_type = 'EXTRACT'
-    
-    async def execute_extract(self, source_node: SourceNode) -> ContentNode:
-        """Execute data extraction based on SourceNode type"""
-        
-        if source_node.source_type == 'file':
-            return await self._extract_from_file(source_node)
-        elif source_node.source_type == 'api':
-            return await self._extract_from_api(source_node)
-        elif source_node.source_type == 'database':
-            return await self._extract_from_database(source_node)
-        elif source_node.source_type == 'stream':
-            return await self._extract_from_stream(source_node)
-        elif source_node.source_type == 'prompt':
-            return await self._extract_from_prompt(source_node)
-        else:  # manual
-            return await self._extract_manual(source_node)
-```
-
-</details>
-
----
-
-### 2. TRANSFORMATION (ContentNode → ContentNode)
+### 1. TRANSFORMATION (SourceNode/ContentNode → ContentNode)
 
 **Purpose**: Transform one or multiple ContentNodes into a new ContentNode using arbitrary Python code
 
@@ -273,7 +186,7 @@ USER: "Join sales data with customer info"
 
 ---
 
-### 2. VISUALIZATION (ContentNode → WidgetNode)
+### 2. VISUALIZATION (ContentNode/SourceNode → WidgetNode)
 
 **Purpose**: Create visual representation of ContentNode through HTML/CSS/JS code
 
@@ -679,7 +592,6 @@ class DrillDownEdge:
 
 | Edge Type      | Color   | Style  | Arrow Type | Animation | Stroke Width |
 | -------------- | ------- | ------ | ---------- | --------- | ------------ |
-| EXTRACT        | #FF9800 | Solid  | Download   | Flow      | 2px          |
 | TRANSFORMATION | #2196F3 | Solid  | Code icon  | Flow      | 2px          |
 | VISUALIZATION  | #4CAF50 | Solid  | Chart icon | Pulse     | 2px          |
 | COMMENT        | #FFC107 | Dotted | Bubble     | None      | 1.5px        |
@@ -689,18 +601,6 @@ class DrillDownEdge:
 ### CSS Implementation
 
 ```css
-/* EXTRACT Edge */
-.edge.extract {
-    stroke: #FF9800;
-    stroke-width: 2;
-    stroke-dasharray: none;
-    animation: flowAnimation 2s infinite;
-}
-
-.edge.extract .icon {
-    content: url('data:image/svg+xml,...'); /* Download icon */
-}
-
 /* TRANSFORMATION Edge */
 .edge.transformation {
     stroke: #2196F3;
@@ -772,12 +672,8 @@ class EdgeValidationRules:
     
     # Allowed connections by edge type
     ALLOWED_CONNECTIONS = {
-        'EXTRACT': {
-            ('SourceNode', 'ContentNode'): True,      # ✅
-            ('SourceNode', 'WidgetNode'): False,      # ❌
-            ('ContentNode', 'ContentNode'): False,    # ❌
-        },
         'TRANSFORMATION': {
+            ('SourceNode', 'ContentNode'): True,       # ✅
             ('ContentNode', 'ContentNode'): True,      # ✅
             ('ContentNode', 'WidgetNode'): False,   # ❌
             ('WidgetNode', 'ContentNode'): False,   # ❌
@@ -916,9 +812,9 @@ flowchart TB
         ComN2["CommentNode:\n'Product X declining'"]
     end
     
-    SN1 -->|EXTRACT| CN1
-    SN2 -->|EXTRACT| CN2
-    SN3 -->|EXTRACT| CN3
+    SN1 -->|TRANSFORMATION| CN1
+    SN2 -->|TRANSFORMATION| CN2
+    SN3 -->|TRANSFORMATION| CN3
     
     CN1 -->|TRANSFORMATION| CN4
     CN4 -->|TRANSFORMATION| CN5
@@ -957,7 +853,7 @@ Scenario: User uploads new orders.csv (SN1 SourceNode changes)
 
 System automatically:
 1. Detects SN1 changed
-2. Triggers EXTRACT edge → Updates CN1 (ContentNode: Extracted Orders)
+2. Updates CN1 (SourceNode contains data directly, no EXTRACT edge needed)
 3. Finds downstream TRANSFORMATION edges
 4. Replays in topological order:
    a. CN1 → CN4 (clean transformation)
@@ -1217,19 +1113,19 @@ WHERE edge_type IN ('TRANSFORMATION', 'VISUALIZATION');
 
 ## Status
 
-**Status**: ✅ Актуализирован под Source-Content Node Architecture  
-**Updated**: 29 January 2026  
+**Status**: ✅ Актуализирован под Source-Content Node Architecture v2  
+**Updated**: 06 February 2026  
 **Changes**:
-- Добавлен новый тип связи **EXTRACT** (SourceNode → ContentNode)
-- Обновлены все типы связей: заменены упоминания DataNode на SourceNode/ContentNode
-- Обновлены диаграммы и примеры кода
-- Добавлены правила валидации для EXTRACT edge
-- Приведены в соответствие с FR-14 и FR-23
+- Удалён тип связи **EXTRACT** — SourceNode теперь наследует ContentNode и хранит данные напрямую
+- Обновлены диаграммы и примеры кода (SourceNode → ContentNode через TRANSFORMATION)
+- Обновлены правила валидации: TRANSFORMATION теперь поддерживает SourceNode → ContentNode
+- Приведено в соответствие с SOURCE_NODE_CONCEPT_V2.md
 
 **Key Changes**:
-- Replaced widget-based edges with node-based edges
 - 5 core edge types: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
+- EXTRACT removed — SourceNode inherits ContentNode, contains data directly
 - TRANSFORMATION edges contain executable Python code
+- TRANSFORMATION supports SourceNode → ContentNode (along with ContentNode → ContentNode)
 - Automatic propagation and replay capabilities
 - Validation rules prevent cycles and invalid connections
 

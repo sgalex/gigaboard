@@ -7,6 +7,7 @@
  * См. docs/SOURCE_NODE_CONCEPT_V2.md
  */
 import { memo, useState } from 'react'
+import { useFilterStore } from '@/store/filterStore'
 import { Handle, Position, NodeProps } from '@xyflow/react'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -49,6 +50,7 @@ import {
     Code,
     TrendingUp,
     Trash2,
+    Filter,
 } from 'lucide-react'
 import { SourceNode, SourceType } from '@/types'
 import { useBoardStore } from '@/store/boardStore'
@@ -58,6 +60,8 @@ import { WidgetDialog } from './WidgetDialog'
 import { CSVSourceDialog } from '../dialogs/sources/CSVSourceDialog'
 import { JSONSourceDialog } from '../dialogs/sources/JSONSourceDialog'
 import { ExcelSourceDialog } from '../dialogs/sources/ExcelSourceDialog'
+import { ManualSourceDialog } from '../dialogs/sources/ManualSourceDialog'
+import { DatabaseSourceDialog } from '../dialogs/sources/DatabaseSourceDialog'
 
 interface SourceNodeCardProps extends NodeProps {
     data: {
@@ -172,9 +176,11 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
 
     // Get content data (SourceNode now has content field from ContentNode inheritance)
     const content = sourceNode.content
-    const tables = content?.tables || []
+    const filteredEntry = useFilterStore((s) => s.filteredNodeData?.[sourceNode.id] ?? null)
+    const isFiltered = filteredEntry !== null
+    const tables = filteredEntry?.tables ?? content?.tables ?? []
     const tableCount = tables.length
-    const totalRows = tables.reduce((sum: number, t) => sum + (t.row_count || 0), 0)
+    const totalRows = tables.reduce((sum: number, t: any) => sum + (t.row_count || 0), 0)
     const hasText = !!content?.text
     const hasData = tableCount > 0 || hasText
 
@@ -234,20 +240,37 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
         }
 
         // Reconstruct chat history from lineage
-        const chatHistory: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: Date }> = [
-            {
+        // Prefer saved chat_history if available, otherwise create from description
+        let chatHistory: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: Date }> = []
+
+        if (lastTransform.chat_history && Array.isArray(lastTransform.chat_history) && lastTransform.chat_history.length > 0) {
+            // Use real saved chat history
+            console.log('✅ Restoring saved chat history:', lastTransform.chat_history.length, 'messages')
+            chatHistory = lastTransform.chat_history.map((msg: any) => ({
                 id: crypto.randomUUID(),
-                role: 'user' as const,
-                content: lastTransform.description || 'Transform data',
+                role: msg.role as 'user' | 'assistant',
+                content: msg.content,
                 timestamp: new Date()
-            },
-            {
-                id: crypto.randomUUID(),
-                role: 'assistant' as const,
-                content: `Code created and executed successfully`,
-                timestamp: new Date()
-            }
-        ]
+            }))
+        } else {
+            // Fallback: create from description/prompt
+            console.warn('⚠️ No saved chat history, creating from description')
+            const userPrompt = lastTransform.prompt || lastTransform.description || 'Transform data'
+            chatHistory = [
+                {
+                    id: crypto.randomUUID(),
+                    role: 'user' as const,
+                    content: userPrompt,
+                    timestamp: new Date()
+                },
+                {
+                    id: crypto.randomUUID(),
+                    role: 'assistant' as const,
+                    content: `Code created and executed successfully`,
+                    timestamp: new Date()
+                }
+            ]
+        }
 
         setEditTransformData({
             messages: chatHistory,
@@ -265,8 +288,8 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
     }
 
     // Handle transformation
-    const handleTransform = async (code: string, transformationId: string, description?: string) => {
-        await transformContent(sourceNode.id, description || '', code, transformationId)
+    const handleTransform = async (code: string, transformationId: string, description?: string, chatHistory?: Array<{ role: string; content: string }>) => {
+        await transformContent(sourceNode.id, description || '', code, transformationId, undefined, chatHistory)
     }
 
     // Handle visualization
@@ -280,6 +303,14 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
 
     // Get node title
     const getTitle = (): string => {
+        // Strategic logging for SourceNode naming pipeline debugging
+        console.log(`[SourceNodeCard] getTitle() for node ${sourceNode.id}:`, {
+            'metadata': sourceNode.metadata,
+            'metadata?.name': sourceNode.metadata?.name,
+            'node_metadata': (sourceNode as any).node_metadata,
+            'config?.filename': sourceNode.config?.filename,
+            'full sourceNode keys': Object.keys(sourceNode),
+        })
         if (sourceNode.metadata?.name) return sourceNode.metadata.name
         if (sourceNode.config?.filename) return sourceNode.config.filename
         return `${typeLabel} источник`
@@ -342,14 +373,12 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
             // Export each table as a separate sheet
             tables.forEach((table, idx) => {
                 const rawColumns = table.columns || []
-                const columns = rawColumns.map((col: any) =>
-                    typeof col === 'string' ? col : col.name || String(col)
-                )
+                const columns = rawColumns.map((col: any) => col.name)
 
                 const rawRows = table.rows || []
-                const rows = rawRows.map((row: any) =>
-                    Array.isArray(row) ? row : row.values || []
-                )
+                const rows = rawRows.map((row: any) => {
+                    return columns.map((colName: string) => row?.[colName] ?? '')
+                })
 
                 // Prepare data with headers
                 const sheetData = [columns, ...rows]
@@ -378,17 +407,15 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
         const table = tables[tableIndex]
         if (!table) return null
 
-        // Handle both old (array) and new (Pydantic object) formats
-        const rawRows = table.rows?.slice(0, 100) || []
-        const previewRows = rawRows.map((row) =>
-            Array.isArray(row) ? row : (row as any).values || []
-        )
-
-        // Handle both old (string array) and new (object array) column formats
+        // Handle column format
         const rawColumns = table.columns || []
-        const columns = rawColumns.map((col) =>
-            typeof col === 'string' ? col : (col as any).name || String(col)
-        )
+        const columns = rawColumns.map((col) => col.name)
+
+        // Handle row formats: dict rows
+        const rawRows = table.rows?.slice(0, 100) || []
+        const previewRows = rawRows.map((row) => {
+            return columns.map((colName: string) => (row as any)?.[colName] ?? '')
+        })
 
         return (
             <div className="space-y-2">
@@ -440,8 +467,6 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
 
     return (
         <>
-            <Handle type="target" position={Position.Left} className="w-3 h-3" isConnectable={false} />
-
             <Card
                 className={cn(
                     'w-[320px] transition-all duration-200 overflow-hidden',
@@ -568,7 +593,7 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                                                 console.log('showTransformDialog set to true')
                                             }}>
                                                 <Code className="mr-2 h-4 w-4" />
-                                                Трансформация
+                                                Обработка
                                             </DropdownMenuItem>
                                             <DropdownMenuItem onClick={() => setShowWidgetDialog(true)}>
                                                 <TrendingUp className="mr-2 h-4 w-4" />
@@ -612,6 +637,12 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                     {/* Data preview (tables as clickable badges) */}
                     {tableCount > 0 && (
                         <div className="flex flex-wrap gap-1.5">
+                            {isFiltered && (
+                                <Filter
+                                    className="w-3 h-3 text-blue-600"
+                                    aria-label="Фильтр активен"
+                                />
+                            )}
                             {tables.map((table, idx: number) => (
                                 <Badge
                                     key={idx}
@@ -770,8 +801,26 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                 />
             )}
 
+            {sourceNode.source_type === SourceType.MANUAL && (
+                <ManualSourceDialog
+                    open={showSettingsDialog}
+                    onOpenChange={setShowSettingsDialog}
+                    existingSource={sourceNode}
+                    mode="edit"
+                />
+            )}
+
+            {sourceNode.source_type === SourceType.DATABASE && (
+                <DatabaseSourceDialog
+                    open={showSettingsDialog}
+                    onOpenChange={setShowSettingsDialog}
+                    existingSource={sourceNode}
+                    mode="edit"
+                />
+            )}
+
             {/* Fallback for other source types */}
-            {![SourceType.CSV, SourceType.JSON, SourceType.EXCEL].includes(sourceNode.source_type) && (
+            {![SourceType.CSV, SourceType.JSON, SourceType.EXCEL, SourceType.MANUAL, SourceType.DATABASE].includes(sourceNode.source_type) && (
                 <Dialog open={showSettingsDialog} onOpenChange={setShowSettingsDialog}>
                     <DialogContent className="max-w-2xl">
                         <DialogHeader>
