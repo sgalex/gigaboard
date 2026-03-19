@@ -25,6 +25,7 @@ import { useAuthStore } from '@/store/authStore'
 import { useParams } from 'react-router-dom'
 import { notify } from '@/store/notificationStore'
 import { filesAPI } from '@/services/api'
+import { getViteApiBaseUrl } from '@/config/apiBase'
 
 interface SourceNodeConfigModalProps {
     open: boolean
@@ -315,7 +316,7 @@ export function SourceNodeConfigModal({
             }
 
             // Call backend to test connection and get tables
-            const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+            const API_URL = getViteApiBaseUrl()
             const response = await fetch(`${API_URL}/api/v1/database/test-connection`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },

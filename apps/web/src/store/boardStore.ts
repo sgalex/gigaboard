@@ -522,6 +522,9 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
                 } else if (typeof detail === 'string') {
                     message = detail
                 }
+            } else if (!error.response && import.meta.env.DEV) {
+                message +=
+                    ' Если API в Docker без порта 8000: откройте UI на том же origin, что и nginx (например :3000), либо запустите Vite с VITE_DEV_PROXY_TARGET=http://localhost:3000 (см. run-frontend.ps1 -DockerNginx).'
             }
             console.error('createSourceNode error:', error, 'data:', data)
             notify.error(message, { title: 'Ошибка создания' })

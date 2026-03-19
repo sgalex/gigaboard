@@ -33,20 +33,28 @@ POSTGRES_PORT=5432
 # Redis
 REDIS_PORT=6379
 
-# Backend
-BACKEND_PORT=8000
+# Backend (порт 8000 на хост не публикуется по умолчанию — только через nginx)
 JWT_SECRET_KEY=dev-jwt-secret-key-min-32-characters-random
 ENVIRONMENT=development
 DEBUG=true
 
-# Frontend (nginx в compose по умолчанию :80)
-FRONTEND_PORT=80
+# Frontend (хост:порт → контейнер nginx :80; по умолчанию в compose — 3000, без прав админа на Windows)
+FRONTEND_PORT=3000
 
-# CORS (при необходимости)
-CORS_ORIGINS=http://localhost,http://127.0.0.1,http://localhost:5173
+# CORS (при необходимости; для UI на :3000 добавьте origin с портом)
+CORS_ORIGINS=http://localhost,http://127.0.0.1,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173
 
 # LLM / GigaChat — только в UI после входа (пресеты), не через .env
 ```
+
+### Локальный Vite + Docker только с FRONTEND_PORT
+
+Если backend в контейнере **не** проброшен на `:8000`, а вы открываете `http://localhost:5173`, Vite по умолчанию проксирует `/api` на `localhost:8000` → запросы падают. Варианты:
+
+- Открывать готовый UI из контейнера: `http://localhost:3000` (или ваш `FRONTEND_PORT`).
+- Или запускать Vite так: `.\run-frontend.ps1 -DockerNginx` (прокси на `http://localhost:3000`; при другом порте задайте `VITE_DEV_PROXY_TARGET` вручную).
+
+После исправления **`VITE_API_URL`** пересоберите образ frontend: `docker compose build frontend`.
 
 ### 2. Сборка и запуск
 
@@ -69,9 +77,12 @@ docker-compose logs -f
 
 После запуска откройте:
 
-- **Frontend**: http://localhost:3000
-- **Backend API**: http://localhost:8000/docs (Swagger UI)
-- **Health check**: http://localhost:8000/health
+- **Frontend**: http://localhost:3000 (или ваш `FRONTEND_PORT`)
+- **Swagger**: http://localhost:3000/docs (прокси через nginx; порт backend на хост не обязателен)
+- **Health (лёгкий)**: http://localhost:3000/health  
+- **Health (API)**: http://localhost:3000/api/v1/health  
+
+Прямой доступ к backend на `:8000` нужен только если подключили `docker-compose.publish-internal-ports.yml`.
 
 Проверьте статус контейнеров:
 
@@ -207,7 +218,7 @@ docker-compose exec backend alembic upgrade head
 docker-compose ps backend
 
 # 2. Проверьте health check
-curl http://localhost:8000/health
+curl http://localhost:3000/api/v1/health
 
 # 3. Проверьте nginx конфигурацию
 docker-compose exec frontend cat /etc/nginx/conf.d/default.conf

@@ -6,8 +6,7 @@ import { io, Socket } from 'socket.io-client'
 import { useBoardStore } from '@/store/boardStore'
 import { useLibraryStore } from '@/store/libraryStore'
 import type { WidgetNode, CommentNode, Edge } from '@/types'
-
-const SOCKET_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+import { getSocketIoUrl } from '@/config/apiBase'
 
 export function useBoardSocket(boardId: string | undefined) {
     const socketRef = useRef<Socket | null>(null)
@@ -22,7 +21,7 @@ export function useBoardSocket(boardId: string | undefined) {
         if (!boardId) return
 
         console.log('🔗 Connecting to Socket.IO server...')
-        const socket = io(SOCKET_URL, {
+        const socket = io(getSocketIoUrl(), {
             path: '/socket.io',
             transports: ['polling', 'websocket'],
             reconnection: true,

@@ -41,8 +41,9 @@ import type {
     DashboardShare, DashboardShareCreate,
     PublicDashboard,
 } from '@/types/dashboard'
+import { getViteApiBaseUrl } from '@/config/apiBase'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_URL = getViteApiBaseUrl()
 
 const api: AxiosInstance = axios.create({
     baseURL: API_URL,
@@ -62,7 +63,7 @@ api.interceptors.response.use(
     (response) => response,
     (error) => {
         if (!error.response) {
-            notify.error('Сервер недоступен или CORS блокирует запрос. Проверьте backend и VITE_API_URL.', {
+            notify.error('Сервер недоступен или CORS блокирует запрос. Проверьте backend и прокси nginx (или VITE_API_URL).', {
                 title: 'Сетевая ошибка',
             })
         }
@@ -116,7 +117,8 @@ export const boardsAPI = {
 // SourceNodes API (Source-Content Architecture) 🆕
 export const sourceNodesAPI = {
     list: (boardId: string) => api.get<SourceNode[]>(`/api/v1/source-nodes/board/${boardId}`),
-    create: (data: SourceNodeCreate) => api.post<SourceNode>('/api/v1/source-nodes', data),
+    // Trailing slash — иначе FastAPI 307 и Location с внутренним хостом без proxy-headers
+    create: (data: SourceNodeCreate) => api.post<SourceNode>('/api/v1/source-nodes/', data),
     get: (sourceId: string) => api.get<SourceNode>(`/api/v1/source-nodes/${sourceId}`),
     update: (sourceId: string, data: SourceNodeUpdate) =>
         api.put<SourceNode>(`/api/v1/source-nodes/${sourceId}`, data),
@@ -325,8 +327,8 @@ export const edgesAPI = {
         api.delete(`/api/v1/boards/${boardId}/edges/${edgeId}`),
 }
 
-/** Base URL for API (e.g. for fetch/axios). */
-export const apiBaseURL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+/** Base URL for API (e.g. для fetch); пусто = тот же origin (Docker/nginx). */
+export const apiBaseURL = getViteApiBaseUrl()
 
 const FILE_IMAGE_PATH = '/api/v1/files/image'
 

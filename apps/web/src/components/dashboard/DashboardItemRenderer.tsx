@@ -18,6 +18,7 @@ import { useLibraryStore } from '@/store/libraryStore'
 import { useDashboardStore } from '@/store/dashboardStore'
 import { useFilterStore } from '@/store/filterStore'
 import { filesAPI } from '@/services/api'
+import { getViteApiBaseUrl } from '@/config/apiBase'
 import { buildWidgetApiScript, injectApiScript, unescapeWidgetHtml } from '@/components/board/widgetApiScript'
 import { applyFiltersToTables } from '@/types/crossFilter'
 import type { DashboardItem, ItemBreakpointLayout } from '@/types/dashboard'
@@ -864,11 +865,10 @@ const TextContent = forwardRef<TextEditorHandle, { item: DashboardItem; isSelect
         )
     })
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-
 /** Build a public image URL from file_id */
 function imageUrl(fileId: string): string {
-    return `${API_BASE}/api/v1/files/image/${fileId}`
+    const base = getViteApiBaseUrl()
+    return `${base}/api/v1/files/image/${fileId}`
 }
 
 type ObjectFit = 'cover' | 'contain' | 'fill' | 'none'

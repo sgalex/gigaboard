@@ -110,6 +110,12 @@ Package:   uv (Python), npm (Frontend)
 | [DATA_QUALITY_MONITOR.md](./DATA_QUALITY_MONITOR.md)       | AI-мониторинг качества данных (Phase 4)                |
 | [COMMANDS.md](./COMMANDS.md)                               | Команды разработки                                     |
 
+### Развёртывание (Docker)
+
+| Документ | Описание |
+| -------- | -------- |
+| [DOCKER_VM_DEPLOYMENT.md](./DOCKER_VM_DEPLOYMENT.md) | Пошаговое развёртывание на виртуальной машине (Linux, Docker Compose) |
+
 ### История
 
 | Каталог                | Описание                                           |

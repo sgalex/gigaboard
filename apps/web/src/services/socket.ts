@@ -2,8 +2,7 @@
  * Socket.IO Service - singleton для работы с Socket.IO вне React компонентов
  */
 import { io, Socket } from 'socket.io-client'
-
-const SOCKET_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+import { getSocketIoUrl } from '@/config/apiBase'
 
 class SocketService {
     private socket: Socket | null = null
@@ -24,7 +23,7 @@ class SocketService {
 
         console.log('🔗 SocketService: Connecting...')
 
-        this.socket = io(SOCKET_URL, {
+        this.socket = io(getSocketIoUrl(), {
             path: '/socket.io',
             transports: ['polling', 'websocket'],
             auth: token ? { token } : undefined,

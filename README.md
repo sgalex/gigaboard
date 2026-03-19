@@ -346,8 +346,8 @@ npm install
 docker compose up --build
 ```
 
-- UI: [http://localhost](http://localhost) (порт задаётся `FRONTEND_PORT`, по умолчанию 80)  
-- API напрямую: [http://localhost:8000](http://localhost:8000) (или `BACKEND_PORT`)
+- UI: [http://localhost:3000](http://localhost:3000) (порт задаётся `FRONTEND_PORT`, по умолчанию **3000**; внутри контейнера nginx слушает **80**)  
+- API и Socket.IO идут через nginx (`/api/`, `/socket.io/`); порты Postgres, Redis и backend **не** публикуются на хост. Swagger: `/docs`. Для отладки с хоста см. `docker-compose.publish-internal-ports.yml`.
 
 **Разработка в контейнерах** (Vite с hot reload, `uvicorn --reload`):
 

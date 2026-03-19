@@ -8,8 +8,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-gigaboard}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+    # Порты не публикуем: доступ только из сети Compose. Наружу — см. FRONTEND_PORT (nginx).
+    # Отладка: docker compose -f docker-compose.yml -f docker-compose.publish-internal-ports.yml up -d
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gigaboard}" ]
       interval: 10s
@@ -25,8 +25,6 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
@@ -55,7 +53,7 @@ services:
 
       ENVIRONMENT: ${ENVIRONMENT:-production}
       DEBUG: ${DEBUG:-false}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://127.0.0.1,http://localhost:80,http://127.0.0.1:80,http://localhost:5173,http://127.0.0.1:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://127.0.0.1,http://localhost:80,http://127.0.0.1:80,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
 
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
@@ -68,8 +66,6 @@ services:
 
     volumes:
       - uploads_data:/app/uploads
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,11 +79,15 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
     container_name: gigaboard-frontend
     ports:
-      - "${FRONTEND_PORT:-80}:80"
+      # 3000 по умолчанию — без привилегий на Windows (в отличие от :80)
+      - "${FRONTEND_PORT:-3000}:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - gigaboard-network
     restart: unless-stopped

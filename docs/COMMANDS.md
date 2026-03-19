@@ -135,6 +135,8 @@ npm run -w apps/web test
 
 ## Docker Compose (весь стек)
 
+Пошаговая инструкция для **виртуальной машины (Linux)** — [DOCKER_VM_DEPLOYMENT.md](./DOCKER_VM_DEPLOYMENT.md).
+
 Сборка из **корня репозитория** (контекст — монорепозиторий: `package-lock.json`, `apps/web`, `apps/backend`).
 
 ### Продакшен-сборка (nginx + backend + Postgres + Redis)
@@ -143,8 +145,8 @@ npm run -w apps/web test
 docker compose up --build
 ```
 
-- Frontend: `http://localhost` (порт `FRONTEND_PORT`, по умолчанию 80), API проксируется через nginx (`/api/`, `/socket.io/`).
-- Backend: порт `BACKEND_PORT` (по умолчанию 8000).
+- Frontend: `http://localhost:3000` (порт `FRONTEND_PORT`, по умолчанию **3000**). API и Socket.IO — через nginx (`/api/`, `/socket.io/`), Swagger — `/docs`, `/redoc`. **Наружу по умолчанию публикуется только этот порт**; Postgres, Redis и backend слушают только внутри сети Compose.
+- Опционально открыть порты БД/кэша/backend на хосте: `docker compose -f docker-compose.yml -f docker-compose.publish-internal-ports.yml up -d`
 - При старте backend: `alembic upgrade head` (отключить: `SKIP_ALEMBIC_UPGRADE=1` в окружении сервиса `backend`).
 
 Переопределите **`JWT_SECRET_KEY`** (и при необходимости `POSTGRES_*`, `ADMIN_*`) через корневой `.env` или переменные окружения хоста — в `docker-compose.yml` используются подстановки `${...}`.

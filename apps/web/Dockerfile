@@ -11,6 +11,9 @@ RUN npm ci
 COPY apps/web ./apps/web
 
 WORKDIR /workspace/apps/web
+# Пусто = REST и Socket.IO с того же origin, что и nginx (см. apps/web/src/config/apiBase.ts)
+ARG VITE_API_URL=
+ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build
 
 FROM nginx:alpine

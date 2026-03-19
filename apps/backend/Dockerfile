@@ -50,8 +50,9 @@ ENTRYPOINT ["/docker-entrypoint.sh"]
 
 # Dev-образ (docker-compose.dev.yml задаёт target: development и CMD с --reload)
 FROM base AS development
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# За nginx: корректные Location при 307 (trailing slash), иначе клиент уходит на backend:8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
 
 # Продакшен — последняя стадия по умолчанию при docker build без --target
 FROM base AS production
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
