@@ -115,6 +115,7 @@ Package:   uv (Python), npm (Frontend)
 | Документ | Описание |
 | -------- | -------- |
 | [DOCKER_VM_DEPLOYMENT.md](./DOCKER_VM_DEPLOYMENT.md) | Пошаговое развёртывание на виртуальной машине (Linux, Docker Compose) |
+| [res/README.md](../res/README.md) | Вспомогательные ресурсы репозитория (демо-данные, шаблоны nginx для ВМ) |
 
 ### История
 
@@ -128,6 +129,7 @@ Package:   uv (Python), npm (Frontend)
 
 ```
 GigaBoard/
+├── res/                           # Вспомогательные ресурсы (демо-данные, шаблоны nginx для ВМ)
 ├── docs/                          # 📚 Документация (~42 файл)
 │   ├── README.md                  # ⭐ Этот файл — навигация
 │   ├── SPECIFICATIONS.md          # Требования (FR-1..FR-23)

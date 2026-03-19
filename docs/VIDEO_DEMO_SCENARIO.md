@@ -71,7 +71,7 @@ flowchart LR
 
 **Действие:** Drag & drop иконки **CSV** из витрины на холст → открывается диалог настройки источника (CSV).
 
-- Загружаем `sales.csv`
+- Загружаем файл `res/demo-data/sales.csv` (в репозитории; в UI по-прежнему отображается как `sales.csv`)
 - GigaBoard автоматически видит схему: разделитель `;`, кодировка cp1251, 19 041 строка
 - Колонки: `id, title, brand, price, salesCount, salesAmount, brandImageUrl, productImageUrl, date, dateStr`
 - Preview первых строк — видны товары Ozon с ценами и объёмом продаж
@@ -302,7 +302,7 @@ flowchart TB
 ## 📋 Чеклист перед записью
 
 ### Данные и окружение
-- [ ] Файл `sales.csv` — 19 041 строка, разделитель `;`, кодировка cp1251, колонки: `id, title, brand, price, salesCount, salesAmount, brandImageUrl, productImageUrl, date, dateStr`
+- [ ] Файл `res/demo-data/sales.csv` — 19 041 строка, разделитель `;`, кодировка cp1251, колонки: `id, title, brand, price, salesCount, salesAmount, brandImageUrl, productImageUrl, date, dateStr`
 - [ ] GigaChat API key активен
 - [ ] Backend запущен: из `apps/backend` — `uv run python run_dev.py` (порт 8000)
 - [ ] Frontend запущен: из `apps/web` — `npm run dev` (порт 5173)

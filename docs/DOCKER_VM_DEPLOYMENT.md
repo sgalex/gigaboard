@@ -4,7 +4,7 @@
 
 Инструкция описывает **пошаговый запуск полного стека GigaBoard** (PostgreSQL, Redis, FastAPI backend, nginx + frontend) на **виртуальной машине с Linux** через **Docker Engine** и **Docker Compose V2**. По умолчанию **на хост публикуется только порт веб-интерфейса** (`FRONTEND_PORT`, nginx): REST (`/api/`), Socket.IO (`/socket.io/`) и документация API (`/docs`, `/redoc`) проксируются внутрь сети Compose. PostgreSQL, Redis и backend **не слушают порты на хосте**. Для локального Docker Desktop на Windows/Mac см. также [DOCKER_DESKTOP.md](../DOCKER_DESKTOP.md) в корне репозитория.
 
-**Ключевые файлы:** корневой `docker-compose.yml`, `apps/backend/Dockerfile`, `apps/web/Dockerfile`, шаблон [`.env.example`](../.env.example).
+**Ключевые файлы:** корневой `docker-compose.yml`, `apps/backend/Dockerfile`, `apps/web/Dockerfile`, шаблон [`.env.example`](../.env.example), вспомогательные ресурсы в [`res/`](../res/) (см. [`res/README.md`](../res/README.md)).
 
 ---
 
@@ -265,3 +265,4 @@ docker compose exec postgres pg_dump -U gigaboard gigaboard > backup_$(date +%Y%
 - [COMMANDS.md](./COMMANDS.md) — команды разработки и кратко про Docker Compose  
 - [ADMIN_AND_SYSTEM_LLM.md](./ADMIN_AND_SYSTEM_LLM.md) — настройка LLM и админа в UI (не через `GIGACHAT_*` в `.env`)  
 - [`.env.example`](../.env.example) — полный перечень переменных с комментариями  
+- [`res/nginx-vm-gigaboard.conf`](../res/nginx-vm-gigaboard.conf) — готовый reverse-proxy конфиг nginx для ВМ (перед Docker Compose фронтом)
