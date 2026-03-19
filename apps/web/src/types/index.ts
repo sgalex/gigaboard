@@ -193,6 +193,8 @@ export interface SourceNodeCreate {
     metadata?: Record<string, any>;
     position?: { x: number; y: number };
     created_by: string;
+    /** Pre-filled content (e.g. for RESEARCH: narrative + tables from dialog). */
+    data?: { text?: string; tables?: Array<{ name?: string; columns?: Array<{ name: string; type?: string }>; rows?: Record<string, unknown>[]; row_count?: number; column_count?: number }> };
 }
 
 export interface SourceNodeUpdate {
@@ -384,21 +386,71 @@ export interface AIChatRequest {
     message: string;
     session_id?: string;
     context?: {
+        mode?: 'board' | 'dashboard';
         selected_nodes?: string[];
+        selected_node_ids?: string[];
+        allow_auto_filter?: boolean;
+        required_tables?: string[];
+        filter_expression?: Record<string, any>;
         [key: string]: any;
     };
 }
 
+export interface AIContextUsedTable {
+    node_id?: string;
+    node_name?: string;
+    table_name?: string;
+    row_count_before?: number;
+    row_count_after?: number;
+    row_count_after_is_sample?: boolean;
+}
+
+export interface AIContextUsed {
+    scope?: 'board' | 'dashboard' | string;
+    filters?: Record<string, any> | null;
+    proposed_filters?: Record<string, any> | null;
+    filter_applied_for_answer?: boolean;
+    tables?: AIContextUsedTable[];
+    [key: string]: any;
+}
+
 export interface AIChatResponse {
-    message: string;
+    response: string;
     session_id: string;
     suggested_actions?: any[];
+    context_used?: AIContextUsed;
 }
 
 export interface AIChatHistoryResponse {
     messages: ChatMessage[];
     session_id: string | null;
     total_messages: number;
+}
+
+// Research Chat (ResearchSourceDialog)
+export interface ResearchChatMessage {
+    role: 'user' | 'assistant';
+    content: string;
+}
+
+export interface ResearchSourceRef {
+    url: string;
+    title: string;
+}
+
+export interface ResearchChatRequest {
+    message: string;
+    session_id?: string;
+    chat_history?: ResearchChatMessage[];
+}
+
+export interface ResearchChatResponse {
+    narrative: string;
+    tables: Array<{ name?: string; columns?: Array<{ name: string; type?: string }>; rows?: Record<string, unknown>[] }>;
+    sources: ResearchSourceRef[];
+    session_id: string;
+    execution_time_ms?: number;
+    plan?: Record<string, unknown>;
 }
 
 // API Response types

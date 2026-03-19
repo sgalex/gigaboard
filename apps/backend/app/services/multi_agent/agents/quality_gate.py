@@ -30,13 +30,19 @@ logger = logging.getLogger(__name__)
 
 
 # ── keywords for expected outcome detection ──────────────────────────
-_CODE_KW = ["код", "напиши код", "скрипт", "python", "sql"]
+# ВАЖНО: не используем голое "python"/"sql", чтобы запросы вида
+# "Python-фреймворки" не считались code_generation.
+_CODE_KW = ["код", "напиши код", "скрипт", "sql-запрос", "sql query"]
 _VIZ_KW = ["график", "визуализ", "диаграмм", "виджет"]
 _TRANSFORM_KW = [
     "трансформируй", "преобразуй", "отфильтруй",
     "сгруппируй", "добавь столбец",
 ]
 _DATA_KW = ["данные", "загрузи", "получи данные", "скачай"]
+_CONFIDENCE_PASS_THRESHOLD = 0.8
+# Guardrail against replan loops:
+# allow at most one validator-driven replan for "analyst returned no findings".
+_MAX_ANALYST_NO_FINDINGS_REPLANS = 1
 
 
 QUALITY_GATE_SYSTEM_PROMPT = """
@@ -72,6 +78,7 @@ QUALITY_GATE_SYSTEM_PROMPT = """
 ПРАВИЛА:
 - Будь СТРОГ к code_generation / transformation: код ОБЯЗАН быть.
 - Будь гибок к research: текстовый ответ приемлем.
+- Если пользователь запросил КОНКРЕТНЫЙ ФАКТ (курс валюты, цену, число) — в ответе должен быть этот факт (число), а не только ссылки на источники. valid=false, если ответ содержит только ссылки без указания самого курса/цены.
 - Если итерация >= max, НЕ давай suggested_replan.
 - Рекомендации должны быть actionable.
 """
@@ -97,7 +104,8 @@ class QualityGateAgent(BaseAgent):
         message_bus: AgentMessageBus,
         gigachat_service: GigaChatService,
         system_prompt: Optional[str] = None,
-        executor = None,
+        executor=None,
+        llm_router: Optional[Any] = None,
     ):
         super().__init__(
             agent_name="validator",
@@ -106,6 +114,7 @@ class QualityGateAgent(BaseAgent):
         )
         self.gigachat = gigachat_service
         self.executor = executor  # PythonExecutor для проверки кода
+        self.llm_router = llm_router
 
     def _get_default_system_prompt(self) -> str:
         return QUALITY_GATE_SYSTEM_PROMPT
@@ -164,7 +173,13 @@ class QualityGateAgent(BaseAgent):
             )
 
             # ── Heuristic (fast) ─────────────────────────────────────
-            h = self._heuristic(expected, aggregated, original_request)
+            h = self._heuristic(
+                expected,
+                aggregated,
+                original_request,
+                iteration=iteration,
+                max_iterations=max_iterations,
+            )
             
             # ── V2: Code execution validation ───────────────────────
             # Если ожидается code_generation и есть executor - выполняем код
@@ -202,6 +217,7 @@ class QualityGateAgent(BaseAgent):
                     aggregated,
                     iteration,
                     max_iterations,
+                    context=context,
                 )
                 vr = self._to_validation_result(
                     llm_raw, iteration, max_iterations
@@ -244,6 +260,9 @@ class QualityGateAgent(BaseAgent):
         expected: str,
         aggregated: Dict[str, Any],
         original_request: str,
+        *,
+        iteration: int = 1,
+        max_iterations: int = 3,
     ) -> Dict[str, Any]:
         """Fast rule-based validation without LLM."""
         txt = json.dumps(aggregated, ensure_ascii=False, default=str)
@@ -287,6 +306,27 @@ class QualityGateAgent(BaseAgent):
             if agent_name == "analyst":
                 findings = res.get("findings", [])
                 if not findings or len(findings) == 0:
+                    allow_replan = (
+                        iteration < max_iterations
+                        and iteration <= _MAX_ANALYST_NO_FINDINGS_REPLANS
+                    )
+                    if not allow_replan:
+                        return {
+                            "valid": False,
+                            "confidence": 0.9,
+                            "message": (
+                                "Analyst returned no findings after retry; "
+                                "stopping additional replans"
+                            ),
+                            "issues": [
+                                {
+                                    "severity": "critical",
+                                    "message": (
+                                        "Analyst failed to produce findings repeatedly"
+                                    ),
+                                }
+                            ],
+                        }
                     return {
                         "valid": False,
                         "confidence": 0.9,
@@ -311,6 +351,27 @@ class QualityGateAgent(BaseAgent):
                 # Check if all findings have empty text
                 empty_findings = sum(1 for f in findings if not f.get("text", "").strip())
                 if empty_findings == len(findings):
+                    allow_replan = (
+                        iteration < max_iterations
+                        and iteration <= _MAX_ANALYST_NO_FINDINGS_REPLANS
+                    )
+                    if not allow_replan:
+                        return {
+                            "valid": False,
+                            "confidence": 0.9,
+                            "message": (
+                                "Analyst findings are empty after retry; "
+                                "stopping additional replans"
+                            ),
+                            "issues": [
+                                {
+                                    "severity": "critical",
+                                    "message": (
+                                        "Analyst findings have empty text repeatedly"
+                                    ),
+                                }
+                            ],
+                        }
                     return {
                         "valid": False,
                         "confidence": 0.9,
@@ -443,8 +504,50 @@ class QualityGateAgent(BaseAgent):
                 "issues": [{"severity": "warning", "message": "Missing structured data"}],
             }
 
-        # research — almost any textual answer is OK
+        # research — текстовый ответ приемлем, но для запросов «конкретный факт» нужное число
         has_content = len(txt) > 100
+        request_lower = (original_request or "").lower()
+        asks_for_rate = any(
+            kw in request_lower
+            for kw in (
+                "какой курс", "курс доллара", "курс евро", "курс валют",
+                "текущий курс", "сейчас курс", "курс к рублю", "курс рубл",
+            )
+        )
+        if asks_for_rate:
+            # Ищем число, похожее на курс (цифры с запятой/точкой + руб/dollar/USD/₽)
+            rate_pattern = re.compile(
+                r"\d+[,.]\d+\s*(?:₽|руб|rub|р\.|доллар|usd|eur|евро|\$)",
+                re.I,
+            )
+            has_rate_number = bool(rate_pattern.search(txt))
+            if not has_rate_number:
+                # Допускаем просто число в контексте курса (78.74 или 78,74)
+                simple_rate = re.search(r"\b\d{2,3}[,.]\d{2,4}\b", txt)
+                if simple_rate and ("курс" in txt or "доллар" in txt or "usd" in txt or "руб" in txt.lower()):
+                    has_rate_number = True
+            if not has_rate_number:
+                return {
+                    "valid": False,
+                    "confidence": 0.9,
+                    "message": "Запрос о курсе валюты: в ответе должно быть указано число (курс), а не только ссылки",
+                    "issues": [
+                        {
+                            "severity": "critical",
+                            "message": "Не предоставлен конкретный курс — только ссылки на источники",
+                        }
+                    ],
+                    "suggested_replan": {
+                        "reason": "Нужен конкретный числовой факт в ответе",
+                        "additional_steps": [
+                            {
+                                "agent": "reporter",
+                                "description": "Переформулировать ответ в формате answer-first: конкретное число в первой строке, затем 1-2 подтверждающие детали",
+                            }
+                        ],
+                    },
+                }
+
         return {
             "valid": has_content,
             "confidence": 0.85 if has_content else 0.5,
@@ -461,6 +564,7 @@ class QualityGateAgent(BaseAgent):
         aggregated: Dict[str, Any],
         iteration: int,
         max_iterations: int,
+        context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         summary = self._summarize(aggregated)
         no_replan = (
@@ -480,8 +584,8 @@ class QualityGateAgent(BaseAgent):
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": prompt},
         ]
-        response = await self.gigachat.chat_completion(
-            messages=messages, temperature=0.3, max_tokens=1500
+        response = await self._call_llm(
+            messages, context=context, temperature=0.3, max_tokens=1500
         )
         return self._parse_json(response)
 
@@ -583,6 +687,50 @@ class QualityGateAgent(BaseAgent):
         return "\n\n".join(parts)
 
     @staticmethod
+    def _extract_primary_narrative_text(aggregated: Dict[str, Any]) -> str:
+        """Return best-effort final narrative text for fact checks."""
+        # Prefer reporter output as final answer.
+        reporter = aggregated.get("reporter")
+        if isinstance(reporter, dict):
+            nar = reporter.get("narrative")
+            if isinstance(nar, dict) and nar.get("text"):
+                return str(nar["text"])
+            if isinstance(nar, str):
+                return nar
+
+        # Fallback: any narrative from other agents.
+        for payload in aggregated.values():
+            if not isinstance(payload, dict):
+                continue
+            nar = payload.get("narrative")
+            if isinstance(nar, dict) and nar.get("text"):
+                return str(nar["text"])
+            if isinstance(nar, str) and nar.strip():
+                return nar
+        return ""
+
+    @staticmethod
+    def _derive_validity_from_confidence_and_issues(raw: Dict[str, Any]) -> bool:
+        """
+        Final pass/fail decision from integral confidence:
+        - always fail on critical/high issues
+        - otherwise pass when confidence >= threshold
+        """
+        issues = raw.get("issues", []) or []
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            severity = str(issue.get("severity", "")).lower()
+            if severity in {"critical", "high"}:
+                return False
+
+        try:
+            confidence = float(raw.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
+        return confidence >= _CONFIDENCE_PASS_THRESHOLD
+
+    @staticmethod
     def _parse_json(response: str) -> Dict[str, Any]:
         m = re.search(r'\{[\s\S]*\}', response)
         if m:
@@ -607,11 +755,21 @@ class QualityGateAgent(BaseAgent):
         issues: List[Finding] = []
         for iss in raw.get("issues", []):
             if isinstance(iss, dict):
+                sev_raw = str(iss.get("severity", "warning")).lower()
+                sev_norm = {
+                    "critical": "critical",
+                    "high": "high",
+                    "medium": "medium",
+                    "low": "low",
+                    "info": "info",
+                    # LLM often returns "warning", but Finding.severity does not support it.
+                    "warning": "medium",
+                }.get(sev_raw, "medium")
                 issues.append(
                     Finding(
                         type="validation_issue",
                         text=iss.get("message", ""),
-                        severity=iss.get("severity", "warning"),  # type: ignore[arg-type]
+                        severity=sev_norm,  # type: ignore[arg-type]
                     )
                 )
 
@@ -652,7 +810,7 @@ class QualityGateAgent(BaseAgent):
                 )
 
         return ValidationResult(
-            valid=raw.get("valid", True),
+            valid=self._derive_validity_from_confidence_and_issues(raw),
             confidence=raw.get("confidence", 0.5),
             message=raw.get("message"),
             issues=issues,

@@ -10,12 +10,11 @@ logger = logging.getLogger(__name__)
 
 
 class RedisConfig:
-    """Redis configuration для Multi-Agent Message Bus."""
+    """Redis configuration для Multi-Agent Message Bus.
+    REDIS_URL читается в runtime из settings, чтобы учитывать .env.local при локальном запуске.
+    """
     
-    # Parse Redis URL from settings
-    # Используем тот же REDIS_URL что и основное приложение, но с другой DB
-    REDIS_URL: str = settings.REDIS_URL
-    REDIS_AGENT_DB: int = getattr(settings, 'REDIS_AGENT_DB', 1)  # Отдельная DB для агентов
+    REDIS_AGENT_DB: int = 1  # Отдельная DB для агентов (переопределяется через settings при необходимости)
     
     # Connection pool settings
     MAX_CONNECTIONS: int = 50
@@ -30,10 +29,13 @@ class RedisConfig:
     
     @classmethod
     def get_redis_url(cls) -> str:
-        """Получить Redis URL для подключения с нужной DB."""
-        # Заменяем DB в URL если нужно
-        base_url = cls.REDIS_URL.rsplit('/', 1)[0]  # Убираем /0 или /1 в конце
-        return f"{base_url}/{cls.REDIS_AGENT_DB}"
+        """Получить Redis URL для подключения с нужной DB (читает settings в runtime)."""
+        redis_url = getattr(settings, "REDIS_URL", "redis://localhost:6379/0")
+        agent_db = getattr(settings, "REDIS_AGENT_DB", cls.REDIS_AGENT_DB)
+        # redis://host:port/db — убираем номер DB в конце, подставляем agent_db
+        parts = redis_url.rstrip("/").rsplit("/", 1)
+        base_url = parts[0] if len(parts) == 2 and parts[1].isdigit() else redis_url.rstrip("/")
+        return f"{base_url}/{agent_db}"
     
     @classmethod
     async def create_redis_client(cls) -> aioredis.Redis:

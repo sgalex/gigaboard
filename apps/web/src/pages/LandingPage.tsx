@@ -92,9 +92,9 @@ const HeroSection = () => (
                 </span>
             </div>
 
-            {/* Description */}
+            {/* Description: что такое GigaBoard — коротко */}
             <p className="mx-auto max-w-3xl text-xl leading-relaxed text-gray-200 sm:text-2xl mb-14">
-                <strong className="text-white">GigaBoard</strong> — Data-Centric Canvas: бесконечное полотно, где вы строите аналитические пайплайны из источников, трансформаций и виджетов. Доски для анализа, дашборды для презентаций. AI в диалоге создаёт трансформации и визуализации за минуты.
+                <strong className="text-white">GigaBoard</strong> — аналитика на одном полотне: источники, трансформации, виджеты и дашборды. Описываете задачу — AI обрабатывает данные и строит визуализации.
             </p>
 
             {/* Buttons */}
@@ -1123,7 +1123,7 @@ const TechStackSection = () => {
                         <p className="mt-1 text-xs text-muted-foreground">От источника к результату</p>
                     </div>
                     <div className="rounded-lg border border-accent/20 bg-accent/5 p-4 text-center">
-                        <p className="text-sm font-medium text-foreground">9 AI-помощников</p>
+                        <p className="text-sm font-medium text-foreground">9 ИИ-ассистентов</p>
                         <p className="mt-1 text-xs text-muted-foreground">Работают как команда</p>
                     </div>
                     <div className="rounded-lg border border-success/20 bg-success/5 p-4 text-center">
@@ -1283,7 +1283,7 @@ const Footer = () => (
             </div>
             <div className="mt-8 text-center">
                 <p className="text-sm text-muted-foreground">
-                    Ваши данные. Ваши инсайты. Ваш AI-помощник.
+                    Ваши данные. Ваши инсайты. Ваш ИИ-ассистент.
                 </p>
             </div>
         </div>
@@ -1292,24 +1292,24 @@ const Footer = () => (
 
 // Header/Navbar
 const Header = () => (
-    <header className="sticky top-0 z-50 border-b border-border/50 bg-background/80 backdrop-blur-xl shadow-sm">
-        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-            <Logo variant="dark" size={36} className="shrink-0" />
+    <header className="sticky top-0 z-50 border-b border-gray-200 bg-white backdrop-blur-xl shadow-lg">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6 text-gray-900">
+            <Logo variant="light" size={36} className="shrink-0 [&>span:last-child]:!text-black" />
 
             <nav className="hidden items-center gap-6 lg:flex">
-                <a href="#features" className="text-sm font-medium text-muted-foreground transition-all hover:text-primary hover:scale-110">
+                <a href="#features" className="text-sm font-medium text-gray-600 transition-all hover:text-primary hover:scale-110">
                     Возможности
                 </a>
-                <a href="#realtime" className="text-sm font-medium text-muted-foreground transition-all hover:text-primary hover:scale-110">
+                <a href="#realtime" className="text-sm font-medium text-gray-600 transition-all hover:text-primary hover:scale-110">
                     Real-time
                 </a>
-                <a href="#agents" className="text-sm font-medium text-muted-foreground transition-all hover:text-primary hover:scale-110">
+                <a href="#agents" className="text-sm font-medium text-gray-600 transition-all hover:text-primary hover:scale-110">
                     AI-агенты
                 </a>
-                <a href="#use-cases" className="text-sm font-medium text-muted-foreground transition-all hover:text-primary hover:scale-110">
+                <a href="#use-cases" className="text-sm font-medium text-gray-600 transition-all hover:text-primary hover:scale-110">
                     Примеры
                 </a>
-                <a href="#security" className="text-sm font-medium text-muted-foreground transition-all hover:text-primary hover:scale-110">
+                <a href="#security" className="text-sm font-medium text-gray-600 transition-all hover:text-primary hover:scale-110">
                     Безопасность
                 </a>
             </nav>

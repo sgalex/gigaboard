@@ -64,6 +64,7 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
     const pushToDataStack = useFilterStore((state) => state.pushToDataStack)
     const getConditionsByInitiator = useFilterStore((state) => state.getConditionsByInitiator)
     const removeCondition = useFilterStore((state) => state.removeCondition)
+    const setFilters = useFilterStore((state) => state.setFilters)
     const dimensions = useFilterStore((state) => state.dimensions)
 
     useEffect(() => {
@@ -88,10 +89,15 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
 
             const { type, payload } = event.data || {}
             if (!payload) return
-            const { dimension, field, value, contentNodeId, widgetId, tables } = payload
+            const { dimension, field, value, contentNodeId, widgetId, tables, filter } = payload
             switch (type) {
                 case 'widget:pushDataStack':
                     if (widgetId && tables) pushToDataStack(widgetId, tables)
+                    break
+                case 'widget:setFilterExpression':
+                    if (filter && typeof filter === 'object' && typeof filter.type === 'string') {
+                        setFilters(filter)
+                    }
                     break
                 case 'widget:click':
                 case 'widget:addFilter':
@@ -111,7 +117,7 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
         }
         window.addEventListener('message', onMessage)
         return () => window.removeEventListener('message', onMessage)
-    }, [handleWidgetClick, handleToggleFilter, handleRemoveFilter, pushToDataStack])
+    }, [handleWidgetClick, handleToggleFilter, handleRemoveFilter, pushToDataStack, setFilters])
 
     // Use React Flow dimensions (updated in real-time during resize) or fallback to node dimensions
     const nodeWidth = width ?? node.width ?? 320

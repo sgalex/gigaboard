@@ -106,25 +106,64 @@ function snapValueToGrid(val: number, gridSize: number = GRID_SIZE): number {
     return Math.round(val / gridSize) * gridSize
 }
 
+function getDefaultSizeByNodeType(type?: string): { width: number; height: number } {
+    switch (type) {
+        case 'widgetNode':
+            return { width: 400, height: 300 }
+        case 'commentNode':
+            return { width: 240, height: 120 }
+        case 'sourceNode':
+            return { width: 320, height: 200 }
+        case 'contentNode':
+            return { width: 320, height: 200 }
+        default:
+            return { width: 320, height: 200 }
+    }
+}
+
+function getNodeRenderedSize(
+    node: Node | undefined,
+    fallback: { width: number; height: number }
+): { width: number; height: number } {
+    if (!node) return fallback
+
+    const measured = (node as Node & { measured?: { width?: number; height?: number } }).measured
+    const styleWidth = typeof node.style?.width === 'number' ? node.style.width : undefined
+    const styleHeight = typeof node.style?.height === 'number' ? node.style.height : undefined
+
+    const width = node.width ?? measured?.width ?? styleWidth ?? fallback.width
+    const height = node.height ?? measured?.height ?? styleHeight ?? fallback.height
+
+    return {
+        width: Math.max(1, Math.round(width)),
+        height: Math.max(1, Math.round(height)),
+    }
+}
+
 /** Build bounds for all nodes except excludeId from React Flow nodes (position + style). */
 function getOtherNodesBounds(
     nodes: Node[],
     excludeId: string
-): { x: number; y: number; width: number; height: number }[] {
+): NodeBounds[] {
     return nodes
         .filter((n) => n.id !== excludeId)
-        .map((n) => ({
-            x: n.position.x,
-            y: n.position.y,
-            width: (typeof n.style?.width === 'number' ? n.style.width : 320) as number,
-            height: (typeof n.style?.height === 'number' ? n.style.height : 200) as number,
-        }))
+        .map((n) => {
+            const fallback = getDefaultSizeByNodeType(n.type)
+            const { width, height } = getNodeRenderedSize(n, fallback)
+            return {
+                id: n.id,
+                x: n.position.x,
+                y: n.position.y,
+                width,
+                height,
+            }
+        })
 }
 
 /** Smart guide snap: returns snapped { x, y } and guide lines to draw (dashboard logic). */
 function computeSmartGuideSnap(
     movingRect: { x: number; y: number; width: number; height: number },
-    otherBounds: { x: number; y: number; width: number; height: number }[],
+    otherBounds: NodeBounds[],
     threshold: number = SNAP_THRESHOLD
 ): { x: number; y: number; guides: GuideLine[] } {
     const guides: GuideLine[] = []
@@ -246,7 +285,7 @@ function computeResizeSmartGuideSnap(
     y: number,
     width: number,
     height: number,
-    otherBounds: { x: number; y: number; width: number; height: number }[],
+    otherBounds: NodeBounds[],
     threshold: number = SNAP_THRESHOLD
 ): { width: number; height: number } {
     let newWidth = width
@@ -275,7 +314,7 @@ function computeResizeSmartGuideSnap(
 /** Строит линии направляющих для прямоугольника (для отображения при ресайзе). */
 function getGuidesForRect(
     rect: { x: number; y: number; width: number; height: number },
-    otherBounds: { x: number; y: number; width: number; height: number }[]
+    otherBounds: NodeBounds[]
 ): GuideLine[] {
     const guides: GuideLine[] = []
     const edges = {
@@ -610,7 +649,7 @@ export function BoardCanvas() {
     const initialLoadDone = useRef(false)
     const [isCapturingThumbnail, setIsCapturingThumbnail] = useState(false)
 
-    const { setSocket } = useAIAssistantStore()
+    const { setSocket, setSelectedNodes } = useAIAssistantStore()
 
     // Connect to WebSocket for real-time collaboration
     const { socket, isConnected } = useBoardSocket(boardId)
@@ -621,6 +660,12 @@ export function BoardCanvas() {
             setSocket(socket)
         }
     }, [socket, setSocket])
+
+    // Keep selected nodes in sync with AI Assistant context.
+    useEffect(() => {
+        const selectedIds = nodes.filter((n) => n.selected).map((n) => n.id)
+        setSelectedNodes(selectedIds)
+    }, [nodes, setSelectedNodes])
 
     // Fetch all nodes and edges when board loads
     useEffect(() => {
@@ -834,25 +879,9 @@ export function BoardCanvas() {
                 let x = snapToGrid ? snapValueToGrid(change.position.x) : Math.round(change.position.x)
                 let y = snapToGrid ? snapValueToGrid(change.position.y) : Math.round(change.position.y)
 
-                const widgetNode = widgetNodes.find((n) => n.id === change.id)
-                const commentNode = commentNodes.find((n) => n.id === change.id)
-                const sourceNode = sourceNodes.find((n) => n.id === change.id)
-                const contentNode = contentNodes.find((n) => n.id === change.id)
-                let nodeWidth = 320
-                let nodeHeight = 200
-                if (widgetNode) {
-                    nodeWidth = widgetNode.width || 400
-                    nodeHeight = widgetNode.height || 300
-                } else if (commentNode) {
-                    nodeWidth = commentNode.width || 300
-                    nodeHeight = commentNode.height || 180
-                } else if (sourceNode) {
-                    nodeWidth = sourceNode.width || 280
-                    nodeHeight = sourceNode.height || 150
-                } else if (contentNode) {
-                    nodeWidth = contentNode.width || 320
-                    nodeHeight = contentNode.height || 200
-                }
+                const movingNode = nodes.find((n) => n.id === change.id)
+                const fallback = getDefaultSizeByNodeType(movingNode?.type)
+                const { width: nodeWidth, height: nodeHeight } = getNodeRenderedSize(movingNode, fallback)
 
                 if (smartGuides) {
                     const effectiveNodes = nodes.map((n) =>
@@ -920,27 +949,13 @@ export function BoardCanvas() {
                     let x = Math.round(pos.x)
                     let y = Math.round(pos.y)
 
-                    let nodeWidth = 320
-                    let nodeHeight = 200
-                    if (widgetNode) {
-                        nodeWidth = widgetNode.width || 400
-                        nodeHeight = widgetNode.height || 300
-                    } else if (commentNode) {
-                        nodeWidth = commentNode.width || 300
-                        nodeHeight = commentNode.height || 180
-                    } else if (sourceNode) {
-                        nodeWidth = sourceNode.width || 280
-                        nodeHeight = sourceNode.height || 150
-                    } else if (contentNode) {
-                        nodeWidth = contentNode.width || 320
-                        nodeHeight = contentNode.height || 200
-                    }
-
-                    const otherNodes: NodeBounds[] = []
-                    widgetNodes.forEach(n => { if (n.id !== change.id) otherNodes.push({ id: n.id, x: n.x || 0, y: n.y || 0, width: n.width || 400, height: n.height || 300 }) })
-                    commentNodes.forEach(n => { if (n.id !== change.id) otherNodes.push({ id: n.id, x: n.x || 0, y: n.y || 0, width: n.width || 300, height: n.height || 180 }) })
-                    sourceNodes.forEach(n => { if (n.id !== change.id) otherNodes.push({ id: n.id, x: n.position?.x || 0, y: n.position?.y || 0, width: n.width || 280, height: n.height || 150 }) })
-                    contentNodes.forEach(n => { if (n.id !== change.id) otherNodes.push({ id: n.id, x: n.position?.x || 0, y: n.position?.y || 0, width: n.width || 320, height: n.height || 200 }) })
+                    const movingNode = nodes.find((n) => n.id === change.id)
+                    const fallback = getDefaultSizeByNodeType(movingNode?.type)
+                    const { width: nodeWidth, height: nodeHeight } = getNodeRenderedSize(movingNode, fallback)
+                    const effectiveNodes = nodes.map((n) =>
+                        n.id === change.id ? { ...n, position: { x, y } } : n
+                    )
+                    const otherNodes = getOtherNodesBounds(effectiveNodes, change.id)
 
                     const checkCollision = (a: { x: number; y: number; width: number; height: number }, b: NodeBounds, pad = 40) =>
                         !(a.x + a.width + pad < b.x || a.x > b.x + b.width + pad || a.y + a.height + pad < b.y || a.y > b.y + b.height + pad)
@@ -1061,8 +1076,8 @@ export function BoardCanvas() {
             const allNodesWithDragPosition = nodes.map((n) =>
                 n.id === node.id ? { ...n, position: node.position } : n
             )
-            const w = typeof node.style?.width === 'number' ? node.style.width : 320
-            const h = typeof node.style?.height === 'number' ? node.style.height : 200
+            const fallback = getDefaultSizeByNodeType(node.type)
+            const { width: w, height: h } = getNodeRenderedSize(node, fallback)
             const rect = { x: node.position.x, y: node.position.y, width: w, height: h }
             const otherBounds = getOtherNodesBounds(allNodesWithDragPosition, node.id)
             const { guides } = computeSmartGuideSnap(rect, otherBounds)

@@ -1,0 +1,17 @@
+# Dev-сервер Vite (docker-compose.dev.yml). Сборка из корня монорепозитория — для copy-libs (echarts, шрифты).
+FROM node:20-alpine
+
+WORKDIR /workspace
+
+COPY package.json package-lock.json ./
+COPY apps/web/package.json ./apps/web/
+
+RUN npm ci
+
+COPY apps/web ./apps/web
+
+WORKDIR /workspace/apps/web
+
+EXPOSE 5173
+
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]

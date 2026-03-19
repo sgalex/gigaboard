@@ -161,13 +161,22 @@ export const TransformSuggestionsPanel = ({
             <div className="text-xs font-medium mb-1.5 text-muted-foreground">✨ Рекомендации трансформаций</div>
 
             {/* Compact tag view with tooltips */}
-            <div className="flex flex-wrap gap-1.5">
-                {suggestions.map((suggestion) => {
+            <div className="grid w-full grid-cols-6 gap-1.5">
+                {suggestions.map((suggestion, index) => {
                     const Icon = TYPE_ICONS[suggestion.type] || Lightbulb
+                    const n = suggestions.length
+                    const r = n % 3
+                    const colSpan =
+                        r === 1 && index === n - 1
+                            ? 'col-span-6'
+                            : r === 2 && index >= n - 2
+                              ? 'col-span-3'
+                              : 'col-span-2'
 
                     return (
                         <div
                             key={suggestion.id}
+                            className={cn('min-w-0 w-full', colSpan)}
                             ref={(el) => (badgeRefs.current[suggestion.id] = el)}
                             onMouseEnter={(e) => {
                                 const rect = e.currentTarget.getBoundingClientRect()
@@ -181,13 +190,15 @@ export const TransformSuggestionsPanel = ({
                         >
                             <Badge
                                 className={cn(
-                                    'cursor-pointer text-[10px] px-2 py-0.5 flex items-center gap-1 transition-all max-w-[140px]',
+                                    'w-full min-w-0 cursor-pointer text-[11px] px-3 py-0.5 flex items-center gap-1.5 transition-all justify-start',
                                     TYPE_COLORS[suggestion.type]
                                 )}
                                 onClick={() => onSuggestionClick(suggestion.prompt)}
                             >
                                 <Icon className="w-2.5 h-2.5 flex-shrink-0" />
-                                <span className="truncate">{suggestion.label}</span>
+                                <span className="truncate min-w-0 flex-1">
+                                    {suggestion.label}
+                                </span>
                             </Badge>
                         </div>
                     )

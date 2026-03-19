@@ -91,7 +91,7 @@ async def test_context_conversation():
         messages = [
             {
                 "role": "system",
-                "content": f"""Ты AI помощник в GigaBoard для анализа данных.
+                "content": f"""Ты ИИ-ассистент в GigaBoard для анализа данных.
                 
 Контекст текущей доски:
 - Название: {board_context['board_name']}

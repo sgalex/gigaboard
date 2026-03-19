@@ -21,6 +21,9 @@ from .base_controller import BaseController, ControllerResult
 
 logger = logging.getLogger("controller.document_extraction")
 
+# Placeholder board_id для file-level сценариев (orchestrator требует board_id)
+DOCUMENT_PLACEHOLDER_BOARD_ID = "00000000-0000-0000-0000-000000000002"
+
 
 class DocumentExtractionController(BaseController):
     """
@@ -69,6 +72,12 @@ class DocumentExtractionController(BaseController):
         chat_history = ctx.get("chat_history", [])
         page_count = ctx.get("page_count")
 
+        if not str(document_text or "").strip():
+            return self._error_result(
+                message="Пустой текст документа: сначала выполните анализ файла (analyze-document).",
+                execution_time_ms=self._elapsed_ms(start_time),
+            )
+
         # 1. Сформировать обогащённый запрос с контекстом документа
         enriched_request = self._build_enriched_request(
             user_message=user_message,
@@ -80,11 +89,28 @@ class DocumentExtractionController(BaseController):
         )
 
         # 2. Подготовить контекст для Orchestrator
+        doc_for_agents = document_text[:20000]
         orchestrator_context: Dict[str, Any] = {
             "task_type": "document_extraction",
             "document_type": document_type,
             "filename": filename,
             "chat_history": chat_history,
+            # Важно: Structurizer читает вход именно из input_data_preview/content_nodes_data,
+            # а не из user_request. Без этих полей он отвечает "No input content provided...".
+            "input_data_preview": {
+                "document_text": {
+                    "columns": ["document_text"],
+                    "sample_rows": [{"document_text": doc_for_agents}],
+                }
+            },
+            "content_nodes_data": [
+                {
+                    "name": filename,
+                    "content": {
+                        "text": doc_for_agents,
+                    },
+                }
+            ],
         }
 
         if existing_tables:
@@ -94,7 +120,7 @@ class DocumentExtractionController(BaseController):
         # 3. Вызвать Orchestrator
         orch_result = await self._call_orchestrator(
             user_request=enriched_request,
-            board_id=board_id,
+            board_id=board_id or DOCUMENT_PLACEHOLDER_BOARD_ID,
             user_id=user_id,
             context=orchestrator_context,
         )

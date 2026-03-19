@@ -9,6 +9,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 from datetime import datetime
+from uuid import UUID
 import json
 
 T = TypeVar("T")
@@ -284,6 +285,160 @@ class BaseAgent(ABC):
             error_message=error_message,
             suggestions=suggestions,
         )
+
+    @staticmethod
+    def _detect_response_style(user_request: str) -> str:
+        """
+        Определяет желаемую "плотность" ответа по формулировке запроса.
+        Возвращает: concise | normal | detailed.
+        """
+        low = (user_request or "").lower()
+        concise_markers = (
+            "кратко",
+            "коротко",
+            "только ответ",
+            "без деталей",
+            "одним предложением",
+        )
+        detailed_markers = (
+            "подробно",
+            "детально",
+            "развернуто",
+            "с рекомендациями",
+            "с выводами",
+            "с анализом",
+        )
+        if any(m in low for m in concise_markers):
+            return "concise"
+        if any(m in low for m in detailed_markers):
+            return "detailed"
+        return "normal"
+
+    @staticmethod
+    def _is_direct_fact_question(user_request: str) -> bool:
+        """Узкий фактологический вопрос: ожидается короткий answer-first формат."""
+        low = (user_request or "").lower()
+        has_fact = any(
+            p in low
+            for p in (
+                "какой самый",
+                "кто самый",
+                "самый ходовой",
+                "самый продаваем",
+                "топ-1",
+                "лидер",
+                "сколько",
+            )
+        )
+        has_entity = any(k in low for k in ("товар", "продукт", "бренд", "модель", "компания"))
+        broad_markers = ("рекомендац", "варианты", "исследуй")
+        return has_fact and has_entity and not any(m in low for m in broad_markers)
+
+    def _build_global_output_policy(self, context: Optional[Dict[str, Any]]) -> str:
+        """
+        Глобальная политика формата вывода для ВСЕХ агентов:
+        объём результата зависит от задачи/интента, а НЕ от объёма контекста.
+        """
+        original_user_request = ""
+        if context:
+            original_user_request = str(
+                context.get("original_user_request")
+                or context.get("user_request")
+                or ""
+            )
+        style = self._detect_response_style(original_user_request)
+        direct_fact_mode = self._is_direct_fact_question(original_user_request)
+
+        if direct_fact_mode:
+            style_part = (
+                "- RESPONSE STYLE: concise-fact.\n"
+                "- Начни с прямого ответа в первой строке.\n"
+                "- Добавь только необходимые подтверждающие детали (минимум)."
+            )
+        elif style == "concise":
+            style_part = (
+                "- RESPONSE STYLE: concise.\n"
+                "- Дай компактный ответ без лишних разделов и повторов."
+            )
+        elif style == "detailed":
+            style_part = (
+                "- RESPONSE STYLE: detailed.\n"
+                "- Допустим развёрнутый ответ, но только по сути задачи."
+            )
+        else:
+            style_part = (
+                "- RESPONSE STYLE: normal.\n"
+                "- Балансируй краткость/детальность по запросу, без отчётной «воды»."
+            )
+
+        return (
+            "GLOBAL OUTPUT CONTRACT (обязательно):\n"
+            "- Объём и форма результата определяются задачей и пользовательским интентом,\n"
+            "  а не количеством переданного контекста, таблиц, истории или служебных данных.\n"
+            "- Игнорируй «шум» контекста: не добавляй дополнительные секции/пункты только потому,\n"
+            "  что контекст большой.\n"
+            "- Отвечай строго в требуемом контракте шага (JSON/schema/format), без лишнего текста.\n"
+            f"{style_part}"
+        )
+
+    def _inject_global_output_policy(
+        self,
+        messages: List[Dict[str, str]],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, str]]:
+        """
+        Встраивает глобальную политику в system-сообщение перед вызовом LLM.
+        """
+        policy = self._build_global_output_policy(context)
+        patched: List[Dict[str, str]] = [dict(m) for m in (messages or [])]
+        if not patched:
+            return [{"role": "system", "content": policy}]
+        first = patched[0]
+        if first.get("role") == "system":
+            first_content = first.get("content", "")
+            if "GLOBAL OUTPUT CONTRACT" not in first_content:
+                first["content"] = f"{first_content}\n\n{policy}"
+            return patched
+        return [{"role": "system", "content": policy}, *patched]
+
+    async def _call_llm(
+        self,
+        messages: List[Dict[str, str]],
+        context: Optional[Dict[str, Any]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """
+        Вызов LLM: при наличии user_id в context и llm_router — через LLMRouter
+        (учёт пользовательских настроек провайдера), иначе через self.gigachat.
+        """
+        llm_router = getattr(self, "llm_router", None)
+        gigachat = getattr(self, "gigachat", None)
+        effective_messages = self._inject_global_output_policy(messages, context)
+        user_id = None
+        if context and context.get("user_id"):
+            uid = context["user_id"]
+            user_id = UUID(uid) if isinstance(uid, str) else uid
+        if llm_router and user_id is not None:
+            from app.services.llm_router import LLMCallParams, LLMMessage
+            params = LLMCallParams(
+                messages=[
+                    LLMMessage(role=m.get("role", "user"), content=m.get("content", ""))
+                    for m in effective_messages
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return await llm_router.chat_completion(
+                user_id=user_id, params=params, agent_key=self.agent_name
+            )
+        if gigachat is None:
+            raise RuntimeError(f"{self.agent_name}: neither llm_router nor gigachat available")
+        return await gigachat.chat_completion(
+            messages=effective_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
     
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -307,17 +462,19 @@ class BaseAgent(ABC):
         messages: List[Dict[str, str]],
         parse_fn: Callable[[Any], T],
         *,
+        context: Optional[Dict[str, Any]] = None,
         temperature: float = 0.3,
         max_tokens: Optional[int] = None,
         max_retries: Optional[int] = None,
     ) -> T:
-        """Вызывает GigaChat и парсит ответ; при ошибке парсинга повторяет с уточнением.
+        """Вызывает LLM (через роутер или GigaChat) и парсит ответ; при ошибке парсинга повторяет с уточнением.
 
         Args:
-            messages: Список сообщений для GigaChat (будет мутирован при retry).
+            messages: Список сообщений для LLM (будет мутирован при retry).
             parse_fn: Функция парсинга ответа → результат. Должна бросить исключение
                        (json.JSONDecodeError, ValueError, ...) при невалидном ответе.
-            temperature: Температура GigaChat.
+            context: Контекст с user_id для маршрутизации LLM.
+            temperature: Температура.
             max_tokens: Макс. токенов (если None — не передаётся).
             max_retries: Сколько раз повторить (по умолчанию MAX_GIGACHAT_PARSE_RETRIES).
 
@@ -327,19 +484,16 @@ class BaseAgent(ABC):
         Raises:
             Последнее исключение от parse_fn, если все попытки исчерпаны.
         """
-        gigachat = getattr(self, "gigachat", None)
-        if gigachat is None:
-            raise RuntimeError(f"{self.agent_name}: gigachat service not initialized")
-
         retries = max_retries if max_retries is not None else self.MAX_GIGACHAT_PARSE_RETRIES
         last_error: Optional[Exception] = None
 
         for attempt in range(1 + retries):
-            kwargs: Dict[str, Any] = {"messages": messages, "temperature": temperature}
-            if max_tokens is not None:
-                kwargs["max_tokens"] = max_tokens
-
-            response = await gigachat.chat_completion(**kwargs)
+            response = await self._call_llm(
+                messages,
+                context=context,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
 
             try:
                 return parse_fn(response)

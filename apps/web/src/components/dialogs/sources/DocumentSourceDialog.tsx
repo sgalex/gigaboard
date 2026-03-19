@@ -15,6 +15,8 @@ import {
     FileText, Upload, Check, Loader2, X, FileType, Table2,
     AlignLeft, AlertTriangle, Send, MessageSquare,
 } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
@@ -68,6 +70,12 @@ const DOC_TYPE_COLORS: Record<string, string> = {
     docx: 'text-blue-500',
     txt: 'text-gray-500',
 }
+
+const QUICK_PROMPTS = [
+    'Извлеки все таблицы с финансовыми показателями',
+    'Найди ключевые KPI и собери их в одну таблицу',
+    'Извлеки структуру: раздел, метрика, значение, период',
+]
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
@@ -208,7 +216,7 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
     // ═══════════════════════════════════════════════════════════════
 
     const handleSendMessage = async (messageText?: string) => {
-        const textToSend = messageText || inputValue.trim()
+        const textToSend = (messageText ?? inputValue).trim()
         if (!textToSend || isGenerating || !analysis) return
 
         // 1. Add user message
@@ -327,10 +335,22 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                 name: file?.name?.replace(/\.(pdf|docx|txt|md)$/i, '') || analysis.filename,
             }
 
+            const normalizedTables = extractedTables.map((table, idx) => ({
+                name: table.name || `table_${idx + 1}`,
+                columns: table.columns || [],
+                rows: table.rows || [],
+                row_count: table.row_count ?? (table.rows?.length || 0),
+                column_count: table.columns?.length || 0,
+            }))
+            const sourceData = {
+                text: analysis.text || '',
+                tables: normalizedTables,
+            }
+
             if (mode === 'edit' && existingSource) {
                 await update(existingSource.id, config, metadata)
             } else {
-                await create(config, metadata)
+                await create(config, metadata, sourceData)
                 notify.success(`Источник «${file?.name}» создан`)
             }
         } catch (error) {
@@ -345,35 +365,16 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
 
     const renderMessageContent = (msg: ChatMessage) => {
         const { content, contentType = 'text' } = msg
-
         if (contentType === 'markdown') {
-            const lines = content.split('\n')
             return (
-                <div className="space-y-0.5">
-                    {lines.map((line, i) => {
-                        if (line.startsWith('### ')) return <h3 key={i} className="text-sm font-semibold mt-1.5 mb-0.5">{line.substring(4)}</h3>
-                        if (line.startsWith('## ')) return <h2 key={i} className="text-sm font-bold mt-1.5 mb-0.5">{line.substring(3)}</h2>
-                        if (line.startsWith('# ')) return <h1 key={i} className="text-sm font-bold mt-1.5 mb-0.5">{line.substring(2)}</h1>
-                        if (line.match(/^[•\-*]\s/)) return <li key={i} className="ml-4 list-disc">{renderInlineMarkdown(line.substring(2))}</li>
-                        if (line.match(/^\d+\.\s/)) return <li key={i} className="ml-4 list-decimal">{renderInlineMarkdown(line.replace(/^\d+\.\s/, ''))}</li>
-                        if (line.includes('**')) {
-                            return <p key={i} className="my-0.5">{renderInlineMarkdown(line)}</p>
-                        }
-                        if (line.trim() === '') return <br key={i} />
-                        return <p key={i} className="my-0.5">{line}</p>
-                    })}
+                <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {content}
+                    </ReactMarkdown>
                 </div>
             )
         }
-
-        return <span className="whitespace-pre-wrap">{content}</span>
-    }
-
-    const renderInlineMarkdown = (text: string) => {
-        const parts = text.split('**')
-        return parts.map((part, j) =>
-            j % 2 === 1 ? <strong key={j}>{part}</strong> : <span key={j}>{part}</span>
-        )
+        return <span className="whitespace-pre-wrap break-words">{content}</span>
     }
 
     const isValid = !!analysis
@@ -457,6 +458,10 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                         )}
                     </div>
 
+                    <div className="px-3 py-2 bg-muted/40 text-xs text-muted-foreground border-b shrink-0">
+                        Опишите, какие данные нужно извлечь из документа
+                    </div>
+
                     {/* ── Chat Messages ── */}
                     <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-2 min-h-0">
                         {chatMessages.length === 0 && !isAnalyzing ? (
@@ -475,9 +480,9 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                                         className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}
                                     >
                                         <div className={cn(
-                                            'max-w-[85%] rounded-lg px-3 py-2 text-sm',
+                                            'max-w-[90%] rounded-lg px-3 py-2 text-sm',
                                             msg.role === 'user'
-                                                ? 'bg-blue-500 text-white'
+                                                ? 'bg-primary/15'
                                                 : 'bg-muted'
                                         )}>
                                             {renderMessageContent(msg)}
@@ -508,6 +513,22 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
 
                     {/* ── Chat Input ── */}
                     <div className="p-2 border-t shrink-0">
+                        {analysis && !isGenerating && (
+                            <div className="mb-2 flex flex-wrap gap-1.5">
+                                {QUICK_PROMPTS.map((prompt) => (
+                                    <Button
+                                        key={prompt}
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        className="h-7 text-xs"
+                                        onClick={() => handleSendMessage(prompt)}
+                                    >
+                                        {prompt}
+                                    </Button>
+                                ))}
+                            </div>
+                        )}
                         <div className="flex gap-2 items-end">
                             <Textarea
                                 ref={textareaRef}
@@ -519,8 +540,7 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                                         ? 'Сначала загрузите документ...'
                                         : 'Опишите, какие данные извлечь...'
                                 }
-                                className="min-h-[32px] py-1.5 px-2 resize-none text-sm overflow-hidden"
-                                style={{ height: '32px' }}
+                                className="min-h-[44px] max-h-[100px] resize-none"
                                 disabled={!analysis || isGenerating || isAnalyzing}
                                 rows={1}
                             />
@@ -528,12 +548,12 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                                 onClick={() => handleSendMessage()}
                                 disabled={!inputValue.trim() || isGenerating || !analysis}
                                 size="icon"
-                                className="h-[32px] w-[32px] shrink-0 bg-blue-500 hover:bg-blue-600"
+                                className="h-[44px] w-[44px] shrink-0"
                             >
                                 {isGenerating ? (
-                                    <Loader2 className="w-5 h-5 animate-spin" />
+                                    <Loader2 className="w-4 h-4 animate-spin" />
                                 ) : (
-                                    <Send className="w-5 h-5" />
+                                    <Send className="w-4 h-4" />
                                 )}
                             </Button>
                         </div>

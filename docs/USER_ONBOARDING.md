@@ -848,7 +848,7 @@ export function EmptyBoardState(props: EmptyBoardStateProps) {
 function renderInitialMessage() {
   return (
     <AIMessage>
-      Привет! Я AI помощник GigaBoard.
+      Привет! Я ИИ-ассистент GigaBoard.
       
       Я помогу вам:
       • Загрузить и проанализировать данные

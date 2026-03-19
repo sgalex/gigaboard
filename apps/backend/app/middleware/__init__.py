@@ -1,3 +1,3 @@
-from .auth import get_current_user, get_current_user_with_token
+from .auth import get_current_user, get_current_user_with_token, get_current_admin_user
 
-__all__ = ["get_current_user", "get_current_user_with_token"]
+__all__ = ["get_current_user", "get_current_user_with_token", "get_current_admin_user"]

@@ -444,6 +444,7 @@ function WidgetContent({ item }: { item: DashboardItem }) {
     const handleWidgetClick = useFilterStore((s) => s.handleWidgetClick)
     const handleToggleFilter = useFilterStore((s) => s.handleWidgetToggleFilter)
     const handleRemoveFilter = useFilterStore((s) => s.handleWidgetRemoveFilter)
+    const setFilters = useFilterStore((s) => s.setFilters)
 
     // Listen for widget postMessages — only from THIS iframe
     useEffect(() => {
@@ -453,10 +454,15 @@ function WidgetContent({ item }: { item: DashboardItem }) {
 
             const { type, payload } = event.data || {}
             if (!payload) return
-            const { dimension, field, value, contentNodeId, widgetId, tables } = payload
+            const { dimension, field, value, contentNodeId, widgetId, tables, filter } = payload
             switch (type) {
                 case 'widget:pushDataStack':
                     if (widgetId && tables) pushToDataStack(widgetId, tables)
+                    break
+                case 'widget:setFilterExpression':
+                    if (filter && typeof filter === 'object' && typeof filter.type === 'string') {
+                        setFilters(filter)
+                    }
                     break
                 case 'widget:click':
                 case 'widget:addFilter':
@@ -476,7 +482,7 @@ function WidgetContent({ item }: { item: DashboardItem }) {
         }
         window.addEventListener('message', onMessage)
         return () => window.removeEventListener('message', onMessage)
-    }, [handleWidgetClick, handleToggleFilter, handleRemoveFilter, pushToDataStack, item.id])
+    }, [handleWidgetClick, handleToggleFilter, handleRemoveFilter, pushToDataStack, item.id, setFilters])
 
     // Пересоздаём iframe только при смене данных (filteredNodeData). activeFilters обновляются раньше,
     // к приходу filteredNodeData они уже в сторе — двойная перерисовка исчезает.

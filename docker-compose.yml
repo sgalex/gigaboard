@@ -1,5 +1,4 @@
 services:
-  # PostgreSQL Database
   postgres:
     image: postgres:16-alpine
     container_name: gigaboard-postgres
@@ -20,7 +19,6 @@ services:
       - gigaboard-network
     restart: unless-stopped
 
-  # Redis for caching and Message Bus
   redis:
     image: redis:7-alpine
     container_name: gigaboard-redis
@@ -38,36 +36,35 @@ services:
       - gigaboard-network
     restart: unless-stopped
 
-  # Backend API
   backend:
     build:
       context: .
       dockerfile: apps/backend/Dockerfile
+      target: production
+      args:
+        # Если из Docker VM недоступен pypi.org — задайте в .env, например:
+        # PYPI_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.org/simple}
     container_name: gigaboard-backend
     environment:
-      # Database
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gigaboard}:${POSTGRES_PASSWORD:-gigaboard_secret}@postgres:5432/${POSTGRES_DB:-gigaboard}
 
-      # Redis
       REDIS_URL: redis://redis:6379/0
-      MESSAGE_BUS_REDIS_URL: redis://redis:6379/1
 
-      # JWT
-      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
-      JWT_SECRET: ${JWT_SECRET:-your-jwt-secret-change-in-production}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
 
-      # GigaChat API
-      GIGACHAT_API_KEY: ${GIGACHAT_API_KEY}
-      GIGACHAT_SCOPE: ${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
-
-      # Application
       ENVIRONMENT: ${ENVIRONMENT:-production}
       DEBUG: ${DEBUG:-false}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://127.0.0.1,http://localhost:80,http://127.0.0.1:80,http://localhost:5173,http://127.0.0.1:5173}
 
-      # Uploads
-      UPLOAD_DIR: /app/uploads
-      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-104857600}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-database}
+      STORAGE_MAX_FILE_SIZE_MB: ${STORAGE_MAX_FILE_SIZE_MB:-100}
+
+      # 1 — не выполнять alembic при старте (только для отладки образа)
+      SKIP_ALEMBIC_UPGRADE: ${SKIP_ALEMBIC_UPGRADE:-0}
 
     volumes:
       - uploads_data:/app/uploads
@@ -82,7 +79,6 @@ services:
       - gigaboard-network
     restart: unless-stopped
 
-  # Frontend (Nginx + React)
   frontend:
     build:
       context: .

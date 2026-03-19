@@ -20,6 +20,10 @@
 
 ---
 
+**Актуальность (март 2026):** полный индекс документации — [docs/README.md](docs/README.md), текущий фокус разработки — [.vscode/CURRENT_FOCUS.md](.vscode/CURRENT_FOCUS.md).
+
+---
+
 ## ✨ Что такое GigaBoard?
 
 **GigaBoard** — революционная AI-powered платформа для data analytics, где **искусственный интеллект становится вашим персональным data scientist**. Вместо написания SQL запросов и pandas кода, вы просто говорите что нужно — и AI делает всё за вас.
@@ -48,24 +52,26 @@
 
 ### 1. 🤖 Multi-Agent System V2 — Команда AI-специалистов
 
-Не один AI, а **команда из 9 специализированных агентов** (Orchestrator V2), работающих через **Redis Message Bus**:
+Не один AI, а **9 core-агентов** в контуре **Orchestrator V2** (единый путь выполнения) и обмен через **Redis Message Bus**, плюс **QualityGateAgent** для проверки данных pipeline (`execution_context`, полные DataFrame). См. [MULTI_AGENT.md](docs/MULTI_AGENT.md).
 
-| Агент                   | Роль              | Суперсила                                                       |
-| ----------------------- | ----------------- | --------------------------------------------------------------- |
-| 🧭 **Planner**           | Планировщик       | Декомпозиция задач, адаптивное перепланирование                 |
-| 🔍 **Discovery**         | Поиск             | Поиск в интернете (DuckDuckGo), каталогизация источников        |
-| 📚 **Research**          | Исследователь     | Загрузка контента по URL, извлечение текста                     |
-| 📐 **Structurizer**      | Структуризатор    | Извлечение таблиц из текста/HTML                                |
-| 📊 **Analyst**           | Аналитик          | Анализ данных, инсайты, паттерны                                |
-| 🔄 **TransformCodex**   | Код трансформаций | Генерация Python/pandas кода для обработки данных               |
-| 🎨 **WidgetCodex**      | Код виджетов      | Генерация HTML/CSS/JS визуализаций (Chart.js, ECharts, D3)      |
-| 📈 **Reporter**          | Отчёт             | Финальный ответ пользователю (текст/код)                         |
-| 🎯 **Validator**        | Валидатор         | Проверка результата на соответствие запросу                     |
+| Агент                 | Роль              | Суперсила                                                       |
+| --------------------- | ----------------- | --------------------------------------------------------------- |
+| 🧭 **Planner**        | Планировщик       | Декомпозиция задач, адаптивное перепланирование                 |
+| 🔍 **Discovery**      | Поиск             | Поиск в интернете (DuckDuckGo), каталогизация источников        |
+| 📚 **Research**       | Исследователь     | Загрузка контента по URL, извлечение текста                     |
+| 📐 **Structurizer**   | Структуризатор    | Извлечение таблиц из текста/HTML                                |
+| 📊 **Analyst**        | Аналитик          | Анализ данных, инсайты, паттерны                                |
+| 🔄 **TransformCodex** | Код трансформаций | Генерация Python/pandas кода для обработки данных               |
+| 🎨 **WidgetCodex**    | Код виджетов      | Генерация HTML/CSS/JS визуализаций (Chart.js, ECharts, D3)      |
+| 📈 **Reporter**       | Отчёт             | Финальный ответ пользователю (текст/код)                        |
+| 🎯 **Validator**      | Валидатор         | Проверка результата на соответствие запросу                     |
 
-Плюс **5 satellite-контроллеров**: TransformationController, WidgetController, AIAssistantController, TransformSuggestionsController, WidgetSuggestionsController.
+Отдельно в pipeline подключается **QualityGateAgent** (проверка данных в `execution_context`, согласованность с шагами анализа).
+
+**6 satellite-контроллеров** (UI-сценарии → ядро): **TransformationController**, **TransformSuggestionsController**, **WidgetController**, **WidgetSuggestionsController**, **AIAssistantController**, **ResearchController** (источник AI Research, `/research/chat`).
 
 **Пример workflow:**  
-Пользователь: «Покажи продажи по регионам» → Planner → Analyst → TransformCodex (код) → WidgetCodex (виджет) → Validator → интерактивная визуализация на канвасе.
+Пользователь: «Покажи продажи по регионам» → Planner → Analyst → TransformCodex (код) → WidgetCodex (виджет) → Validator / QualityGate → интерактивная визуализация на канвасе.
 
 ### 2. 🧩 Source-Content Architecture — Прозрачный Data Lineage
 
@@ -270,32 +276,15 @@ flowchart LR
 
 ---
 
-## 🤖 Multi-Agent System V2 — Under the Hood
+## 🤖 Multi-Agent System V2 — технические детали
 
-**9 core-агентов** + **5 satellite-контроллеров**, оркестрация через **Orchestrator V2** (Single Path) и **Redis Message Bus**.
-
-### Агенты и роли
-
-| Агент               | Роль           | Возможности                                                       |
-| ------------------- | -------------- | ----------------------------------------------------------------- |
-| 🧭 **Planner**       | План           | Декомпозиция запроса, адаптивное перепланирование                 |
-| 🔍 **Discovery**    | Поиск          | DuckDuckGo, каталогизация источников                              |
-| 📚 **Research**     | Исследование   | Загрузка контента по URL, извлечение текста                       |
-| 📐 **Structurizer** | Структуризация| Таблицы из текста/HTML                                            |
-| 📊 **Analyst**      | Анализ        | Инсайты, паттерны, рекомендации                                  |
-| 🔄 **TransformCodex** | Код трансформ.| Python/pandas для трансформаций                                   |
-| 🎨 **WidgetCodex**  | Код виджетов  | HTML/CSS/JS визуализации, click-to-filter                        |
-| 📈 **Reporter**     | Отчёт         | Финальный ответ (narrative/code)                                  |
-| 🎯 **Validator**    | Валидация     | Проверка результата, решение выдать/продолжить                     |
-
-**Контроллеры:** TransformationController, WidgetController, AIAssistantController, TransformSuggestionsController, WidgetSuggestionsController.  
-**Утилита:** ResolverService (`gb.ai_resolve_batch`) для семантических задач внутри кода.
-
-### Технические детали
+Краткий обзор агентов и контроллеров — в **разделе 1** («Multi-Agent System V2») в блоке «Уникальные возможности» выше.
 
 - **AgentPayload** — единый формат обмена (narrative, tables, code_blocks, plan, validation, suggestions).
-- **pipeline_context** + **agent_results** — контекст и хронология результатов.
+- **pipeline_context** + **agent_results** — контекст и хронология результатов; **execution_context** — канал для полных DataFrame (QualityGate).
+- **LLM**: пресеты и ключи задаются в **настройках профиля** и (для админов) **системных настройках LLM** — см. [ADMIN_AND_SYSTEM_LLM.md](docs/ADMIN_AND_SYSTEM_LLM.md), [LLM_CONFIGURATION_CONCEPT.md](docs/LLM_CONFIGURATION_CONCEPT.md).
 - **GigaChat** (langchain-gigachat), Redis pub/sub, sandbox для выполнения кода трансформаций.
+- **Утилита:** ResolverService (`gb.ai_resolve_batch`) для семантических задач внутри кода.
 
 Подробнее: [MULTI_AGENT.md](docs/MULTI_AGENT.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -306,10 +295,10 @@ flowchart LR
 ### Требования
 
 - **Python 3.11+** (рекомендуется 3.13), [uv](https://github.com/astral-sh/uv)
-- **Node.js 18+**, npm
+- **Node.js 18+**, npm (монорепозиторий с workspace `apps/web`)
 - **PostgreSQL 14+**
 - **Redis 6+**
-- **GigaChat API** ключ ([получить](https://developers.sber.ru/gigachat))
+- **GigaChat API** (или другой провайдер по пресету): ключ задаётся в UI — **Профиль → Настройки LLM** (пресеты); см. [ADMIN_AND_SYSTEM_LLM.md](docs/ADMIN_AND_SYSTEM_LLM.md). Ключ можно получить на [портале разработчиков Сбера](https://developers.sber.ru/gigachat).
 
 ### Установка
 
@@ -318,19 +307,21 @@ flowchart LR
 git clone https://github.com/yourusername/gigaboard.git
 cd gigaboard
 
-# 2. Backend (uv)
+# 2. Переменные окружения — только корень репозитория (backend читает .env отсюда)
+#    Windows:  copy .env.example .env
+#    Linux/macOS: cp .env.example .env
+# Укажите DATABASE_URL, REDIS_URL, JWT_SECRET_KEY и при необходимости ADMIN_EMAIL / ADMIN_PASSWORD
+
+# 3. Backend (uv) — из корня или из apps/backend
 cd apps/backend
 uv sync
 cd ../..
 
-# 3. Frontend
-cd apps/web
+# 4. Frontend — зависимости из корня (npm workspaces)
 npm install
-cd ../..
-
-# 4. Переменные окружения (apps/backend/.env)
-# DATABASE_URL, REDIS_URL, GIGACHAT_API_KEY — см. .env.example
 ```
+
+Подробности переменных: комментарии в [`.env.example`](.env.example).
 
 ### Запуск
 
@@ -347,6 +338,33 @@ cd ../..
 
 Откройте: [http://localhost:5173](http://localhost:5173)
 
+### Docker Compose
+
+**Продакшен-сборка** (nginx + backend + Postgres + Redis; при старте backend выполняет `alembic upgrade head`):
+
+```powershell
+docker compose up --build
+```
+
+- UI: [http://localhost](http://localhost) (порт задаётся `FRONTEND_PORT`, по умолчанию 80)  
+- API напрямую: [http://localhost:8000](http://localhost:8000) (или `BACKEND_PORT`)
+
+**Разработка в контейнерах** (Vite с hot reload, `uvicorn --reload`):
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+- UI: [http://localhost:5173](http://localhost:5173) (`FRONTEND_DEV_PORT`)
+
+**Опционально** pgAdmin и Redis Commander (профиль `tools`):
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile tools up --build
+```
+
+Переменные: см. корневой [`.env.example`](.env.example) — для Compose важны в первую очередь `JWT_SECRET_KEY`, при необходимости `POSTGRES_*`, `ADMIN_EMAIL` / `ADMIN_PASSWORD`. LLM настраивается в UI. Подробнее: [docs/COMMANDS.md](docs/COMMANDS.md).
+
 ---
 
 ## 📚 Документация
@@ -359,7 +377,8 @@ cd ../..
 - [🔌 API Reference](docs/API.md) — REST и Socket.IO
 
 ### Системы
-- [🤖 Multi-Agent V2](docs/MULTI_AGENT.md) — 9 агентов, 5 контроллеров, Orchestrator
+- [🤖 Multi-Agent V2](docs/MULTI_AGENT.md) — core-агенты, QualityGate, satellite-контроллеры (в т.ч. Research), Orchestrator
+- [🔐 Админ и системный LLM](docs/ADMIN_AND_SYSTEM_LLM.md) — роли, пресеты, Playground
 - [📐 Система доски](docs/BOARD_SYSTEM.md) — 4 типа узлов, 5 типов связей, 9 источников
 - [📦 Data Node System](docs/DATA_NODE_SYSTEM.md) — pipeline, трансформации, replay
 - [🎨 Widget Generation](docs/WIDGET_GENERATION_SYSTEM.md) — WidgetCodexAgent, виджеты
@@ -487,13 +506,14 @@ cd ../..
 ## 🗺️ Roadmap
 
 ### ✅ Завершено
-- [x] Multi-Agent V2 (9 агентов + 5 контроллеров, Orchestrator Single Path)
-- [x] Source-Content Node Architecture (9 типов источников)
+- [x] Multi-Agent V2 (core-агенты + QualityGate + satellite-контроллеры, в т.ч. ResearchController, Orchestrator Single Path)
+- [x] Source-Content Node Architecture (9 типов источников, AI Research через ResearchController)
 - [x] WidgetCodexAgent + TransformCodexAgent
 - [x] Transform Dialog с итеративным чатом
 - [x] Dashboard System (редактор, виджет/таблица/текст/изображение/линия, библиотека)
 - [x] Cross-Filter System (измерения, фильтры, пресеты, click-to-filter)
 - [x] Smart Node Placement, Real-time (Socket.IO)
+- [x] Пресеты LLM в профиле пользователя и системные настройки LLM для администраторов
 
 ### 🚧 В разработке / запланировано
 - [ ] Dashboard sharing (публичный URL), multi-select, copy/paste, undo/redo

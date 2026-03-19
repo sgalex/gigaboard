@@ -96,21 +96,29 @@ class BoardService:
         project_id: UUID | None = None
     ) -> list[dict]:
         """List all boards with node counts."""
-        # Query boards with counts for all node types (SourceNode + ContentNode replaced DataNode)
+        # Скалярные подзапросы вместо нескольких outerjoin к подклассам nodes
+        # (иначе SAWarning: overlapping tables / joined inheritance).
         query = (
             select(
                 Board,
-                func.count(SourceNode.id.distinct()).label('source_nodes_count'),
-                func.count(ContentNode.id.distinct()).label('content_nodes_count'),
-                func.count(WidgetNode.id.distinct()).label('widget_nodes_count'),
-                func.count(CommentNode.id.distinct()).label('comment_nodes_count')
+                select(func.count(SourceNode.id))
+                .where(SourceNode.board_id == Board.id)
+                .scalar_subquery()
+                .label("source_nodes_count"),
+                select(func.count(ContentNode.id))
+                .where(ContentNode.board_id == Board.id)
+                .scalar_subquery()
+                .label("content_nodes_count"),
+                select(func.count(WidgetNode.id))
+                .where(WidgetNode.board_id == Board.id)
+                .scalar_subquery()
+                .label("widget_nodes_count"),
+                select(func.count(CommentNode.id))
+                .where(CommentNode.board_id == Board.id)
+                .scalar_subquery()
+                .label("comment_nodes_count"),
             )
-            .outerjoin(SourceNode, SourceNode.board_id == Board.id)
-            .outerjoin(ContentNode, ContentNode.board_id == Board.id)
-            .outerjoin(WidgetNode, WidgetNode.board_id == Board.id)
-            .outerjoin(CommentNode, CommentNode.board_id == Board.id)
             .where(Board.user_id == user_id)
-            .group_by(Board.id)
             .order_by(Board.updated_at.desc())
         )
         
@@ -122,13 +130,25 @@ class BoardService:
         boards_with_counts = []
         board_ids = []
         for board, source_nodes_count, content_nodes_count, widget_nodes_count, comment_nodes_count in result:
-            board_dict = board.__dict__.copy()
-            board_dict['source_nodes_count'] = source_nodes_count
-            board_dict['content_nodes_count'] = content_nodes_count
-            board_dict['widget_nodes_count'] = widget_nodes_count
-            board_dict['comment_nodes_count'] = comment_nodes_count
-            board_dict['tables_count'] = 0
-            board_dict['columns_count'] = 0
+            # Build dict explicitly so thumbnail_url and all Board fields are included
+            # (board.__dict__ can contain SQLAlchemy internals and may omit some attributes)
+            board_dict = {
+                "id": board.id,
+                "project_id": board.project_id,
+                "user_id": board.user_id,
+                "name": board.name,
+                "description": board.description,
+                "settings": board.settings,
+                "thumbnail_url": getattr(board, "thumbnail_url", None),
+                "created_at": board.created_at,
+                "updated_at": board.updated_at,
+                "source_nodes_count": source_nodes_count,
+                "content_nodes_count": content_nodes_count,
+                "widget_nodes_count": widget_nodes_count,
+                "comment_nodes_count": comment_nodes_count,
+                "tables_count": 0,
+                "columns_count": 0,
+            }
             boards_with_counts.append(board_dict)
             board_ids.append(board.id)
         

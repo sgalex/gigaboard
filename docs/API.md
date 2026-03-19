@@ -183,6 +183,39 @@ StreamSourceConfig   { stream_type: "websocket"|"sse"|"kafka", url, buffer_strat
 
 </details>
 
+### Research Chat (`/api/v1/research`)
+
+Чат исследования для диалога **AI Research** (без обязательной привязки к доске). Тот же Orchestrator, что и в админском Playground; отличие — формирование `user_request` в `ResearchController` (см. [AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md](./AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md) §2.0.1).
+
+| Method | Path                       | Request Body          | Response               | Статус | Описание                                      |
+| ------ | -------------------------- | --------------------- | ---------------------- | ------ | --------------------------------------------- |
+| POST   | `/api/v1/research/chat`    | `ResearchChatRequest` | `ResearchChatResponse` | ✅      | Сообщение → narrative, tables, sources, session_id |
+
+**Аутентификация**: JWT, любой авторизованный пользователь (не только admin).
+
+<details>
+<summary>📄 Schemas (Research Chat)</summary>
+
+```
+ResearchChatMessage { role: str, content: str }
+ResearchChatRequest {
+  message: str (1..15000)
+  session_id?: str
+  chat_history?: list[ResearchChatMessage]
+}
+ResearchSourceRef { url: str, title: str }
+ResearchChatResponse {
+  narrative: str
+  tables: list[dict]   // name, columns, rows (ContentTable-like)
+  sources: list[ResearchSourceRef]
+  session_id: str
+  execution_time_ms?: int
+  plan?: dict
+}
+```
+
+</details>
+
 ---
 
 ## 6. Content Nodes (`/api/v1/content-nodes`)
@@ -419,7 +452,81 @@ df['gender'] = genders
 
 ---
 
-## 13. Files (`/api/v1/files`)
+## 13. User Profile & LLM Settings (`/api/v1/users/me/*`)
+
+Настройки профиля пользователя и предпочитаемого LLM-провайдера.
+
+### AI / LLM настройки (`/api/v1/users/me/ai-settings`)
+
+| Method | Path                                   | Request Body             | Response                   | Описание                                      |
+| ------ | -------------------------------------- | ------------------------ | -------------------------- | --------------------------------------------- |
+| GET    | `/api/v1/users/me/ai-settings`         | —                        | `UserAISettingsResponse`   | Получить AI/LLM-настройки текущего пользователя |
+| PUT    | `/api/v1/users/me/ai-settings`         | `UserAISettingsUpdate`   | `UserAISettingsResponse`   | Обновить настройки и при необходимости API-ключ |
+| POST   | `/api/v1/users/me/ai-settings/test`    | `UserAISettingsUpdate?`  | `UserAISettingsTestResponse` | Тест подключения к выбранному провайдеру   |
+
+#### Schemas
+
+```
+LLMProvider = "gigachat" | "external_openai_compat"
+
+UserAISettingsResponse {
+    user_id: UUID
+    provider: LLMProvider
+    gigachat_model?: str
+    gigachat_scope?: str
+    external_base_url?: str
+    external_default_model?: str
+    external_timeout_seconds?: int
+    temperature?: float
+    max_tokens?: int
+    has_external_api_key: bool
+    preferred_style?: dict
+}
+
+UserAISettingsUpdate {
+    provider: LLMProvider
+
+    // GigaChat (опционально)
+    gigachat_model?: str
+    gigachat_scope?: str
+
+    // Внешний OpenAI-совместимый провайдер
+    external_base_url?: str
+    external_default_model?: str
+    external_timeout_seconds?: int
+
+    // Новый/обновлённый API-ключ (write-only)
+    external_api_key?: str
+
+    // Общие параметры генерации
+    temperature?: float
+    max_tokens?: int
+
+    preferred_style?: dict
+}
+
+UserAISettingsTestResponse {
+    ok: bool
+    provider: LLMProvider
+    message: str
+    details?: dict
+}
+```
+
+**Поведение:**
+
+- `provider = "gigachat"` — используется системный GigaChat (см. конфиг backend), поля `gigachat_model`/`gigachat_scope` задают только пользовательские предпочтения.
+- `provider = "external_openai_compat"`:
+  - `external_base_url` по умолчанию `https://api.openai.com/v1`;
+  - `external_default_model` и `temperature`/`max_tokens` задают дефолты для Multi-Agent системы;
+  - `external_api_key` сохраняется в зашифрованном виде в отдельной сущности `UserSecret`, в ответе ключ никогда не возвращается — только флаг `has_external_api_key`.
+- `POST /ai-settings/test`:
+  - использует текущие сохранённые настройки + значения из тела запроса (они имеют приоритет);
+  - на MVP-этапе выполняет только валидацию параметров (формат URL, наличие ключа) и возвращает диагностическое сообщение; в следующих итерациях будет вызывать реальный OpenAI-совместимый endpoint.
+
+---
+
+## 14. Files (`/api/v1/files`)
 
 | Method | Path                                       | Request Body        | Response                                      | Описание                  |
 | ------ | ------------------------------------------ | ------------------- | --------------------------------------------- | ------------------------- |

@@ -9,6 +9,8 @@ import { ProjectOverviewPage } from './pages/ProjectOverviewPage'
 import { BoardPage } from './pages/BoardPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { DashboardViewPage } from './pages/DashboardViewPage'
+import { UserProfilePage } from './pages/UserProfilePage'
+import { AdminLLMPage } from './pages/AdminLLMPage'
 import { PublicDashboardPage } from './pages/PublicDashboardPage'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { ThemeProvider } from './components/ThemeProvider'
@@ -34,6 +36,22 @@ function App() {
                         element={
                             <ProtectedRoute>
                                 <WelcomePage />
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route
+                        path="/profile"
+                        element={
+                            <ProtectedRoute>
+                                <UserProfilePage />
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route
+                        path="/admin/llm"
+                        element={
+                            <ProtectedRoute>
+                                <AdminLLMPage />
                             </ProtectedRoute>
                         }
                     />

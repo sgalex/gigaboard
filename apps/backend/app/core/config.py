@@ -1,7 +1,16 @@
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+# Единственный источник env — корень репозитория (GigaBoard). apps/backend/.env не используется.
+_project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+_env_root = _project_root / ".env"
+_env_local = _project_root / ".env.local"
+if _env_root.is_file():
+    load_dotenv(_env_root)
+if _env_local.is_file():
+    load_dotenv(_env_local, override=True)  # переопределения для локального запуска (без Docker)
 
 class Settings:
     # Database
@@ -12,6 +21,8 @@ class Settings:
     DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "20"))
     DB_MAX_OVERFLOW: int = int(os.getenv("DB_MAX_OVERFLOW", "10"))
     DB_POOL_TIMEOUT: int = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+    # NullPool = новое соединение на каждый запрос (обход сбоев пула на Windows при ConnectionResetError)
+    DB_USE_NULL_POOL: bool = os.getenv("DB_USE_NULL_POOL", "").lower() in ("1", "true", "yes")
     
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -50,5 +61,21 @@ class Settings:
     
     # Environment
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+
+    # CORS (через запятую). Для Docker с фронтом на :80 добавьте http://localhost и http://127.0.0.1
+    _cors_default = (
+        "http://localhost:5173,http://localhost:3000,"
+        "http://127.0.0.1:5173,http://127.0.0.1:3000,"
+        "http://localhost,http://127.0.0.1"
+    )
+    CORS_ORIGINS: list[str] = [
+        o.strip()
+        for o in os.getenv("CORS_ORIGINS", _cors_default).split(",")
+        if o.strip()
+    ]
+
+    # Admin (опционально): если заданы оба — при старте создаётся/обновляется пользователь с role=admin
+    ADMIN_EMAIL: str = os.getenv("ADMIN_EMAIL", "")
+    ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
 
 settings = Settings()

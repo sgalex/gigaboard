@@ -91,3 +91,39 @@ __all__ = [
     "TableFilterStats", "FilterStatsResponse",
     "DimensionSuggestion", "DetectDimensionsResponse",
 ]
+
+from .user_settings import (
+    LLMProvider,
+    ExternalOpenAISettings,
+    UserAISettingsResponse,
+    UserAISettingsUpdate,
+    UserAISettingsTestRequest,
+    UserAISettingsTestResponse,
+    GigaChatModelInfo,
+    LLMConfigResponse,
+    LLMConfigCreate,
+    LLMConfigUpdate,
+    SystemLLMSettingsResponse,
+    SystemLLMSettingsUpdate,
+    AgentLLMOverrideItem,
+    AgentLLMOverridesSet,
+    SystemLLMPlaygroundRunRequest,
+)
+
+__all__ += [
+    "LLMProvider",
+    "ExternalOpenAISettings",
+    "UserAISettingsResponse",
+    "UserAISettingsUpdate",
+    "UserAISettingsTestRequest",
+    "UserAISettingsTestResponse",
+    "GigaChatModelInfo",
+    "LLMConfigResponse",
+    "LLMConfigCreate",
+    "LLMConfigUpdate",
+    "SystemLLMSettingsResponse",
+    "SystemLLMSettingsUpdate",
+    "AgentLLMOverrideItem",
+    "AgentLLMOverridesSet",
+    "SystemLLMPlaygroundRunRequest",
+]

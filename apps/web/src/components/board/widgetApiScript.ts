@@ -159,16 +159,32 @@ export function buildWidgetApiScript(params: {
             // dispatches to filterStore.
 
             /**
-             * addFilter(dimension, value) — set filter: dimension == value.
-             * If a filter for this dimension already exists, it is replaced.
-             * @param {string} dimension - Dimension name (e.g. 'brand', 'category')
-             * @param {*} value - Filter value
+             * addFilter(...) overloads:
+             * 1) addFilter(dimension, value) — legacy helper for simple equality.
+             * 2) addFilter(filterExpressionObject) — set full cross-filter expression.
+             *    Supports both simple condition and nested and/or groups.
              */
-            window.addFilter = function(dimension, value) {
+            window.addFilter = function(dimensionOrExpression, value) {
                 try {
+                    var isExpressionObject =
+                        dimensionOrExpression &&
+                        typeof dimensionOrExpression === 'object' &&
+                        typeof dimensionOrExpression.type === 'string';
+
+                    if (isExpressionObject) {
+                        window.parent.postMessage({
+                            type: 'widget:setFilterExpression',
+                            payload: {
+                                filter: dimensionOrExpression,
+                                contentNodeId: window.CONTENT_NODE_ID
+                            }
+                        }, '*');
+                        return;
+                    }
+
                     window.parent.postMessage({
                         type: 'widget:addFilter',
-                        payload: { dimension: dimension, value: value, contentNodeId: window.CONTENT_NODE_ID }
+                        payload: { dimension: dimensionOrExpression, value: value, contentNodeId: window.CONTENT_NODE_ID }
                     }, '*');
                 } catch(e) { console.error('addFilter error:', e); }
             };
@@ -275,12 +291,20 @@ export function buildWidgetApiScript(params: {
  *
  * GigaChat sometimes returns \\n instead of \n in JSON strings.
  * After JSON.parse(), these become literal 2-char sequences (backslash + n)
- * instead of real newline characters. This function detects and fixes that.
+ * instead of real newline characters.
+ *
+ * IMPORTANT: only unescape when the ENTIRE HTML is on a single line
+ * (genuinely double-escaped). Multi-line HTML already has correct formatting;
+ * its \n sequences inside <script> are valid JS escapes (e.g. formatter: '{b}\n{c}%')
+ * and replacing them would cause SyntaxError.
  */
 export function unescapeWidgetHtml(html: string): string {
     if (!html) return html
-    // Check for literal backslash-n sequences in HTML content
-    if (html.includes('\\n') && html.includes('<')) {
+
+    const hasRealNewlines = html.includes('\n')
+    const hasEscapedNewlines = html.includes('\\n')
+
+    if (!hasRealNewlines && hasEscapedNewlines && html.includes('<')) {
         return html
             .replace(/\\n/g, '\n')
             .replace(/\\t/g, '\t')

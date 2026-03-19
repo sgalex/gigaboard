@@ -22,12 +22,26 @@ def upgrade() -> None:
     # 1. Add data_node_type discriminator column to data_nodes
     op.add_column('data_nodes', sa.Column('data_node_type', sa.String(20), nullable=True))
     
-    # 2. Set default value for existing records based on source_mode
-    op.execute("""
-        UPDATE data_nodes 
-        SET data_node_type = COALESCE(source_mode, 'text')
-        WHERE data_node_type IS NULL
-    """)
+    # 2. Заполнить data_node_type: в ранних ревизиях был source_mode; в 004 — только data_source_type
+    conn = op.get_bind()
+    insp = sa.inspect(conn)
+    col_names = {c["name"] for c in insp.get_columns("data_nodes")}
+    if "source_mode" in col_names:
+        op.execute("""
+            UPDATE data_nodes
+            SET data_node_type = COALESCE(source_mode, 'text')
+            WHERE data_node_type IS NULL
+        """)
+    else:
+        op.execute("""
+            UPDATE data_nodes
+            SET data_node_type = CASE lower(trim(data_source_type::text))
+                WHEN 'api' THEN 'api'
+                WHEN 'file' THEN 'file'
+                ELSE 'text'
+            END
+            WHERE data_node_type IS NULL
+        """)
     
     # 3. Make data_node_type NOT NULL
     op.alter_column('data_nodes', 'data_node_type', nullable=False)
@@ -77,12 +91,20 @@ def upgrade() -> None:
     """)
     
     # Migrate file nodes
-    op.execute("""
-        INSERT INTO data_nodes_file (id, file_name, file_path, file_type, file_size)
-        SELECT id, NULL, NULL, file_type, NULL
-        FROM data_nodes
-        WHERE data_node_type = 'file'
-    """)
+    if "file_type" in col_names:
+        op.execute("""
+            INSERT INTO data_nodes_file (id, file_name, file_path, file_type, file_size)
+            SELECT id, NULL, NULL, file_type, NULL
+            FROM data_nodes
+            WHERE data_node_type = 'file'
+        """)
+    else:
+        op.execute("""
+            INSERT INTO data_nodes_file (id, file_name, file_path, file_type, file_size)
+            SELECT id, NULL, NULL, NULL, NULL
+            FROM data_nodes
+            WHERE data_node_type = 'file'
+        """)
     
     # Migrate API nodes
     op.execute("""
@@ -95,8 +117,10 @@ def upgrade() -> None:
     # 8. Drop old columns from data_nodes (they're now in child tables)
     op.drop_column('data_nodes', 'query')
     op.drop_column('data_nodes', 'api_config')
-    op.drop_column('data_nodes', 'source_mode')
-    op.drop_column('data_nodes', 'file_type')
+    if "source_mode" in col_names:
+        op.drop_column('data_nodes', 'source_mode')
+    if "file_type" in col_names:
+        op.drop_column('data_nodes', 'file_type')
 
 
 def downgrade() -> None:

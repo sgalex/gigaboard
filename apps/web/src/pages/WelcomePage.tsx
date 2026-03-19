@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, FolderKanban, Calendar, Clock, Sparkles, ArrowRight, LayoutDashboard, Workflow, Database, BarChart3, Table2, Boxes, Ruler, Filter, Pencil, Trash2 } from 'lucide-react'
+import { Plus, FolderKanban, Calendar, Clock, Sparkles, ArrowRight, LayoutDashboard, Workflow, Database, BarChart3, Table2, Boxes, Ruler, Filter, Pencil, Trash2, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
@@ -128,7 +128,18 @@ export function WelcomePage() {
 
             <div className="container relative mx-auto py-10 px-4 max-w-6xl sm:py-12">
                 {/* Hero */}
-                <header className="mb-12 text-center sm:mb-16">
+                <header className="mb-12 text-center sm:mb-16 relative">
+                    <div className="absolute top-0 right-0 flex items-center gap-2">
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Профиль и AI-настройки"
+                            onClick={() => navigate('/profile')}
+                            className="text-muted-foreground hover:text-foreground"
+                        >
+                            <Settings className="h-5 w-5" />
+                        </Button>
+                    </div>
                     <div className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-4 py-1.5 text-sm font-medium text-primary mb-6">
                         <Sparkles className="h-4 w-4" />
                         AI-аналитика и дашборды

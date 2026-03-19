@@ -12,6 +12,8 @@ class User(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     username = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
+    # Роль: "user" | "admin". Администратор управляет системными настройками LLM (см. docs/ADMIN_AND_SYSTEM_LLM.md).
+    role = Column(String(20), nullable=False, default="user", server_default="user")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     deleted_at = Column(DateTime, nullable=True)
@@ -21,6 +23,8 @@ class User(Base):
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
     boards = relationship("Board", back_populates="user", cascade="all, delete-orphan")
     agent_sessions = relationship("AgentSession", back_populates="user", cascade="all, delete-orphan")
+    ai_settings = relationship("UserAISettings", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    secrets = relationship("UserSecret", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<User(id={self.id}, email={self.email}, username={self.username})>"

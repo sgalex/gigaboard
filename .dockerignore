@@ -1,0 +1,36 @@
+# Git / IDE
+.git
+.gitignore
+.cursor
+.vscode
+.idea
+
+# Python
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+
+# Node (копируем lockfile и ставим в образе заново)
+**/node_modules
+**/dist
+
+# Логи и данные
+**/logs
+*.log
+data/
+
+# Документация и прочее (ускоряет контекст сборки)
+**/*.md
+!README.md
+
+# Env (секреты не в образ)
+.env
+.env.*
+!.env.example
+
+# Тесты и скрипты разработки (не нужны в runtime-образе backend)
+apps/backend/scripts

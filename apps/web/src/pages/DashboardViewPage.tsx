@@ -6,13 +6,19 @@
  */
 import { useEffect, useState, useRef } from 'react'
 import { useParams } from 'react-router-dom'
+import { Sparkles, Trash2, X } from 'lucide-react'
 import { useDashboardStore } from '@/store/dashboardStore'
 import { useLibraryStore } from '@/store/libraryStore'
 import { useFilterStore } from '@/store/filterStore'
+import { useAIAssistantStore } from '@/store/aiAssistantStore'
 import { DashboardCanvas } from '@/components/dashboard/DashboardCanvas'
 import { FilterBar } from '@/components/filters/FilterBar'
 import { FilterPanel } from '@/components/filters/FilterPanel'
+import { AIAssistantPanel } from '@/components/board/AIAssistantPanel'
+import { Button } from '@/components/ui/button'
 import type { DashboardWithItems } from '@/types/dashboard'
+
+const ASSISTANT_PANEL_ANIMATION_MS = 380
 
 function getCanvasHeight(dashboard: DashboardWithItems | null): number {
     if (!dashboard) return 900
@@ -38,9 +44,13 @@ export function DashboardViewPage() {
     } = useDashboardStore()
     const { fetchWidgets, fetchTables } = useLibraryStore()
     const { setContext, loadDimensions, loadPresets, applyPreset, presets } = useFilterStore()
+    const clearSession = useAIAssistantStore((s) => s.clearSession)
 
     const containerRef = useRef<HTMLDivElement>(null)
     const [scale, setScale] = useState(0.25)
+    const [isAssistantOpen, setAssistantOpen] = useState(false)
+    const [isAssistantRendered, setAssistantRendered] = useState(false)
+    const [isAssistantVisible, setAssistantVisible] = useState(false)
     const canvasWidth = currentDashboard?.settings?.canvas_width ?? 1440
     const canvasHeight = currentDashboard ? getCanvasHeight(currentDashboard) : 900
 
@@ -111,6 +121,18 @@ export function DashboardViewPage() {
         return () => { document.title = 'GigaBoard' }
     }, [currentDashboard?.name])
 
+    useEffect(() => {
+        if (isAssistantOpen) {
+            setAssistantRendered(true)
+            const rafId = requestAnimationFrame(() => setAssistantVisible(true))
+            return () => cancelAnimationFrame(rafId)
+        }
+
+        setAssistantVisible(false)
+        const timerId = setTimeout(() => setAssistantRendered(false), ASSISTANT_PANEL_ANIMATION_MS)
+        return () => clearTimeout(timerId)
+    }, [isAssistantOpen])
+
     if (isLoading || !currentDashboard) {
         return (
             <div className="h-screen flex items-center justify-center bg-background">
@@ -122,7 +144,19 @@ export function DashboardViewPage() {
     return (
         <div className="fixed inset-0 flex flex-col overflow-hidden bg-background">
             <div className="flex-shrink-0">
-                <FilterBar />
+                <FilterBar
+                    rightActions={(
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 flex-shrink-0 order-1"
+                            onClick={() => setAssistantOpen(true)}
+                            title="ИИ-ассистент"
+                        >
+                            <Sparkles className="h-3.5 w-3.5" />
+                        </Button>
+                    )}
+                />
             </div>
             <div
                 ref={containerRef}
@@ -139,6 +173,48 @@ export function DashboardViewPage() {
                 />
             </div>
             <FilterPanel />
+
+            {isAssistantRendered && dashboardId && (
+                <>
+                    <div
+                        className={`fixed inset-0 z-[60] bg-black/20 transition-opacity duration-[380ms] ${isAssistantVisible ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
+                        onClick={() => setAssistantOpen(false)}
+                    />
+                    <div
+                        className={`fixed top-0 right-0 z-[70] flex h-full w-[420px] max-w-[92vw] flex-col overflow-hidden border-l bg-background shadow-xl transition-transform duration-[380ms] ease-out ${isAssistantVisible ? 'translate-x-0' : 'translate-x-full'}`}
+                    >
+                        <div className="h-11 px-3 border-b flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <Sparkles className="h-4 w-4 text-primary" />
+                                <h3 className="text-sm font-semibold">ИИ Ассистент</h3>
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7"
+                                    onClick={() => { void clearSession(dashboardId, 'dashboard') }}
+                                    title="Очистить историю"
+                                >
+                                    <Trash2 className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7"
+                                    onClick={() => setAssistantOpen(false)}
+                                    title="Закрыть"
+                                >
+                                    <X className="h-4 w-4" />
+                                </Button>
+                            </div>
+                        </div>
+                        <div className="flex-1 min-h-0">
+                            <AIAssistantPanel contextId={dashboardId} scope="dashboard" showHeader={false} />
+                        </div>
+                    </div>
+                </>
+            )}
         </div>
     )
 }

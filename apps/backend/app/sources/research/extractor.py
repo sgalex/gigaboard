@@ -1,10 +1,12 @@
 """Research Source Extractor - AI deep research via multi-agent.
 
-Использует цепочку агентов SearchAgent → ResearcherAgent → AnalystAgent
-для поиска и структурирования данных из открытых источников.
+Делегирует вызов ResearchController (Orchestrator: discovery → research
+→ structurizer → analyst → reporter) и маппит результат в ExtractionResult.
+См. docs/AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md
 """
 import time
 from typing import Any
+from uuid import uuid4
 
 from app.sources.base import (
     BaseSource,
@@ -14,100 +16,93 @@ from app.sources.base import (
 )
 
 
+def _controller_tables_to_table_data(tables: list[dict[str, Any]]) -> list[TableData]:
+    """Конвертирует tables из ControllerResult (dict) в list[TableData]."""
+    out: list[TableData] = []
+    for t in tables:
+        if not isinstance(t, dict):
+            continue
+        out.append(TableData(
+            id=str(t.get("id", uuid4())),
+            name=t.get("name", "table"),
+            columns=t.get("columns", []),
+            rows=t.get("rows", []),
+        ))
+    return out
+
+
 class ResearchSource(BaseSource):
-    """AI Research source handler using multi-agent system."""
-    
+    """AI Research source handler using multi-agent system (ResearchController)."""
+
     source_type = "research"
     display_name = "AI Research"
     icon = "🔍"
     description = "Поиск данных через AI-агентов"
-    
+
     async def validate_config(self, config: dict[str, Any]) -> ValidationResult:
         """Validate research source config."""
         errors = []
-        
         if not config.get("initial_prompt"):
             errors.append("Необходимо указать запрос для исследования")
-        
         if errors:
             return ValidationResult.failure(errors)
         return ValidationResult.success()
-    
+
     async def extract(
         self,
         config: dict[str, Any],
         file_content: bytes | None = None,
-        **kwargs
+        **kwargs: Any,
     ) -> ExtractionResult:
-        """Execute deep research using multi-agent system."""
+        """Execute deep research via ResearchController (Orchestrator)."""
         start_time = time.time()
-        
         try:
             initial_prompt = config.get("initial_prompt", "")
-            
-            # Get multi-agent engine from kwargs
-            multi_agent_engine = kwargs.get("multi_agent_engine")
-            
-            if multi_agent_engine:
-                # Execute research through multi-agent system
-                result = await self._run_research(multi_agent_engine, initial_prompt, config)
-                return result
-            else:
-                # Fallback: return placeholder
-                return ExtractionResult(
-                    success=True,
-                    text=f"Исследование по запросу: '{initial_prompt}'\n\n"
-                         "Мультиагентная система не доступна. "
-                         "Для полноценного исследования необходимо настроить GigaChat API.",
-                    tables=[],
-                    extraction_time_ms=int((time.time() - start_time) * 1000),
-                    metadata={
-                        "prompt": initial_prompt,
-                        "multi_agent_available": False,
-                    }
-                )
-            
-        except Exception as e:
-            return ExtractionResult.failure(f"Ошибка исследования: {str(e)}")
-    
-    async def _run_research(
-        self,
-        engine: Any,
-        prompt: str,
-        config: dict[str, Any]
-    ) -> ExtractionResult:
-        """Run research through multi-agent engine.
-        
-        Цепочка: SearchAgent → ResearcherAgent → AnalystAgent
-        """
-        start_time = time.time()
-        
-        try:
-            # Create research task
-            task = {
-                "type": "research",
-                "prompt": prompt,
-                "context": config.get("context", {}),
-            }
-            
-            # Execute through engine
-            # result = await engine.process_task(task)
-            
-            # TODO: Integrate with actual MultiAgentEngine
-            # For now, return placeholder
-            
+            orchestrator = kwargs.get("orchestrator") or kwargs.get("multi_agent_engine")
+
+            if orchestrator:
+                return await self._run_research(orchestrator, initial_prompt, config)
             return ExtractionResult(
                 success=True,
-                text=f"Исследование по запросу: '{prompt}'\n\n"
-                     "Результаты исследования будут здесь после интеграции с мультиагентом.",
+                text=f"Исследование по запросу: '{initial_prompt}'\n\n"
+                     "Мультиагентная система не доступна. "
+                     "Настройте GigaChat API и перезапустите backend.",
                 tables=[],
                 extraction_time_ms=int((time.time() - start_time) * 1000),
-                metadata={
-                    "prompt": prompt,
-                    "sources": [],
-                }
+                metadata={"prompt": initial_prompt, "multi_agent_available": False},
             )
-            
+        except Exception as e:
+            return ExtractionResult.failure(f"Ошибка исследования: {str(e)}")
+
+    async def _run_research(
+        self,
+        orchestrator: Any,
+        prompt: str,
+        config: dict[str, Any],
+    ) -> ExtractionResult:
+        """Запуск исследования через ResearchController; маппинг в ExtractionResult."""
+        start_time = time.time()
+        try:
+            from app.services.controllers import ResearchController
+
+            controller = ResearchController(orchestrator)
+            ctx: dict[str, Any] = {}
+            if config.get("conversation_history"):
+                ctx["chat_history"] = config["conversation_history"]
+
+            result = await controller.process_request(prompt, context=ctx)
+
+            if result.status == "error":
+                return ExtractionResult.failure(result.error or "Unknown error")
+
+            tables_data = _controller_tables_to_table_data(result.tables)
+            return ExtractionResult(
+                success=True,
+                text=result.narrative or "",
+                tables=tables_data,
+                extraction_time_ms=result.execution_time_ms,
+                metadata={"sources": result.sources},
+            )
         except Exception as e:
             return ExtractionResult.failure(f"Ошибка мультиагента: {str(e)}")
     

@@ -26,7 +26,7 @@
   - [x] AgentPayload — универсальный формат данных
   - [x] Orchestrator V2 — Single Path (Planner → Steps → Validator)
   - [x] 9 Core Agents: Planner, Structurizer, Analyst, TransformCodex, WidgetCodex, Reporter, Discovery, Research, Validator
-  - [x] 5 Satellite Controllers: Transformation, Widget, AIAssistant, TransformSuggestions, WidgetSuggestions
+  - [x] Satellite Controllers: Transformation, Widget, AIAssistant, TransformSuggestions, WidgetSuggestions, **ResearchController** (источник AI Research + `research/chat`)
   - [x] Zero-mapping agent_results (хронологический list), adaptive replanning
   - [x] 112 unit + integration тестов (pytest) ✅
   - [x] Legacy V1 cleanup (12 файлов, ~145KB удалено)
@@ -36,7 +36,7 @@
   - [x] SourceNode (csv, json, excel, document, api, database, research, manual, stream)
   - [x] ContentNode (text + N tables)
   - [x] PromptExtractor для text-to-table
-  - [x] 6 Extractors: File, Manual, API, Database, Prompt, Stream (stub)
+  - [x] Extractors по типам источников: файловые (CSV/JSON/Excel/Document), API, Database, Manual, **Research** (`ResearchSource` → `ResearchController` / Orchestrator), Stream (stub)
 - [x] **Интеграция с GigaChat API** (langchain-gigachat)
 - [x] **Widget Generation System**: WidgetCodexAgent генерирует HTML/CSS/JS виджеты
 - [x] **Transform Dialog Chat System**: итеративный AI-чат для трансформаций

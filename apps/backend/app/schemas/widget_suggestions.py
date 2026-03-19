@@ -23,6 +23,10 @@ class Suggestion(BaseModel):
     """Single widget improvement suggestion."""
     id: str = Field(..., description="Unique suggestion ID")
     type: SuggestionType = Field(..., description="Type of suggestion")
+    viz_category: str = Field(
+        "chart",
+        description="Тип визуализации для UI: bar|line|pie|scatter|heatmap|table|kpi|map|funnel|gauge|treemap|radar|chart",
+    )
     priority: SuggestionPriority = Field(..., description="Priority level")
     title: str = Field(..., description="Short title (< 50 chars)")
     description: str = Field(..., description="Detailed description")

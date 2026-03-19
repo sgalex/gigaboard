@@ -8,7 +8,7 @@
 - 🎨 **Data-Centric Canvas** — бесконечное полотно с 4 типами узлов (React Flow)
 - 🤖 **AI Assistant Panel** — диалог в контексте доски, создание узлов одной кнопкой
 - 🔗 **5 типов связей**: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
-- 🧠 **Multi-Agent V2** — 9 core агентов + 5 satellite контроллеров (Orchestrator V2)
+- 🧠 **Multi-Agent V2** — 9 core агентов + satellite-контроллеры, Orchestrator V2
 - 👥 **Real-time совместная работа** — Socket.IO + Redis pub/sub
 - 🎨 **AI-генерация визуализаций** — Reporter Agent создаёт WidgetNode из данных
 - 🔄 **Автоматический replay** — обновление source запускает перепросчёт всего pipeline
@@ -55,7 +55,7 @@ Package:   uv (Python), npm (Frontend)
 
 | Документ                                                 | Описание                                                    |
 | -------------------------------------------------------- | ----------------------------------------------------------- |
-| [MULTI_AGENT.md](./MULTI_AGENT.md)                       | Orchestrator V2, AgentPayload, 9 агентов, 5 контроллеров    |
+| [MULTI_AGENT.md](./MULTI_AGENT.md)                       | Orchestrator V2, AgentPayload, 9 агентов, satellite-контроллеры (в т.ч. ResearchController); см. также history/2026-03-18 — Analyst/JSON, Quality Gate, Research HTTP |
 | [TASK_TYPES_REFERENCE.md](./TASK_TYPES_REFERENCE.md)     | Типы задач для каждого агента (task types)                  |
 | [ADAPTIVE_PLANNING.md](./ADAPTIVE_PLANNING.md)           | Full Replan — адаптивное планирование на основе результатов |
 | [AI_RESOLVER_SYSTEM.md](./AI_RESOLVER_SYSTEM.md)         | Batch AI resolution (пол, sentiment, категоризация)         |
@@ -80,6 +80,9 @@ Package:   uv (Python), npm (Frontend)
 | Документ                                                   | Описание                                                    |
 | ---------------------------------------------------------- | ----------------------------------------------------------- |
 | [AI_ASSISTANT.md](./AI_ASSISTANT.md)                       | AI Assistant Panel — спецификация, API, примеры             |
+| [AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md](./AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md) | Источник AI Research: ResearchController, `/research/chat`, диалог, сравнение с Playground |
+| [ADMIN_AND_SYSTEM_LLM.md](./ADMIN_AND_SYSTEM_LLM.md)       | Администратор, системные настройки LLM, Playground мультиагента |
+| [LLM_CONFIGURATION_CONCEPT.md](./LLM_CONFIGURATION_CONCEPT.md) | Концепция: пресеты LLM, модель по умолчанию, привязка к агентам |
 | [UI_DESIGN.md](./UI_DESIGN.md)                             | Макеты UI, компоненты, дизайн                               |
 | [DESIGN_SYSTEM.md](./DESIGN_SYSTEM.md)                     | Дизайн-система: цвета, типографика, компоненты              |
 | [USE_CASES.md](./USE_CASES.md)                             | 7+ сценариев использования                                  |
@@ -148,7 +151,7 @@ GigaBoard/
 │   │       │   ├── multi_agent/   # Multi-Agent V2
 │   │       │   │   ├── agents/    # 9 core агентов + QualityGate
 │   │       │   │   └── ...
-│   │       │   ├── controllers/   # 5 satellite контроллеров
+│   │       │   ├── controllers/   # satellite-контроллеры (AI Assistant, Transform, Widget, Research, …)
 │   │       │   └── extractors/    # Extractors (file, db, api, prompt, manual)
 │   │       ├── middleware/        # Auth middleware
 │   │       └── utils/             # Utilities

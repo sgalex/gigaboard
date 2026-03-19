@@ -12,10 +12,11 @@ import json
 import re
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+from uuid import uuid4
 
 from .base import BaseAgent
 from ..message_bus import AgentMessageBus
-from ..schemas.agent_payload import Plan, PlanStep
+from ..schemas.agent_payload import AgentPayload, Plan, PlanStep
 from app.services.gigachat_service import GigaChatService
 
 
@@ -144,6 +145,19 @@ PLANNER_SYSTEM_PROMPT = '''
 **ДОСТУПНЫЕ АГЕНТЫ И ИХ ТИПЫ ЗАДАЧ**:
 
 **ДОСТУПНЫЕ АГЕНТЫ**:
+
+- **context_filter**: LLM-шаг построения и применения кросс-фильтра к контексту
+  - Когда использовать: перед analyst, если запрос содержит конкретную сущность/срез
+    (например "у Philips", "по бренду X", "только категория Y").
+  - Входные параметры шага (task): 
+    * `description`: текстовая цель фильтрации
+    * `allow_auto_filter`: true/false (обычно true)
+    * `filter_expression`: опционально, если можно сформулировать явно
+    * `required_tables`: опционально, какие таблицы приоритетно оставить
+  - Правило JSON-декларации: агент формирует FilterExpression JSON
+    (`condition`/`and`/`or`) и передаёт его оркестратору для установки фильтра.
+  - Выход: обновлённый working set для следующих шагов и фильтрованные таблицы.
+  - Важно: это НЕ внешняя сеть и НЕ генерация кода; шаг исполняется локально в backend.
 
 - **discovery**: Поиск информации в интернете через DuckDuckGo
   - Входные данные: поисковый запрос (query)
@@ -424,15 +438,17 @@ Always respond with structured plan in JSON format:
 - `query` (обязательно): поисковый запрос
 - `search_type`: "web" | "news" | "quick" (по умолчанию "web")
 - `max_results`: 5-10 (по умолчанию 5)
+- **Два шага discovery подряд** (разный охват выдачи): для статистики по региональным рынкам (РФ, ЕС и т.д.), рейтингов продаж, когда один запрос даёт узкую выдачу — добавь **два** шага `discovery` с **разными** `query` (например: запрос на EN + запрос на RU с «Автостат» / «продажи Россия»; или общий + узкоспециализированный). Зависимости: шаг 2 discovery → `depends_on`: ["1"]. Затем **один** `research` с `max_urls`: 8–10 и `depends_on`: на id **последнего** discovery — ResearchAgent объединит URL из всех предыдущих discovery. Не повторяй одинаковый `query` в двух шагах.
 
 **research**:
 - Для API: `url`, `method` (GET/POST), `headers`, `params`
-- Для веб: `max_urls` (использует URL из предыдущего discovery)
+- Для веб: `max_urls` (URL из всех предыдущих discovery в `agent_results`; при двух discovery увеличь до 8–10)
 - Для БД: `query` (SQL SELECT), `database`
 
 **structurizer**:
 - `description` (обязательно): что нужно извлечь
 - Опционально указывай ожидаемую структуру: "columns: name, price, rating"
+- Если в источниках есть **два разных рейтинга** (например «топ моделей по штукам» и «топ брендов по продажам»), в `description` **явно раздели**: две таблицы или два прохода — **не смешивай** строки «модель + продажи модели» с «бренд + продажи бренда» в одной таблице без пометки типа строки
 
 **analyst**:
 - `description` (обязательно): что нужно проанализировать
@@ -454,6 +470,7 @@ Always respond with structured plan in JSON format:
 **reporter**:
 - `description` (обязательно): описание финального ответа
 - `widget_type`: "chart" | "table" | "metric" | "text" | "custom"
+- `depends_on`: **всегда** укажи id шага **analyst** (если есть в плане), иначе **structurizer**, иначе **research**. Пустой `[]` для reporter недопустим при наличии этих шагов — оркестратор всё равно нормализует, но план должен быть корректным
 
 **validator**:
 - Не требует параметров — автоматически проверяет результат
@@ -517,7 +534,8 @@ class PlannerAgent(BaseAgent):
         self,
         message_bus: AgentMessageBus,
         gigachat_service: GigaChatService,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        llm_router: Optional[Any] = None,
     ):
         super().__init__(
             agent_name="planner",
@@ -525,6 +543,7 @@ class PlannerAgent(BaseAgent):
             system_prompt=system_prompt
         )
         self.gigachat = gigachat_service
+        self.llm_router = llm_router
         
     def _get_default_system_prompt(self) -> str:
         return PLANNER_SYSTEM_PROMPT
@@ -549,12 +568,16 @@ class PlannerAgent(BaseAgent):
             return await self._create_plan(task, context)
         elif task_type == "replan":
             return await self._replan(task, context)
+        elif task_type == "expand_step":
+            return await self._expand_step(task, context)
+        elif task_type == "revise_remaining":
+            return await self._revise_remaining(task, context)
         elif task_type == "evaluate_result":
             return await self._evaluate_result(task, context)
         else:
             return self._format_error_response(
                 f"Unknown task type: {task_type}",
-                suggestions=["Supported types: create_plan, replan, evaluate_result"]
+                suggestions=["Supported types: create_plan, replan, expand_step, revise_remaining, evaluate_result"]
             )
     
     async def _create_plan(
@@ -596,17 +619,50 @@ class PlannerAgent(BaseAgent):
                 self.logger.debug(f"📦 Full response: {str(response)[:500]}...")
                 plan = self._parse_plan_from_response(response)
                 self._validate_plan(plan)
+                # Нормализуем step_id и depends_on сразу в Planner,
+                # чтобы оркестратор и клиенты всегда получали "чистый" план.
+                plan = self._normalize_plan_steps(plan)
                 return plan
 
-            plan = await self._call_gigachat_with_json_retry(
-                messages=messages,
-                parse_fn=_parse_and_validate,
-                temperature=0.3,
-                max_tokens=2000,
+            is_transform = context and (
+                context.get("mode") == "transformation"
+                or context.get("controller") == "transformation"
             )
+            plan_max_tokens = 4500 if is_transform else 2000
+            if not is_transform and len(user_request) > 4000:
+                plan_max_tokens = 3800
+
+            try:
+                plan = await self._call_gigachat_with_json_retry(
+                    messages=messages,
+                    parse_fn=_parse_and_validate,
+                    context=context,
+                    temperature=0.3,
+                    max_tokens=plan_max_tokens,
+                )
+            except Exception as plan_err:
+                if is_transform:
+                    self.logger.warning(
+                        "Planner create_plan failed (%s), using transformation fallback plan",
+                        plan_err,
+                    )
+                    plan = self._build_transformation_fallback_plan(user_request)
+                    plan = self._normalize_plan_steps(plan)
+                else:
+                    raise
+            plan["user_request"] = user_request[:3000] if len(user_request) > 3000 else user_request
             
             self.logger.info(f"✅ Plan created with {len(plan['steps'])} steps")
-            
+
+            plan = self._sanitize_suggestions_plan(plan, context, user_request)
+            plan = self._ensure_widget_codex_in_plan(plan, context, user_request)
+            plan = self._ensure_transform_codex_in_plan(plan, context, user_request)
+            plan = self._inject_context_filter_step(plan, context, user_request)
+            if plan.get("steps"):
+                self.logger.info(
+                    f"✅ Plan after codex guards: {len(plan['steps'])} steps"
+                )
+
             # V2: Конвертируем dict-план в Plan модель
             plan_model = self._dict_to_plan(plan, user_request)
             
@@ -668,11 +724,24 @@ REASON: {reason}
             if context and context.get("input_data_preview"):
                 input_preview = context["input_data_preview"]
                 replan_prompt += "\nINPUT DATA SCHEMA (already loaded DataFrames — do NOT use structurizer for these):\n"
-                for table_name, info in list(input_preview.items())[:2]:
+                for table_key, info in list(input_preview.items())[:2]:
+                    table_name = str(info.get("table_name") or table_key)
+                    node_name = str(info.get("node_name") or "node")
                     columns = info.get("columns", [])
                     row_count = info.get("row_count", 0)
-                    replan_prompt += f"  • Table '{table_name}': {len(columns)} columns, {row_count} rows\n"
-                    replan_prompt += f"    Columns: {', '.join(columns[:10])}\n"
+                    replan_prompt += f"  • Table '{node_name}.{table_name}': {len(columns)} columns, {row_count} rows\n"
+                    col_names = self._column_names_for_prompt(columns)
+                    replan_prompt += f"    Columns: {', '.join(col_names[:10])}\n"
+                replan_prompt += "\n"
+
+            if context and context.get("catalog_data_preview"):
+                catalog_preview = context["catalog_data_preview"]
+                replan_prompt += "CATALOG DATA SCHEMA (full board, tiny samples):\n"
+                for table_key, info in list(catalog_preview.items())[:5]:
+                    table_name = str(info.get("table_name") or table_key)
+                    node_name = str(info.get("node_name") or "node")
+                    row_count = info.get("row_count", 0)
+                    replan_prompt += f"  • {node_name}.{table_name} ({row_count} rows)\n"
                 replan_prompt += "\n"
 
             # Изменение: добавляем накопленные результаты агентов (расширенный контекст)
@@ -733,11 +802,21 @@ Return updated plan in the same JSON format.
             updated_plan = await self._call_gigachat_with_json_retry(
                 messages=messages,
                 parse_fn=_parse_and_validate_replan,
+                context=context,
                 temperature=0.5,
             )
             
             self.logger.info(f"✅ Plan updated with {len(updated_plan['steps'])} steps")
             
+            # Нормализуем step_id и depends_on и для replanned-плана,
+            # чтобы не протаскивать "грязные" идентификаторы дальше по пайплайну.
+            updated_plan = self._normalize_plan_steps(updated_plan)
+            updated_plan = self._inject_context_filter_step(
+                updated_plan,
+                context,
+                context.get("user_request") if context else "",
+            )
+
             # V2: Конвертируем dict-план в Plan модель
             plan_model = self._dict_to_plan(
                 updated_plan,
@@ -751,6 +830,206 @@ Return updated plan in the same JSON format.
             
         except Exception as e:
             self.logger.error(f"Error replanning: {e}", exc_info=True)
+            return self._format_error_response(str(e))
+
+    async def _expand_step(
+        self,
+        task: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AgentPayload:
+        """
+        Проверка атомарности шага. Возвращает либо {atomic: true}, либо {atomic: false, sub_steps: [...]}.
+        См. docs/PLANNING_DECOMPOSITION_STRATEGY.md.
+        """
+        try:
+            step = task.get("step")
+            if not step or "agent" not in step or "task" not in step:
+                return self._format_error_response(
+                    "expand_step requires task.step with agent and task",
+                    suggestions=["Pass step: {agent, task, step_id?, depends_on?}"],
+                )
+            user_request = (context or {}).get("user_request", "")
+            prompt = f"""Дан один шаг плана выполнения. По правилам атомарности определи: шаг атомарен?
+
+ПРАВИЛА АТОМАРНОСТИ:
+- discovery: один шаг = один поисковый запрос (один query). Несколько запросов → разбей на несколько шагов.
+- research: один шаг = загрузка из одного discovery (max_urls). Не объединяй несколько источников в один шаг.
+- structurizer: один шаг = извлечение структуры из одного блока/типа контента.
+- analyst: один шаг = анализ одной таблицы или одного аспекта.
+- reporter: обычно один шаг в конце.
+- transform_codex / widget_codex: один шаг = одна трансформация / один виджет.
+
+ШАГ ДЛЯ ПРОВЕРКИ:
+{json.dumps(step, ensure_ascii=False, indent=2)}
+
+Исходный запрос пользователя (контекст): {user_request[:300] if user_request else "—"}
+
+Ответь ТОЛЬКО валидным JSON, без текста до или после:
+- Если шаг атомарен: {{"atomic": true}}
+- Если шаг нужно разбить: {{"atomic": false, "sub_steps": [{{"step_id": "1", "agent": "...", "task": {{...}}, "depends_on": []}}, ...]}}
+Подшаги в том же формате (agent, task, step_id, depends_on)."""
+            messages = [
+                {"role": "system", "content": "Ты планировщик. Определяешь атомарность шага и при необходимости разбиваешь на подшаги. Отвечай только JSON."},
+                {"role": "user", "content": prompt},
+            ]
+
+            def _parse(response: Any) -> Dict[str, Any]:
+                text = response if isinstance(response, str) else str(response)
+                json_match = re.search(r"\{[\s\S]*\}", text)
+                if not json_match:
+                    raise ValueError("No JSON object in response")
+                data = json.loads(json_match.group())
+                if "atomic" not in data:
+                    raise ValueError("Response must contain 'atomic'")
+                if data.get("atomic") is False and "sub_steps" in data:
+                    subs = data["sub_steps"]
+                    if not isinstance(subs, list) or len(subs) == 0:
+                        raise ValueError("sub_steps must be non-empty list when atomic is false")
+                    for i, s in enumerate(subs):
+                        if not isinstance(s, dict) or "agent" not in s or "task" not in s:
+                            raise ValueError(f"sub_step[{i}] must have agent and task")
+                return data
+
+            result = await self._call_gigachat_with_json_retry(
+                messages=messages,
+                parse_fn=_parse,
+                context=context,
+                temperature=0.2,
+                max_tokens=1500,
+            )
+            atomic = result.get("atomic", True)
+            sub_steps = result.get("sub_steps") if not atomic else None
+            return self._success_payload(
+                metadata={"expand_step_result": {"atomic": atomic, "sub_steps": sub_steps}},
+            )
+        except Exception as e:
+            self.logger.error(f"Error in expand_step: {e}", exc_info=True)
+            return self._format_error_response(str(e))
+
+    async def _revise_remaining(
+        self,
+        task: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AgentPayload:
+        """
+        Пересмотр оставшейся части плана с учётом выполненных шагов и контекста (в т.ч. инсайтов).
+        См. docs/PLANNING_DECOMPOSITION_STRATEGY.md.
+        """
+        try:
+            user_request = task.get("user_request", (context or {}).get("user_request", ""))
+            completed_steps = task.get("completed_steps", [])
+            remaining_steps = task.get("remaining_steps", [])
+            results_summary = task.get("results_summary", [])
+            last_error = task.get("last_error")
+            failed_agent = task.get("failed_agent")
+            last_step_suboptimal = task.get("last_step_suboptimal")
+            suboptimal_reason = task.get("suboptimal_reason")
+
+            prompt = f"""Исходный запрос пользователя: {user_request}
+
+УЖЕ ВЫПОЛНЕНЫ (кратко):
+{json.dumps(completed_steps, ensure_ascii=False, indent=2)}
+
+РЕЗУЛЬТАТЫ ВЫПОЛНЕННЫХ ШАГОВ (контекст):
+{json.dumps(results_summary, ensure_ascii=False, indent=2)[:4000]}
+"""
+            if last_error or failed_agent:
+                prompt += f"""
+ПОСЛЕДНЯЯ ОШИБКА: агент {failed_agent or '?'} — {last_error or 'N/A'}
+Учти при пересмотре: можно пропустить проблемный шаг или заменить его.
+"""
+            if last_step_suboptimal and suboptimal_reason:
+                prompt += f"""
+ПОСЛЕДНИЙ ШАГ НЕ ДАЛ ПОЛЕЗНОГО РЕЗУЛЬТАТА: агент {failed_agent or '?'} — {suboptimal_reason}
+Учти при пересмотре: можно добавить повторный шаг (retry) для этого агента с уточнённой задачей или заменить на альтернативу.
+"""
+            next_step_num = len(completed_steps) + 1
+            completed_agents = {s.get("agent") for s in completed_steps if s.get("agent")}
+            remaining_agents = {s.get("agent") for s in remaining_steps if s.get("agent")}
+            structurizer_or_reporter_in_remaining = "structurizer" in remaining_agents or "reporter" in remaining_agents
+            structurizer_reporter_not_done = structurizer_or_reporter_in_remaining and (
+                "structurizer" not in completed_agents or "reporter" not in completed_agents
+            )
+            prompt += f"""
+ТЕКУЩАЯ ОСТАВШАЯСЬ ЧАСТЬ ПЛАНА:
+{json.dumps(remaining_steps, ensure_ascii=False, indent=2)}
+"""
+            if structurizer_reporter_not_done:
+                prompt += """
+ВАЖНО: В выполненных шагах ещё не было structurizer и/или reporter — структурированная таблица и итоговый отчёт не созданы. Обязательно сохрани шаги structurizer и reporter в remaining_steps (не удаляй их).
+
+"""
+            prompt += f"""
+Пересмотри оставшуюся часть плана с учётом контекста и инсайтов.
+
+Можно:
+- добавить шаги (например discovery/research по инсайтам analyst),
+- убрать лишнее или изменить порядок,
+- при ошибке — пропустить или заменить проблемный шаг.
+
+Если данных достаточно только для итогового отчёта — верни в remaining_steps сначала шаг reporter, при необходимости за ним validator. Не возвращай один лишь validator без reporter: отчёт должен сформировать reporter.
+
+Важно: не удаляй шаги structurizer и reporter из остатка, если в запросе пользователя явно нужны таблица, сравнение или итоговый вывод, а эти агенты ещё не выполнялись (их нет в списке выполненных). Сохраняй их в remaining_steps до выполнения. Если в остатке есть structurizer — перед ним должен быть шаг research: structurizer извлекает таблицы из полных текстов страниц, которые загружает research; без research у structurizer не будет сырого контента.
+
+Если из результатов discovery/research и работы structurizer/analyst видно, что:
+- для части источников (Habr, Wikipedia и т.п.) **нет прямых числовых рейтингов**, а есть только текстовые описания, обзоры, перечисления;
+- несколько запусков structurizer подряд извлекали только сущности/metadata без таблиц с рейтингами;
+то **не добавляй новые волны discovery/research со схожими запросами** и **не плодись новый structurizer по тем же источникам**. Вместо этого:
+- сократи remaining_steps до минимально достаточной цепочки для ответа (analyst → reporter или сразу reporter),
+- ориентируй reporter на построение *качественной сравнительной таблицы* (например, столбцы «Популярность/распространённость», «Скорость развития», «Комьюнити», «Типичные кейсы») и текстового вывода на основе уже собранных текстовых материалов.
+
+Не генерируй очень длинный хвост из повторяющихся discovery/research по тем же фреймворкам и площадкам. Если ты видишь в results_summary несколько однотипных поисков без новых чисел, считай, что данных мало, и переходи к сворачиванию плана и финальному отчёту.
+
+Используй простые step_id: {next_step_num}, {next_step_num + 1}, ... (по порядку).
+
+Ответь ТОЛЬКО валидным JSON: {{"remaining_steps": [{{"step_id": \"...\", \"agent\": \"...\", \"task\": {{...}}, \"depends_on\": []}}, ...]}}
+Каждый шаг: step_id, agent, task, depends_on (массив)."""
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты планировщик. Пересматриваешь оставшуюся часть плана с учётом выполненных шагов и контекста. "
+                        "Учитывай findings и narrative analyst. Верни только JSON с ключом remaining_steps. "
+                        "При сокращении до минимума: сначала reporter, затем при необходимости validator — не возвращай один лишь validator без reporter. "
+                        "Не удаляй structurizer и reporter из остатка, если пользователь запросил таблицу/сравнение/вывод и эти шаги ещё не выполнены. "
+                        "Перед structurizer сохраняй шаг research (structurizer нуждается в полных текстах страниц от research). "
+                        "Если несколько волн discovery/research и structurizer уже не дали числовых рейтингов и таблиц, "
+                        "не добавляй новые похожие discovery/research; вместо этого сворачивай план к analyst/reporter и проси reporter построить "
+                        "сравнительную таблицу и вывод на основе текстовых материалов."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ]
+
+            def _parse(response: Any) -> Dict[str, Any]:
+                text = response if isinstance(response, str) else str(response)
+                json_match = re.search(r"\{[\s\S]*\}", text)
+                if not json_match:
+                    raise ValueError("No JSON object in response")
+                data = json.loads(json_match.group())
+                if "remaining_steps" not in data:
+                    raise ValueError("Response must contain 'remaining_steps'")
+                steps = data["remaining_steps"]
+                if not isinstance(steps, list):
+                    steps = []
+                for i, s in enumerate(steps):
+                    if not isinstance(s, dict) or "agent" not in s or "task" not in s:
+                        raise ValueError(f"remaining_steps[{i}] must have agent and task")
+                return {"remaining_steps": steps}
+
+            result = await self._call_gigachat_with_json_retry(
+                messages=messages,
+                parse_fn=_parse,
+                context=context,
+                temperature=0.4,
+                max_tokens=2000,
+            )
+            return self._success_payload(
+                metadata={"remaining_steps": result["remaining_steps"]},
+            )
+        except Exception as e:
+            self.logger.error(f"Error in revise_remaining: {e}", exc_info=True)
             return self._format_error_response(str(e))
     
     async def _evaluate_result(
@@ -861,6 +1140,7 @@ Return updated plan in the same JSON format.
         return await self._call_gigachat_with_json_retry(
             messages=messages,
             parse_fn=_parse_decision,
+            context=context,
             temperature=0.3,
         )
     
@@ -907,9 +1187,19 @@ Return updated plan in the same JSON format.
         """
         Формирует prompt для GigaChat.
         """
+        # Длинный запрос (трансформация) в JSON-плане модель часто копирует целиком → битый JSON / обрез по токенам
+        ur_prompt = user_request
+        if len(ur_prompt) > 1800:
+            ur_prompt = (
+                user_request[:1800]
+                + "\n\n[Дальше текст запроса обрезан в промпте планировщика; полная формулировка передаётся агентам из контекста оркестратора. В ответе НЕ копируй этот блок в поле user_request.]"
+            )
         prompt_parts = [
-            f"USER REQUEST: {user_request}",
-            ""
+            f"USER REQUEST:\n{ur_prompt}",
+            "",
+            "При формировании JSON-плана поле \"user_request\" — не более 160 символов, одна строка (краткое название задачи).",
+            "НЕ вставляй в JSON списки таблиц, требования к коду и весь USER REQUEST — это ломает JSON.",
+            "",
         ]
         
         if board_id:
@@ -944,11 +1234,23 @@ Return updated plan in the same JSON format.
         if context and context.get("input_data_preview"):
             input_preview = context["input_data_preview"]
             prompt_parts.append("\nINPUT DATA SCHEMA:")
-            for table_name, info in list(input_preview.items())[:2]:  # Максимум 2 таблицы в промпт
+            for table_key, info in list(input_preview.items())[:2]:  # Максимум 2 таблицы в промпт
+                table_name = str(info.get("table_name") or table_key)
+                node_name = str(info.get("node_name") or "node")
                 columns = info.get("columns", [])
                 row_count = info.get("row_count", 0)
-                prompt_parts.append(f"  • Table '{table_name}': {len(columns)} columns, {row_count} rows")
-                prompt_parts.append(f"    Columns: {', '.join(columns[:10])}")  # Первые 10 колонок
+                prompt_parts.append(f"  • Table '{node_name}.{table_name}': {len(columns)} columns, {row_count} rows")
+                col_names = self._column_names_for_prompt(columns)
+                prompt_parts.append(f"    Columns: {', '.join(col_names[:10])}")  # Первые 10 колонок
+
+        if context and context.get("catalog_data_preview"):
+            catalog_preview = context["catalog_data_preview"]
+            prompt_parts.append("\nCATALOG DATA SCHEMA (all board tables, tiny sample):")
+            for table_key, info in list(catalog_preview.items())[:5]:
+                table_name = str(info.get("table_name") or table_key)
+                node_name = str(info.get("node_name") or "node")
+                row_count = info.get("row_count", 0)
+                prompt_parts.append(f"  • {node_name}.{table_name}: {row_count} rows")
         
         # Изменение #1: board_data → board_context (см. docs/CONTEXT_ARCHITECTURE_PROPOSAL.md)
         if context and context.get("board_context"):
@@ -963,15 +1265,93 @@ Return updated plan in the same JSON format.
                 ],
             }
             prompt_parts.append(json.dumps(compact, indent=2, ensure_ascii=False))
-        
-        prompt_parts.extend([
-            "",
-            "Create a detailed execution plan with steps delegated to appropriate agents.",
-            "Return the plan as a valid JSON object following the specified format.",
-            "Think step-by-step about what needs to be done and which agent is best suited for each task."
-        ])
+
+        # Специализированные подсказки для контроллеров-подсказок:
+        # transform_suggestions / widget_suggestions не должны запускать
+        # тяжёлый research‑pipeline — данные уже есть в INPUT DATA SCHEMA.
+        controller = context.get("controller") if context else None
+        mode = context.get("mode") if context else None
+        is_suggestions_controller = controller in {"transform_suggestions", "widget_suggestions"}
+
+        if is_suggestions_controller:
+            prompt_parts.extend(
+                [
+                    "",
+                    "You are building a plan for a *suggestions controller*.",
+                    "IMPORTANT:",
+                    "- Do NOT call discovery / research / structurizer here: all necessary data",
+                    "  is already provided in INPUT DATA SCHEMA and controller context.",
+                    "- The goal is to run a LIGHT pipeline that analyzes existing data and",
+                    "  produces recommendations/insights, not to fetch or extract new data.",
+                    "",
+                    "Preferred pipeline shape:",
+                    "- analyst: analyze available structured data and generate recommendations",
+                    "- reporter: turn analyst findings into a compact text answer for UI",
+                    "",
+                    "Plan constraints:",
+                    "- Do NOT add discovery, research or structurizer steps.",
+                    "- Do NOT add transform_codex, widget_codex or any codex steps — suggestions",
+                    "  controllers only need analyst findings + reporter text, not executable code.",
+                    "- Keep the number of steps small (typically 2–3).",
+                ]
+            )
+        elif controller == "widget" or mode == "widget":
+            prompt_parts.extend(
+                [
+                    "",
+                    "CONTROLLER: WidgetController — пользователь ждёт **готовый HTML/JS виджет**.",
+                    "Обязательно:",
+                    "- Один или несколько шагов **analyst** (подготовка метрик/таблиц из уже загруженных данных),",
+                    "  при необходимости разные аспекты — отдельные шаги analyst.",
+                    "- После всех analyst ОБЯЗАТЕЛЬНО шаг **widget_codex** — единственный агент, который",
+                    "  генерирует код виджета (KPI-карточки, графики, таблицы).",
+                    "- Завершающий шаг **reporter** (widget_type: text) — краткое описание для пользователя.",
+                    "",
+                    "ЗАПРЕЩЕНО заканчивать план только analyst без widget_codex — иначе виджет не будет создан.",
+                    "НЕ используй transform_codex для виджетов.",
+                ]
+            )
+        elif controller == "transformation" or mode == "transformation":
+            prompt_parts.extend(
+                [
+                    "",
+                    "CONTROLLER: TransformController — пользователь ждёт **готовый Python/pandas-код трансформации**.",
+                    "Обязательно:",
+                    "- При необходимости шаги **structurizer** / **analyst** (данные уже в INPUT DATA SCHEMA —",
+                    "  structurizer только если нужно доформатировать; часто достаточно analyst + transform_codex).",
+                    "- После подготовки данных ОБЯЗАТЕЛЬНО шаг **transform_codex** — единственный агент, который",
+                    "  генерирует исполняемый код трансформации (df → df_result).",
+                    "- Завершающий шаг **reporter** (widget_type: text) — краткое описание результата.",
+                    "",
+                    "ЗАПРЕЩЕНО заканчивать план только analyst/structurizer без transform_codex — иначе кода не будет.",
+                    "НЕ используй widget_codex для трансформаций данных.",
+                    "В JSON: \"user_request\" — краткая метка (≤160 символов); шаги держи компактными.",
+                ]
+            )
+        else:
+            prompt_parts.extend(
+                [
+                    "",
+                    "Create a detailed execution plan with steps delegated to appropriate agents.",
+                    "Return the plan as a valid JSON object following the specified format.",
+                    "Think step-by-step about what needs to be done and which agent is best suited for each task.",
+                ]
+            )
         
         return "\n".join(prompt_parts)
+
+    @staticmethod
+    def _column_names_for_prompt(columns: Any) -> List[str]:
+        """Normalize columns to display names for prompt rendering."""
+        if not isinstance(columns, list):
+            return []
+        names: List[str] = []
+        for col in columns:
+            if isinstance(col, dict):
+                names.append(str(col.get("name", "column")))
+            else:
+                names.append(str(col))
+        return names
     
     def _parse_plan_from_response(self, response) -> Dict[str, Any]:
         """
@@ -1244,6 +1624,462 @@ Return updated plan in the same JSON format.
                 raise ValueError(f"Step {i} missing 'agent' field")
             if "task" not in step:
                 raise ValueError(f"Step {i} missing 'task' field")
+
+    def _build_transformation_fallback_plan(self, user_request: str) -> Dict[str, Any]:
+        """
+        Если LLM вернул битый JSON (часто из‑за копирования всего промпта в user_request
+        и обрезки ответа), выполняем типовой план трансформации.
+        """
+        short = (user_request.replace("\n", " ").strip()[:160] or "transformation")
+        codex_desc = user_request.strip()[:8000]
+        return {
+            "plan_id": str(uuid4()),
+            "user_request": short,
+            "steps": [
+                {
+                    "agent": "analyst",
+                    "task": {
+                        "description": (
+                            "Проверь схему входных таблиц и релевантность колонок запросу; "
+                            "кратко зафиксируй findings (без генерации Python-кода)."
+                        ),
+                    },
+                    "depends_on": [],
+                },
+                {
+                    "agent": "transform_codex",
+                    "task": {
+                        "description": codex_desc,
+                        "purpose": "transformation",
+                    },
+                    "depends_on": ["1"],
+                },
+                {
+                    "agent": "reporter",
+                    "task": {
+                        "description": "Кратко опиши результат трансформации для пользователя.",
+                        "widget_type": "text",
+                    },
+                    "depends_on": ["2"],
+                },
+            ],
+        }
+
+    def _sanitize_suggestions_plan(
+        self,
+        plan: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+        user_request: str,
+    ) -> Dict[str, Any]:
+        """
+        transform_suggestions / widget_suggestions: не вызывать transform_codex / widget_codex.
+        Удаляем такие шаги, если модель их всё же вернула.
+        """
+        ctrl = (context or {}).get("controller")
+        if ctrl not in ("transform_suggestions", "widget_suggestions"):
+            return plan
+        steps_in = plan.get("steps") or []
+        banned = frozenset({"transform_codex", "widget_codex"})
+        filtered: List[Dict[str, Any]] = []
+        removed = 0
+        for s in steps_in:
+            if not isinstance(s, dict):
+                continue
+            if s.get("agent") in banned:
+                removed += 1
+                continue
+            filtered.append(dict(s))
+        if removed:
+            self.logger.info(
+                "Removed %s codex step(s) from suggestions plan (controller=%s)",
+                removed,
+                ctrl,
+            )
+        if not filtered:
+            desc = (user_request or "").strip()[:4000] or "Проанализируй данные и дай рекомендации."
+            filtered = [
+                {
+                    "agent": "analyst",
+                    "task": {"description": desc},
+                    "depends_on": [],
+                },
+                {
+                    "agent": "reporter",
+                    "task": {
+                        "description": "Сформулируй краткие рекомендации для UI.",
+                        "widget_type": "text",
+                    },
+                    "depends_on": [],
+                },
+            ]
+            self.logger.warning(
+                "Suggestions plan had only codex steps; fallback to analyst → reporter"
+            )
+        out = dict(plan)
+        out["steps"] = filtered
+        return self._normalize_plan_steps(out)
+
+    def _ensure_widget_codex_in_plan(
+        self,
+        plan: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+        user_request: str,
+    ) -> Dict[str, Any]:
+        """
+        WidgetController требует widget_codex; LLM иногда оставляет только цепочку analyst.
+        Добавляем widget_codex → reporter, если их нет (см. orchestrator revise_remaining).
+        """
+        if not context:
+            return plan
+        if context.get("controller") != "widget" and context.get("mode") != "widget":
+            return plan
+        steps_in = plan.get("steps") or []
+        if not steps_in:
+            return plan
+        steps: List[Dict[str, Any]] = [
+            dict(s) if isinstance(s, dict) else {} for s in steps_in
+        ]
+        if any(s.get("agent") == "widget_codex" for s in steps):
+            self.logger.debug("_ensure_widget_codex_in_plan: widget_codex already present")
+            return plan
+        if any(s.get("agent") == "transform_codex" for s in steps):
+            self.logger.debug("_ensure_widget_codex_in_plan: transform_codex present, skip")
+            return plan
+
+        agents_before = [s.get("agent") for s in steps]
+        while steps and steps[-1].get("agent") == "reporter":
+            steps.pop()
+
+        if not steps:
+            return plan
+
+        n = len(steps)
+        last_dep = str(n)
+        codex_task = (user_request or "").strip()[:4000] or (
+            "Сгенерируй HTML/JS виджет по данным и запросу пользователя."
+        )
+        steps.append(
+            {
+                "agent": "widget_codex",
+                "task": {"description": codex_task},
+                "depends_on": [last_dep],
+            }
+        )
+        steps.append(
+            {
+                "agent": "reporter",
+                "task": {
+                    "description": "Кратко опиши итог виджета для пользователя.",
+                    "widget_type": "text",
+                },
+                "depends_on": [],
+            }
+        )
+        out = dict(plan)
+        out["steps"] = steps
+        agents_after = [s.get("agent") for s in steps]
+        self.logger.info(
+            "🛡️ _ensure_widget_codex_in_plan: injected widget_codex+reporter "
+            f"({agents_before} → {agents_after})"
+        )
+        return self._normalize_plan_steps(out)
+
+    def _ensure_transform_codex_in_plan(
+        self,
+        plan: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+        user_request: str,
+    ) -> Dict[str, Any]:
+        """
+        TransformController требует transform_codex; иначе пайплайн не выдаёт код.
+        """
+        if not context:
+            return plan
+        if context.get("controller") != "transformation" and context.get(
+            "mode"
+        ) != "transformation":
+            return plan
+        steps_in = plan.get("steps") or []
+        if not steps_in:
+            return plan
+        steps: List[Dict[str, Any]] = [
+            dict(s) if isinstance(s, dict) else {} for s in steps_in
+        ]
+        if any(s.get("agent") == "transform_codex" for s in steps):
+            return plan
+        if any(s.get("agent") == "widget_codex" for s in steps):
+            return plan
+
+        while steps and steps[-1].get("agent") == "reporter":
+            steps.pop()
+
+        if not steps:
+            return plan
+
+        n = len(steps)
+        last_dep = str(n)
+        codex_task = (user_request or "").strip()[:4000] or (
+            "Сгенерируй Python/pandas-код трансформации по запросу и входным таблицам."
+        )
+        steps.append(
+            {
+                "agent": "transform_codex",
+                "task": {"description": codex_task},
+                "depends_on": [last_dep],
+            }
+        )
+        steps.append(
+            {
+                "agent": "reporter",
+                "task": {
+                    "description": "Кратко опиши результат трансформации для пользователя.",
+                    "widget_type": "text",
+                },
+                "depends_on": [],
+            }
+        )
+        out = dict(plan)
+        out["steps"] = steps
+        return self._normalize_plan_steps(out)
+
+    def _normalize_plan_steps(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Нормализует step_id и depends_on внутри плана.
+
+        Цели:
+        - step_id → последовательные строки "1", "2", ..., без суффиксов вроде "11a";
+        - depends_on → ссылки только на существующие шаги, также в виде строк;
+        - убираем самозависимости и дубликаты в depends_on.
+
+        Логика:
+        - В первом проходе строим маппинг "старый числовой id" → "новый последовательный id".
+          Берём только начальную числовую часть из step_id / depends_on (например "11a" → "11").
+        - Во втором проходе переписываем depends_on с учётом этого маппинга.
+        - Дополнительно чиним research‑pipeline: если в плане есть structurizer,
+          он должен зависеть от ближайшего предыдущего research, а не от discovery.
+        - Шаг **reporter**: если `depends_on` пуст или неверен — привязка к ближайшему
+          предшествующему analyst → иначе structurizer → research → discovery → …
+        """
+        steps = plan.get("steps")
+        if not isinstance(steps, list) or not steps:
+            return plan
+
+        id_map: Dict[str, str] = {}
+        normalized_steps: List[Dict[str, Any]] = []
+        # Для некоторых агентов (discovery, research, structurizer) устраняем
+        # дубликаты шагов с одинаковой задачей. Храним маппинг
+        # (agent, dedupe_key) → первый нормализованный step_id.
+        dedupe_seen: Dict[tuple[str, str], str] = {}
+        # Жёсткий лимит на количество structurizer‑шагов в одном плане:
+        # чаще всего достаточно 1–2 проходов по одному и тому же контенту.
+        max_structurizer_steps = 2
+        structurizer_count = 0
+        last_structurizer_id: Optional[str] = None
+
+        # Первый проход: нормализуем сами step_id и строим маппинг.
+        for idx, raw_step in enumerate(steps, start=1):
+            step = dict(raw_step) if isinstance(raw_step, dict) else {"agent": None, "task": {}}
+
+            raw_step_id = str(step.get("step_id", idx))
+            # Берём только ведущую числовую часть, если она есть.
+            m = re.match(r"(\d+)", raw_step_id)
+            base_id = m.group(1) if m else raw_step_id
+
+            agent = step.get("agent")
+            task = step.get("task") or {}
+
+            # Уникальные ключи для отдельных агентов, чтобы не плодить
+            # одинаковые шаги:
+            # - discovery: по query/description;
+            # - research: по description/type/max_urls;
+            # - structurizer: по description.
+            dedupe_key: Optional[tuple[str, str]] = None
+            if agent == "discovery":
+                query = task.get("query") or task.get("description") or ""
+                if isinstance(query, str) and query.strip():
+                    dedupe_key = ("discovery", query.strip().lower())
+            elif agent == "research":
+                desc = (task.get("description") or "").strip().lower()
+                r_type = (task.get("type") or "").strip().lower()
+                max_urls = str(task.get("max_urls") or "").strip()
+                if desc:
+                    dedupe_key = ("research", f"{desc}|{r_type}|{max_urls}")
+            elif agent == "structurizer":
+                desc = (task.get("description") or "").strip().lower()
+                if desc:
+                    dedupe_key = ("structurizer", desc)
+
+            # Жёсткий лимит на structurizer: все шаги сверх лимита мапим
+            # на последний структуризатор (если он уже есть).
+            if agent == "structurizer" and structurizer_count >= max_structurizer_steps and last_structurizer_id:
+                id_map[base_id] = last_structurizer_id
+                continue
+
+            # Если это повторный шаг с тем же ключом —
+            # не добавляем его, а просто мапим старый id на уже существующий.
+            if dedupe_key and dedupe_key in dedupe_seen:
+                existing_id = dedupe_seen[dedupe_key]
+                id_map[base_id] = existing_id
+                continue
+
+            # Новый нормализованный id для шага.
+            new_id = str(len(id_map) + 1)
+            id_map[base_id] = new_id
+
+            if agent == "structurizer":
+                structurizer_count += 1
+                last_structurizer_id = new_id
+
+            if dedupe_key:
+                dedupe_seen[dedupe_key] = new_id
+
+            step["step_id"] = new_id
+            normalized_steps.append(step)
+
+        # Второй проход: нормализуем depends_on и чиним связку research → structurizer.
+        last_research_step_id: Optional[str] = None
+        for step in normalized_steps:
+            agent = step.get("agent")
+
+            # Обновляем указатель на последний research.
+            if agent == "research":
+                last_research_step_id = step.get("step_id")
+
+            deps = step.get("depends_on") or []
+            if not isinstance(deps, list):
+                deps = []
+
+            norm_deps: List[str] = []
+            for dep in deps:
+                dep_str = str(dep)
+                m = re.match(r"(\d+)", dep_str)
+                base_dep = m.group(1) if m else dep_str
+                new_id = id_map.get(base_dep)
+                if not new_id:
+                    continue
+                # Убираем ссылки на самого себя и дубликаты.
+                if new_id == step["step_id"]:
+                    continue
+                if new_id not in norm_deps:
+                    norm_deps.append(new_id)
+
+            # Исправляем зависимость structurizer: он должен опираться на research,
+            # а не на discovery/пустой список, если research уже есть в плане.
+            if agent == "structurizer" and last_research_step_id:
+                # Если среди нормализованных зависимостей ещё нет research,
+                # жёстко привязываем structurizer к последнему research.
+                if last_research_step_id not in norm_deps:
+                    norm_deps = [last_research_step_id]
+
+            step["depends_on"] = norm_deps
+
+        # Третий проход: reporter не может иметь пустой depends_on в типовом пайплайне —
+        # привязываем к ближайшему предшествующему analyst / structurizer / research / …
+        fallback_for_reporter = [
+            "analyst",
+            "structurizer",
+            "research",
+            "discovery",
+            "widget_codex",
+            "transform_codex",
+        ]
+        for i, step in enumerate(normalized_steps):
+            if step.get("agent") != "reporter":
+                continue
+            chosen: Optional[str] = None
+            for pref in fallback_for_reporter:
+                for j in range(i - 1, -1, -1):
+                    if normalized_steps[j].get("agent") == pref:
+                        chosen = normalized_steps[j]["step_id"]
+                        break
+                if chosen:
+                    break
+            if not chosen and i > 0:
+                chosen = normalized_steps[i - 1]["step_id"]
+            if chosen and step.get("step_id") != chosen:
+                step["depends_on"] = [chosen]
+
+        plan["steps"] = normalized_steps
+        return plan
+
+    def _inject_context_filter_step(
+        self,
+        plan: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+        user_request: str,
+    ) -> Dict[str, Any]:
+        """
+        Insert context_filter step before first analyst when appropriate.
+        This keeps filtering explicit in the plan for multi-hop assistant requests.
+        """
+        if not self._needs_context_filter_step(context, user_request):
+            return plan
+
+        steps_in = plan.get("steps") or []
+        if not isinstance(steps_in, list) or not steps_in:
+            return plan
+        if any(isinstance(s, dict) and s.get("agent") == "context_filter" for s in steps_in):
+            return plan
+
+        first_analyst_idx = next(
+            (i for i, s in enumerate(steps_in) if isinstance(s, dict) and s.get("agent") == "analyst"),
+            None,
+        )
+        if first_analyst_idx is None:
+            return plan
+
+        steps: List[Dict[str, Any]] = [dict(s) if isinstance(s, dict) else {} for s in steps_in]
+        analyst_step = steps[first_analyst_idx]
+        analyst_deps = analyst_step.get("depends_on", [])
+        if not isinstance(analyst_deps, list):
+            analyst_deps = []
+
+        filter_step = {
+            "agent": "context_filter",
+            "task": {
+                "description": "Apply cross-filter to focus working set for entity-specific analysis",
+                "allow_auto_filter": True,
+                "user_request": user_request[:1000],
+            },
+            "depends_on": analyst_deps,
+        }
+        steps.insert(first_analyst_idx, filter_step)
+        # Analyst must depend on context_filter now.
+        analyst_step["depends_on"] = [str(first_analyst_idx + 1)]
+        steps[first_analyst_idx + 1] = analyst_step
+
+        out = dict(plan)
+        out["steps"] = steps
+        out = self._normalize_plan_steps(out)
+        self.logger.info("🧩 Injected context_filter step before analyst for assistant query")
+        return out
+
+    @staticmethod
+    def _needs_context_filter_step(
+        context: Optional[Dict[str, Any]],
+        user_request: str,
+    ) -> bool:
+        if not context:
+            return False
+        if context.get("controller") != "ai_assistant":
+            return False
+        if context.get("mode") not in ("assistant", None, ""):
+            return False
+        if not context.get("input_data_preview"):
+            return False
+
+        req = (user_request or "").strip().lower()
+        if not req:
+            return False
+
+        # Fast heuristics: factual/entity question likely needs filtering by dim value.
+        intent_kw = (
+            "самый", "топ", "ходов", "лидер", "доля", "продаж", "товар", "бренд",
+            "brand", "manufacturer", "product", "sales",
+        )
+        if not any(k in req for k in intent_kw):
+            return False
+        return len(req) <= 300
 
     def _dict_to_plan(self, plan_dict: Dict[str, Any], user_request: str) -> Plan:
         """

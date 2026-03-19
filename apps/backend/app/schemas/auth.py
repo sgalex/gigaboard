@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from uuid import UUID
 from datetime import datetime
 
@@ -32,9 +32,29 @@ class UserResponse(BaseModel):
     id: UUID
     email: str
     username: str
+    role: str = "user"  # "user" | "admin"
     created_at: datetime
     updated_at: datetime
-    
+
+    @model_validator(mode="before")
+    @classmethod
+    def ensure_role(cls, data: any) -> any:
+        """Гарантирует наличие role (для старых записей или ORM без атрибута)."""
+        if isinstance(data, dict):
+            if data.get("role") is None:
+                data = {**data, "role": "user"}
+        else:
+            if getattr(data, "role", None) is None:
+                data = {
+                    "id": getattr(data, "id", None),
+                    "email": getattr(data, "email", ""),
+                    "username": getattr(data, "username", ""),
+                    "role": "user",
+                    "created_at": getattr(data, "created_at", None),
+                    "updated_at": getattr(data, "updated_at", None),
+                }
+        return data
+
     class Config:
         from_attributes = True
         json_schema_extra = {

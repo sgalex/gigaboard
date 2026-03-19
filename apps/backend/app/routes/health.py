@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -6,6 +7,7 @@ from ..core import get_redis
 from ..services.gigachat_service import get_gigachat_service
 
 router = APIRouter(tags=["health"])
+_log = logging.getLogger(__name__)
 
 @router.get("/health")
 async def health_check():
@@ -20,14 +22,14 @@ async def health_check():
 async def api_health_check(db: AsyncSession = Depends(get_db)):
     """Detailed health check - checks database and Redis"""
     try:
-        # Check database
         await db.execute(text("SELECT 1"))
         db_status = "ok"
+        _log.debug("Health check: database OK")
     except Exception as e:
         db_status = f"error: {str(e)}"
-    
+        _log.warning("Health check: database FAILED: %s", e, exc_info=True)
+
     try:
-        # Check Redis
         redis = get_redis()
         await redis.ping()
         redis_status = "ok"

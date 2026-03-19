@@ -15,9 +15,22 @@ from uuid import UUID, uuid4
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
+from sqlalchemy.orm import selectinload
 
 from .gigachat_service import get_gigachat_service
-from ..models import Board, BaseNode, ContentNode, WidgetNode, CommentNode, Edge
+from ..models import (
+    Board,
+    BaseNode,
+    ContentNode,
+    SourceNode,
+    WidgetNode,
+    CommentNode,
+    Edge,
+    Dashboard,
+    Project,
+    ProjectTable,
+    ProjectWidget,
+)
 from ..models.chat_message import ChatMessage, MessageRole
 
 logger = logging.getLogger(__name__)
@@ -32,7 +45,7 @@ class AIService:
     - Сложные запросы -> Multi-Agent обработка через Orchestrator
     """
     
-    SYSTEM_PROMPT = """Ты AI-помощник в GigaBoard — платформе для создания аналитических дашбордов.
+    SYSTEM_PROMPT = """Ты ИИ-ассистент в GigaBoard — платформе для создания аналитических дашбордов.
 
 Твоя роль:
 - Помогать пользователям анализировать данные на доске
@@ -57,6 +70,10 @@ class AIService:
 - Не предлагай действия, которые невозможно выполнить
 - Не используй технический жаргон без объяснений
 """
+    MAX_CONTEXT_NODES = 30
+    MAX_CONTEXT_TABLES_PER_NODE = 4
+    MAX_SAMPLE_ROWS_PER_TABLE = 8
+    MAX_SAMPLE_COLUMNS_PER_TABLE = 12
     
     def __init__(self, db: AsyncSession):
         """
@@ -64,7 +81,16 @@ class AIService:
             db: SQLAlchemy async session
         """
         self.db = db
-        self.gigachat = get_gigachat_service()
+        # AIService используется не только для прямого чата с GigaChat,
+        # но и как helper для board context/history в мультиагентном пайплайне.
+        # Поэтому не падаем на инициализации, если глобальный singleton не поднят.
+        try:
+            self.gigachat = get_gigachat_service()
+        except RuntimeError:
+            self.gigachat = None
+            logger.info(
+                "GigaChat singleton is not initialized; AIService will use context/history helpers only."
+            )
     
     async def get_board_context(
         self,
@@ -95,8 +121,16 @@ class AIService:
         all_nodes = nodes_result.scalars().all()
         
         # Разделить по типам
-        content_nodes = [n for n in all_nodes if isinstance(n, ContentNode)]
-        source_nodes = []  # TODO: добавить SourceNode когда потребуется
+        source_nodes = [n for n in all_nodes if isinstance(n, SourceNode)]
+        content_nodes = [
+            n for n in all_nodes
+            if isinstance(n, ContentNode) and not isinstance(n, SourceNode)
+        ]
+        # Для AI-контекста источники и content-ноды обрабатываются одинаково как data-bearing nodes.
+        data_nodes = [
+            n for n in all_nodes
+            if isinstance(n, ContentNode)
+        ][:self.MAX_CONTEXT_NODES]
         widget_nodes = [n for n in all_nodes if isinstance(n, WidgetNode)]
         comment_nodes = [n for n in all_nodes if isinstance(n, CommentNode)]
         
@@ -105,6 +139,20 @@ class AIService:
         edges_result = await self.db.execute(edges_query)
         edges = edges_result.scalars().all()
         
+        # Подготовка табличного каталога и data payload для LLM-контекста.
+        content_nodes_data = [self._build_node_data_payload(n) for n in data_nodes]
+        table_catalog: List[Dict[str, Any]] = []
+        for node_payload in content_nodes_data:
+            for table in node_payload.get("tables", []):
+                table_catalog.append({
+                    "node_id": node_payload["id"],
+                    "node_name": node_payload["name"],
+                    "node_type": node_payload["node_type"],
+                    "table_name": table.get("name", "table"),
+                    "columns": table.get("columns", []),
+                    "row_count": table.get("row_count", 0),
+                })
+
         # Формируем контекст
         context = {
             "board": {
@@ -154,12 +202,15 @@ class AIService:
                 }
                 for n in content_nodes
             ],
+            "content_nodes_data": content_nodes_data,
+            "table_catalog": table_catalog,
             "stats": {
                 "total_source_nodes": len(source_nodes),
                 "total_content_nodes": len(content_nodes),
                 "total_widget_nodes": len(widget_nodes),
                 "total_comment_nodes": len(comment_nodes),
                 "total_edges": len(edges),
+                "total_data_tables": len(table_catalog),
             }
         }
         
@@ -174,8 +225,232 @@ class AIService:
                 }
                 for n in selected_nodes
             ]
+            selected_set = {str(n.id) for n in selected_nodes}
+            context["selected_nodes_data"] = [
+                node_payload
+                for node_payload in content_nodes_data
+                if node_payload["id"] in selected_set
+            ]
+        else:
+            context["selected_nodes_data"] = []
         
         return context
+
+    async def get_dashboard_context(
+        self,
+        dashboard_id: UUID,
+        user_id: UUID,
+    ) -> Dict[str, Any]:
+        """
+        Build AI context for dashboard mode from dashboard items and project library sources.
+
+        Notes:
+        - Tables are taken from ProjectTable items directly.
+        - Widget items with `source_content_node_id` contribute ContentNode tables.
+        """
+        dashboard_query = (
+            select(Dashboard)
+            .join(Project, Project.id == Dashboard.project_id)
+            .where(Dashboard.id == dashboard_id, Project.user_id == user_id)
+            .options(selectinload(Dashboard.items))
+        )
+        dashboard_result = await self.db.execute(dashboard_query)
+        dashboard = dashboard_result.scalar_one_or_none()
+        if not dashboard:
+            return {"error": "Dashboard not found"}
+
+        item_list = list(getattr(dashboard, "items", []) or [])
+        table_source_ids = {
+            item.source_id
+            for item in item_list
+            if item.item_type == "table" and item.source_id
+        }
+        widget_source_ids = {
+            item.source_id
+            for item in item_list
+            if item.item_type == "widget" and item.source_id
+        }
+
+        project_tables_by_id: Dict[str, ProjectTable] = {}
+        if table_source_ids:
+            pt_result = await self.db.execute(
+                select(ProjectTable).where(ProjectTable.id.in_(table_source_ids))
+            )
+            project_tables_by_id = {str(t.id): t for t in pt_result.scalars().all()}
+
+        project_widgets_by_id: Dict[str, ProjectWidget] = {}
+        if widget_source_ids:
+            pw_result = await self.db.execute(
+                select(ProjectWidget).where(ProjectWidget.id.in_(widget_source_ids))
+            )
+            project_widgets_by_id = {str(w.id): w for w in pw_result.scalars().all()}
+
+        content_node_ids: set[UUID] = set()
+        for ptable in project_tables_by_id.values():
+            if ptable.source_content_node_id:
+                content_node_ids.add(ptable.source_content_node_id)
+        for widget in project_widgets_by_id.values():
+            if widget.source_content_node_id:
+                content_node_ids.add(widget.source_content_node_id)
+
+        linked_content_nodes: Dict[str, ContentNode] = {}
+        if content_node_ids:
+            cn_result = await self.db.execute(
+                select(ContentNode).where(ContentNode.id.in_(content_node_ids))
+            )
+            linked_content_nodes = {str(n.id): n for n in cn_result.scalars().all()}
+
+        content_nodes_data: List[Dict[str, Any]] = []
+        source_board_ids: set[str] = set()
+        seen_node_ids: set[str] = set()
+
+        # 1) Direct dashboard table items (project library snapshots)
+        for item in item_list:
+            if item.item_type != "table" or not item.source_id:
+                continue
+            ptable = project_tables_by_id.get(str(item.source_id))
+            if not ptable:
+                continue
+            synthetic_id = f"project_table:{ptable.id}"
+            if synthetic_id in seen_node_ids:
+                continue
+            seen_node_ids.add(synthetic_id)
+            if ptable.source_board_id:
+                source_board_ids.add(str(ptable.source_board_id))
+
+            columns = ptable.columns if isinstance(ptable.columns, list) else []
+            sample_rows = ptable.sample_data if isinstance(ptable.sample_data, list) else []
+            content_nodes_data.append({
+                "id": synthetic_id,
+                "name": ptable.name or f"ProjectTable-{ptable.id}",
+                "node_type": "project_table",
+                "text": ptable.description or "",
+                "tables": [{
+                    "name": ptable.table_name_in_node or ptable.name or "table",
+                    "columns": columns[: self.MAX_SAMPLE_COLUMNS_PER_TABLE],
+                    "sample_rows": sample_rows[: self.MAX_SAMPLE_ROWS_PER_TABLE],
+                    "row_count": int(ptable.row_count or len(sample_rows)),
+                }],
+            })
+
+        # 2) Widget items mapped to source content nodes
+        for widget in project_widgets_by_id.values():
+            node_id = str(widget.source_content_node_id) if widget.source_content_node_id else None
+            if not node_id:
+                continue
+            content_node = linked_content_nodes.get(node_id)
+            if not content_node:
+                continue
+            if str(content_node.id) in seen_node_ids:
+                continue
+            seen_node_ids.add(str(content_node.id))
+            if widget.source_board_id:
+                source_board_ids.add(str(widget.source_board_id))
+            elif getattr(content_node, "board_id", None):
+                source_board_ids.add(str(content_node.board_id))
+
+            content_nodes_data.append(self._build_node_data_payload(content_node))
+
+        # 3) If no source board ids from library links, infer from linked content nodes.
+        if not source_board_ids and linked_content_nodes:
+            for cn in linked_content_nodes.values():
+                if getattr(cn, "board_id", None):
+                    source_board_ids.add(str(cn.board_id))
+
+        table_catalog: List[Dict[str, Any]] = []
+        for node_payload in content_nodes_data:
+            for table in node_payload.get("tables", []):
+                table_catalog.append({
+                    "node_id": node_payload["id"],
+                    "node_name": node_payload["name"],
+                    "node_type": node_payload.get("node_type", "content"),
+                    "table_name": table.get("name", "table"),
+                    "columns": table.get("columns", []),
+                    "row_count": table.get("row_count", 0),
+                })
+
+        return {
+            "board": {
+                "id": str(dashboard.id),
+                "name": dashboard.name,
+                "description": dashboard.description,
+            },
+            "scope": "dashboard",
+            "dashboard_id": str(dashboard.id),
+            "content_nodes": [
+                {
+                    "id": node.get("id"),
+                    "name": node.get("name"),
+                    "content_summary": f"{len(node.get('tables', []))} tables",
+                }
+                for node in content_nodes_data
+            ],
+            "content_nodes_data": content_nodes_data,
+            "table_catalog": table_catalog,
+            "selected_nodes_data": [],
+            "source_board_ids": sorted(list(source_board_ids)),
+            "stats": {
+                "total_source_nodes": 0,
+                "total_content_nodes": len(content_nodes_data),
+                "total_widget_nodes": len([i for i in item_list if i.item_type == "widget"]),
+                "total_comment_nodes": 0,
+                "total_edges": 0,
+                "total_data_tables": len(table_catalog),
+                "total_dashboard_items": len(item_list),
+            },
+        }
+
+    def _build_node_data_payload(self, node: ContentNode) -> Dict[str, Any]:
+        """Build compact data payload for AI context (schema + sample rows)."""
+        content = getattr(node, "content", None) or {}
+        tables = content.get("tables", []) if isinstance(content, dict) else []
+
+        compact_tables: List[Dict[str, Any]] = []
+        for table in tables[: self.MAX_CONTEXT_TABLES_PER_NODE]:
+            table_name = table.get("name") or table.get("id") or "table"
+            raw_columns = table.get("columns", []) if isinstance(table, dict) else []
+            raw_rows = table.get("rows", []) if isinstance(table, dict) else []
+
+            columns: List[Dict[str, Any]] = []
+            column_names: List[str] = []
+            for col in raw_columns[: self.MAX_SAMPLE_COLUMNS_PER_TABLE]:
+                if isinstance(col, dict):
+                    col_name = str(col.get("name", "column"))
+                    col_type = str(col.get("type", "unknown"))
+                else:
+                    col_name = str(col)
+                    col_type = "unknown"
+                columns.append({"name": col_name, "type": col_type})
+                column_names.append(col_name)
+
+            sample_rows: List[Dict[str, Any]] = []
+            for row in raw_rows[: self.MAX_SAMPLE_ROWS_PER_TABLE]:
+                if not isinstance(row, dict):
+                    continue
+                sample_rows.append({k: row.get(k) for k in column_names if k in row})
+
+            row_count = table.get("row_count")
+            if not isinstance(row_count, int):
+                row_count = len(raw_rows) if isinstance(raw_rows, list) else 0
+
+            compact_tables.append({
+                "name": str(table_name),
+                "columns": columns,
+                "row_count": row_count,
+                "sample_rows": sample_rows,
+            })
+
+        node_name = getattr(node, "name", None)
+        if not node_name:
+            node_name = f"{getattr(node, 'node_type', 'node')}-{node.id}"
+
+        return {
+            "id": str(node.id),
+            "name": str(node_name),
+            "node_type": str(getattr(node, "node_type", "content_node")),
+            "text": (content.get("text", "") if isinstance(content, dict) else "")[:500],
+            "tables": compact_tables,
+        }
 
     @staticmethod
     def _summarize_content(node) -> str:
@@ -278,6 +553,12 @@ class AIService:
         self.db.add(user_message)
         
         try:
+            if self.gigachat is None:
+                raise RuntimeError(
+                    "GigaChat service is not configured. "
+                    "Use Multi-Agent chat endpoint or configure LLM in admin settings."
+                )
+
             # Получаем ответ от GigaChat
             logger.info(f"Sending chat request to GigaChat for board {board_id}")
             ai_response = await self.gigachat.chat_completion(messages, temperature=0.7)
@@ -390,6 +671,12 @@ class AIService:
         logger.info(f"🤖 [chat_stream] User message saved and committed")
         
         try:
+            if self.gigachat is None:
+                raise RuntimeError(
+                    "GigaChat service is not configured. "
+                    "Streaming via direct GigaChat is unavailable."
+                )
+
             # Streaming от GigaChat
             logger.info(f"🤖 [chat_stream] Calling GigaChat API with {len(messages)} messages...")
             logger.info(f"🤖 [chat_stream] GigaChat instance: {self.gigachat}")

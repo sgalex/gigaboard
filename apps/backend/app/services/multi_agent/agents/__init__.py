@@ -25,6 +25,7 @@ from .reporter import ReporterAgent
 from .quality_gate import QualityGateAgent
 from .widget_codex import WidgetCodexAgent
 from .transform_codex import TransformCodexAgent
+from .context_filter import ContextFilterAgent
 
 __all__ = [
     "BaseAgent",
@@ -34,4 +35,5 @@ __all__ = [
     "QualityGateAgent",
     "WidgetCodexAgent",
     "TransformCodexAgent",
+    "ContextFilterAgent",
 ]

@@ -100,7 +100,7 @@ classDiagram
 | `document` | PDF/DOCX/TXT            | `DocumentSource` — multi-agent + fallback                     | ⚠️ частично            |
 | `api`      | REST API                | `APISource` — GET/POST, auth, retry                           | ✅ реализован          |
 | `database` | PostgreSQL/MySQL/SQLite | `DatabaseSource`                                              | ✅ реализован          |
-| `research` | AI Research             | `ResearchSource` — SearchAgent→ResearcherAgent→AnalystAgent   | ⚠️ требует multi-agent |
+| `research` | AI Research             | `ResearchSource` → `ResearchController` → Orchestrator (discovery → research → structurizer → analyst → reporter) | ✅ multi-agent |
 | `manual`   | Ручной ввод             | `ManualSource` — table constructor                            | ✅ реализован          |
 | `stream`   | WebSocket/SSE           | `StreamSource` — stub                                         | ❌ Phase 4             |
 

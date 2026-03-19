@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sys
 import io
@@ -9,8 +10,9 @@ from starlette.routing import Mount, Route
 from starlette.responses import JSONResponse
 import socketio
 
-# Fix Windows console encoding for emoji support
+# Windows: SelectorEventLoop может стабильнее работать с сокетами (asyncpg, Redis)
 if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
         sys.stdout.reconfigure(encoding='utf-8', write_through=True)
         sys.stderr.reconfigure(encoding='utf-8', write_through=True)
@@ -18,7 +20,9 @@ if sys.platform == "win32":
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', write_through=True)
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', write_through=True)
 
-from .core import settings, init_db, close_db, init_redis, close_redis, sio, register_socketio_events
+from .core import settings, init_db, close_db, init_redis, close_redis, check_postgres_connectivity, sio, register_socketio_events
+from .core.database import async_session_maker
+from .services.auth_service import AuthService
 from .routes import (
     auth_router,
     health_router,
@@ -28,12 +32,14 @@ from .routes import (
     widget_nodes_router,
     comment_nodes_router,
     ai_assistant_router,
+    ai_assistant_dashboard_router,
+    ai_resolver_router,
+    research_router,
     source_nodes_router,
     content_nodes_router,
     database_router,
     files_router,
     extraction_router,
-    ai_resolver_router,
     library_router,
     dashboards_router,
     public_router,
@@ -41,8 +47,9 @@ from .routes import (
     board_filter_router,
     dashboard_filter_router,
     preset_router,
+    user_settings_router,
+    admin_router,
 )
-from .services.gigachat_service import initialize_gigachat_service, get_gigachat_service
 from .services.multi_agent.orchestrator import Orchestrator
 
 # Setup logging (force=True ensures handler is added even if uvicorn pre-configured root)
@@ -66,6 +73,9 @@ logging.getLogger('engineio.server').setLevel(logging.WARNING)
 # Отключаем успешные GET запросы uvicorn (200 OK)
 logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
 
+# Structurizer: DEBUG для отладки парсинга (дамп в logs/structurizer_last_response.txt при ошибке)
+logging.getLogger("app.services.multi_agent.agents.structurizer").setLevel(logging.DEBUG)
+
 # Global Orchestrator V2 singleton
 _orchestrator: Orchestrator | None = None
 
@@ -83,13 +93,31 @@ async def lifespan(app: FastAPI):
     
     # Track initialization status
     redis_ok = False
-    gigachat_ok = False
-    
+
+    # Сначала init_db (разогрев пула — часто первое подключение на Windows падает, второе проходит)
     try:
         await init_db()
         logger.info("✅ Database initialized")
     except Exception as e:
-        logger.error(f"❌ Failed to initialize database: {e}")
+        logger.error("❌ Failed to initialize database: %s", e, exc_info=True)
+    # Затем проверка доступности (использует соединение из пула)
+    pg_ok, pg_msg = await check_postgres_connectivity()
+    if pg_ok:
+        logger.info("✅ PostgreSQL is reachable (SELECT 1)")
+    else:
+        logger.warning("⚠️ PostgreSQL connectivity check failed (pool may still work): %s", pg_msg)
+
+    # Создать/обновить учётную запись администратора из env (ADMIN_EMAIL, ADMIN_PASSWORD)
+    _admin_email = (getattr(settings, "ADMIN_EMAIL", "") or "").strip()
+    _admin_pass = getattr(settings, "ADMIN_PASSWORD", "") or ""
+    logger.info("Startup: ADMIN_EMAIL set=%s (from .env)", bool(_admin_email))
+    if _admin_email and _admin_pass:
+        try:
+            async with async_session_maker() as db:
+                await AuthService.ensure_admin_user(db)
+            logger.info("✅ Admin user ensured from ADMIN_EMAIL")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not ensure admin user: {e}")
     
     try:
         await init_redis()
@@ -99,38 +127,21 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Failed to connect Redis: {e}")
         logger.warning("⚠️  Multi-Agent features will be disabled")
     
-    # Initialize GigaChat service
-    if settings.GIGACHAT_API_KEY:
-        try:
-            initialize_gigachat_service(
-                api_key=settings.GIGACHAT_API_KEY,
-                model=settings.GIGACHAT_MODEL,
-                temperature=settings.GIGACHAT_TEMPERATURE,
-                max_tokens=settings.GIGACHAT_MAX_TOKENS,
-                scope=settings.GIGACHAT_SCOPE,
-                verify_ssl_certs=settings.GIGACHAT_VERIFY_SSL,
-            )
-            gigachat_ok = True
-            logger.info(f"✅ GigaChat service initialized (model: {settings.GIGACHAT_MODEL}, scope: {settings.GIGACHAT_SCOPE})")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize GigaChat: {e}")
-            logger.warning("⚠️  AI features will be disabled")
-    else:
-        logger.warning("⚠️  GIGACHAT_API_KEY not set - AI features will be disabled")
-    
-    # Initialize Orchestrator V2 (requires both Redis and GigaChat)
+    # LLM (GigaChat и др.) настраивается только в панели администратора — модели в Настройках LLM.
+
+    # Initialize Orchestrator V2 (требуется только Redis; LLM — из моделей в панели администратора)
     global _orchestrator
-    if redis_ok and gigachat_ok:
+    if redis_ok:
         try:
             _orchestrator = Orchestrator(
-                gigachat_api_key=settings.GIGACHAT_API_KEY,
+                gigachat_api_key=None,
                 enable_agents=[
-                    # V2 core agents (Phase 3)
                     "planner", "discovery", "research",
                     "structurizer", "analyst", "transform_codex",
-                    "widget_codex", "reporter", "validator",
+                    "widget_codex", "context_filter", "reporter", "validator",
                 ],
                 adaptive_planning=True,
+                db_session_factory=async_session_maker,
             )
             await _orchestrator.initialize()
             logger.info("✅ Orchestrator V2 initialized with all agents")
@@ -139,11 +150,7 @@ async def lifespan(app: FastAPI):
             logger.warning("⚠️  Multi-Agent features will not be available")
             _orchestrator = None
     else:
-        logger.warning("⚠️  Orchestrator V2 disabled (requires Redis and GigaChat)")
-        if not redis_ok:
-            logger.warning("   - Redis: ❌ Not connected")
-        if not gigachat_ok:
-            logger.warning("   - GigaChat: ❌ Not initialized")
+        logger.warning("⚠️  Orchestrator V2 disabled (requires Redis)")
     
     yield
     
@@ -181,13 +188,14 @@ fastapi_app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware
+# CORS middleware (при allow_credentials=True нельзя использовать "*" — указываем явные origins)
 fastapi_app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Include routers
@@ -208,7 +216,9 @@ fastapi_app.include_router(extraction_router)
 
 # AI Assistant routes
 fastapi_app.include_router(ai_assistant_router)
+fastapi_app.include_router(ai_assistant_dashboard_router)
 fastapi_app.include_router(ai_resolver_router)
+fastapi_app.include_router(research_router)
 
 # Database routes
 fastapi_app.include_router(database_router)
@@ -226,6 +236,12 @@ fastapi_app.include_router(dimensions_router)
 fastapi_app.include_router(board_filter_router)
 fastapi_app.include_router(dashboard_filter_router)
 fastapi_app.include_router(preset_router)
+
+# User profile & AI settings routes
+fastapi_app.include_router(user_settings_router)
+
+# Admin routes (system LLM settings, playground)
+fastapi_app.include_router(admin_router)
 
 # Register Socket.IO event handlers
 register_socketio_events(sio)

@@ -30,6 +30,13 @@ from .dashboard_share import DashboardShare
 from .dimension import Dimension
 from .dimension_column_mapping import DimensionColumnMapping
 from .filter_preset import FilterPreset
+from .user_settings import (
+    UserAISettings,
+    UserSecret,
+    SystemLLMSettings,
+    LLMConfig,
+    AgentLLMOverride,
+)
 
 __all__ = [
     "User",
@@ -58,4 +65,9 @@ __all__ = [
     "Dimension",
     "DimensionColumnMapping",
     "FilterPreset",
+    "UserAISettings",
+    "UserSecret",
+    "SystemLLMSettings",
+    "LLMConfig",
+    "AgentLLMOverride",
 ]

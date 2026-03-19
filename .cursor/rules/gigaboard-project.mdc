@@ -64,6 +64,18 @@ alwaysApply: true
 - Перед добавлением новых моделей, сервисов или роутов смотреть на уже существующие файлы и повторно использовать их паттерны.
 - Не менять схему БД напрямую — только через Alembic‑миграции (`uv run alembic ...`).
 
+### Запуск миграций (Alembic)
+
+- **Рабочая директория**: конфиг Alembic лежит в `apps/backend/migrations/`. Все команды выполнять из неё:
+  - `cd apps/backend/migrations` (или из корня: `cd c:\Work\GigaBoard\apps\backend\migrations`).
+- **Через uv** (обязательно):
+  - Применить все миграции до указанной ревизии: `uv run alembic upgrade <revision>` (например `uv run alembic upgrade head` или `uv run alembic upgrade 09_temp_float`).
+  - Текущее состояние БД: `uv run alembic current`.
+  - Список голов (если ветвление): `uv run alembic heads`.
+  - Создать новую ревизию: `uv run alembic revision -m "описание"`.
+- **Важно**: в проекте может быть несколько голов (`alembic heads` покажет их). При ошибке «Multiple head revisions» указывать целевую ревизию явно: `uv run alembic upgrade <revision>`.
+- Файлы миграций: `apps/backend/migrations/versions/`. В миграциях указывать `down_revision` по ID ревизии из файла (например `cf01a2b3d4e5`), а не по имени файла.
+
 ## Правила для frontend (React/TypeScript)
 
 - Использовать **Zustand** как основной state‑manager.

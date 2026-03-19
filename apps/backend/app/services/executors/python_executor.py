@@ -16,6 +16,21 @@ from .gigaboard_helpers import init_helpers
 logger = logging.getLogger(__name__)
 
 
+class _GBUnavailable:
+    """Stub object that fails with clear guidance when gb helpers are unavailable."""
+
+    def __init__(self, reason: str):
+        self._reason = reason
+
+    def __getattr__(self, name: str):
+        raise RuntimeError(
+            "GigaBoard helpers (gb) are unavailable: "
+            f"{self._reason}. "
+            "Initialize GigaChat service via initialize_gigachat_service() "
+            "or avoid using gb.* in this transformation."
+        )
+
+
 class ExecutionResult:
     """Результат выполнения кода."""
     
@@ -78,20 +93,24 @@ class PythonExecutor:
                 're': re,  # Regex module for text processing
                 '__builtins__': __builtins__,
             }
-            
-            # Инициализация GigaBoard helpers (gb module)
-            # Context-aware: автоматически выбирает direct/MessageBus
-            try:
-                execution_context = {
-                    "orchestrated": False,  # TODO: передавать из вызывающего кода
-                    "source": "user_ui",
-                    "session_id": None  # TODO: если есть session
-                }
-                gb_helpers = init_helpers(execution_context)
-                namespace['gb'] = gb_helpers
-                logger.info("✅ GigaBoard helpers (gb) initialized")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to initialize gb helpers: {e}")
+
+            # Инициализируем gb helper только если код реально его использует.
+            # Это убирает шум в логах на обычных pandas-трансформациях.
+            if re.search(r"\bgb\.", code):
+                # Context-aware: автоматически выбирает direct/MessageBus
+                try:
+                    execution_context = {
+                        "orchestrated": False,  # TODO: передавать из вызывающего кода
+                        "source": "user_ui",
+                        "session_id": None  # TODO: если есть session
+                    }
+                    gb_helpers = init_helpers(execution_context)
+                    namespace['gb'] = gb_helpers
+                    logger.info("✅ GigaBoard helpers (gb) initialized")
+                except Exception as e:
+                    # Сохраняем совместимость исполнения, но даём явную причину при обращении к gb.*
+                    logger.info(f"ℹ️ gb helpers unavailable for this run: {e}")
+                    namespace['gb'] = _GBUnavailable(str(e))
             
             # Добавить входные данные
             # Предполагаем, что основная таблица называется 'df'

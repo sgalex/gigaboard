@@ -210,7 +210,8 @@ class StructurizerAgent(BaseAgent):
         self,
         message_bus: AgentMessageBus,
         gigachat_service: GigaChatService,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        llm_router: Optional[Any] = None,
     ):
         super().__init__(
             agent_name="structurizer",
@@ -218,6 +219,7 @@ class StructurizerAgent(BaseAgent):
             system_prompt=system_prompt
         )
         self.gigachat = gigachat_service
+        self.llm_router = llm_router
         
     def _get_default_system_prompt(self) -> str:
         return STRUCTURIZER_SYSTEM_PROMPT
@@ -255,12 +257,14 @@ class StructurizerAgent(BaseAgent):
                 {"role": "user", "content": user_prompt}
             ]
             
-            response = await self.gigachat.chat_completion(
-                messages=messages,
-                temperature=0.3,
-                max_tokens=4000
+            response = await self._call_llm(
+                messages, context=context, temperature=0.3, max_tokens=4000
             )
-            
+
+            self.logger.info(
+                f"📥 Structurizer LLM response length: {len(response)} chars"
+            )
+
             # Парсим ответ LLM (старый dict формат)
             raw_result = self._parse_response(response)
             raw_result = self._add_row_ids(raw_result)
@@ -364,14 +368,26 @@ class StructurizerAgent(BaseAgent):
 
         return ""
     
-    def _build_prompt(self, description: str, content: str) -> str:
-        """Формирует промпт для LLM."""
-        
-        # Ограничиваем размер контента
-        max_content_length = 15000
+    def _sanitize_content_for_llm(self, content: str) -> str:
+        """
+        Уменьшает риск срабатывания blacklist/moderation GigaChat:
+        ограничение длины, замена длинных URL на плейсхолдер.
+        """
+        max_content_length = 10000
         if len(content) > max_content_length:
             content = content[:max_content_length] + "\n\n... (truncated)"
-        
+        # Замена URL на плейсхолдер — часто триггерит модерацию
+        content = re.sub(
+            r"https?://[^\s\]\)\}\"']+",
+            "[URL]",
+            content,
+            flags=re.IGNORECASE,
+        )
+        return content
+
+    def _build_prompt(self, description: str, content: str) -> str:
+        """Формирует промпт для LLM."""
+        content = self._sanitize_content_for_llm(content)
         return f"""**TASK**: {description}
 
 **RAW CONTENT TO STRUCTURE**:
@@ -388,54 +404,178 @@ class StructurizerAgent(BaseAgent):
 Remember: Your job is ONLY to extract structure, not to analyze or make recommendations."""
     
     def _parse_response(self, response: str) -> Dict[str, Any]:
-        """Парсит ответ LLM."""
+        """Парсит ответ LLM. Несколько попыток: markdown → извлечение по скобкам → repair."""
+        raw = response.strip()
+
+        # Ответ без JSON (blacklist/модерация GigaChat — обрезанный или текстовый ответ)
+        if not raw or "{" not in raw:
+            preview = (raw[:300] + "...") if len(raw) > 300 else raw
+            self.logger.warning(
+                "Structurizer: LLM returned non-JSON (possible blacklist/truncation). "
+                "Response: %s",
+                preview,
+            )
+            return self._empty_result(
+                "LLM returned non-JSON (possible content filter/blacklist). Try simpler query or other content."
+            )
+        if len(raw) < 300:
+            self.logger.warning(
+                "Structurizer: very short LLM response (%s chars), may be truncated: %s",
+                len(raw),
+                raw[:200],
+            )
+
+        # 1) Извлечь фрагмент для парсинга (вложенный JSON — по балансу скобок)
+        candidate = ""
+        md_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+        if md_match:
+            block = md_match.group(1).strip()
+            start = block.find("{")
+            if start >= 0:
+                candidate = self._extract_json_by_braces(block, start) or block[start:]
+        if not candidate:
+            start = raw.find("{")
+            if start >= 0:
+                candidate = self._extract_json_by_braces(raw, start) or raw[start:]
+        if not candidate:
+            candidate = raw
+
+        # 2) Парсинг
         try:
-            # Удаляем markdown обёртки
-            response = response.strip()
-            
-            # Проверяем markdown блок
-            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response, re.DOTALL)
-            if json_match:
-                response = json_match.group(1)
-            
-            # Ищем JSON объект
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-                
-                # Валидируем обязательные поля
-                if "tables" not in result:
-                    result["tables"] = []
-                if "entities" not in result:
-                    result["entities"] = []
-                if "key_value_pairs" not in result:
-                    result["key_value_pairs"] = {}
-                if "extraction_confidence" not in result:
-                    result["extraction_confidence"] = 0.5
-                if "notes" not in result:
-                    result["notes"] = ""
-                
-                return result
-            
-            # Fallback: пустой результат
-            self.logger.warning("Could not parse LLM response as JSON")
-            return {
-                "tables": [],
-                "entities": [],
-                "key_value_pairs": {},
-                "extraction_confidence": 0.0,
-                "notes": f"Failed to parse response: {response[:200]}"
-            }
-            
+            result = json.loads(candidate)
+            return self._normalize_parse_result(result)
         except json.JSONDecodeError as e:
-            self.logger.error(f"JSON parse error: {e}")
-            return {
-                "tables": [],
-                "entities": [],
-                "key_value_pairs": {},
-                "extraction_confidence": 0.0,
-                "notes": f"JSON parse error: {str(e)}"
-            }
+            self._log_parse_failure(raw, candidate, e)
+        except Exception as e:
+            self.logger.error(f"Structurizer parse unexpected error: {e}", exc_info=True)
+            return self._empty_result(f"Parse error: {e}")
+
+        # 3) Попытка починить JSON
+        repaired = self._repair_json(candidate)
+        try:
+            result = json.loads(repaired)
+            self.logger.info("✅ Structurizer: parsed after JSON repair")
+            return self._normalize_parse_result(result)
+        except json.JSONDecodeError as e2:
+            self.logger.warning(f"Structurizer: repair did not help: {e2}")
+            return self._empty_result(f"JSON parse error: {str(e2)}")
+    
+    def _extract_json_by_braces(self, text: str, start: int) -> Optional[str]:
+        """Извлекает подстроку от start до сбалансированной закрывающей }."""
+        depth_curly = 0
+        depth_square = 0
+        in_string = False
+        escape_next = False
+        i = start
+        while i < len(text):
+            c = text[i]
+            if escape_next:
+                escape_next = False
+                i += 1
+                continue
+            if c == '\\' and in_string:
+                escape_next = True
+                i += 1
+                continue
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if in_string:
+                i += 1
+                continue
+            if c == '{':
+                depth_curly += 1
+            elif c == '}':
+                depth_curly -= 1
+            elif c == '[':
+                depth_square += 1
+            elif c == ']':
+                depth_square -= 1
+            i += 1
+            if depth_curly == 0 and depth_square == 0:
+                return text[start:i]
+        return None
+
+    def _normalize_parse_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        if "tables" not in result:
+            result["tables"] = []
+        if "entities" not in result:
+            result["entities"] = []
+        if "key_value_pairs" not in result:
+            result["key_value_pairs"] = {}
+        if "extraction_confidence" not in result:
+            result["extraction_confidence"] = 0.5
+        if "notes" not in result:
+            result["notes"] = ""
+        return result
+
+    def _empty_result(self, notes: str) -> Dict[str, Any]:
+        return {
+            "tables": [],
+            "entities": [],
+            "key_value_pairs": {},
+            "extraction_confidence": 0.0,
+            "notes": notes,
+        }
+
+    def _log_parse_failure(
+        self, raw: str, candidate: str, e: json.JSONDecodeError
+    ) -> None:
+        """Логирует сырой ответ при ошибке парсинга для отладки."""
+        self.logger.error(f"JSON parse error: {e}")
+        preview = candidate[:500] + "..." if len(candidate) > 500 else candidate
+        if len(raw) <= 600:
+            self.logger.info(
+                "Structurizer LLM raw response (parse failed): %s",
+                raw,
+            )
+        self.logger.debug(f"Structurizer candidate (first 500): {preview}")
+        if len(candidate) > 2000:
+            self.logger.debug(
+                f"Structurizer candidate (around error line {getattr(e, 'lineno', '?')}): "
+                f"...{candidate[max(0, (e.pos or 0) - 200):(e.pos or 0) + 200]}..."
+            )
+        # Опционально: запись в файл для разбора (включается через DEBUG)
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                import os
+                log_dir = os.path.join(
+                    os.path.dirname(__file__), "..", "..", "..", "..", "logs"
+                )
+                os.makedirs(log_dir, exist_ok=True)
+                path = os.path.join(log_dir, "structurizer_last_response.txt")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("=== RAW ===\n")
+                    f.write(raw[:50000])
+                    f.write("\n\n=== CANDIDATE ===\n")
+                    f.write(candidate[:50000])
+                    f.write(f"\n\n=== ERROR: {e} ===\n")
+                self.logger.debug(f"Structurizer debug dump: {path}")
+            except Exception as ex:
+                self.logger.warning(f"Could not write structurizer debug file: {ex}")
+
+    def _repair_json(self, content: str) -> str:
+        """Типичные исправления JSON от LLM: висячие запятые, баланс скобок."""
+        repaired = content.strip()
+        # Убрать висячие запятые перед ] или }
+        repaired = re.sub(r",\s*]", "]", repaired)
+        repaired = re.sub(r",\s*}", "}", repaired)
+        open_curly = repaired.count("{") - repaired.count("}")
+        open_square = repaired.count("[") - repaired.count("]")
+        if open_curly > 0 or open_square > 0:
+            repaired = repaired.rstrip().rstrip(",")
+            repaired += "}" * open_curly + "]" * open_square
+        if open_curly < 0 or open_square < 0:
+            for _ in range(-open_curly):
+                pos = repaired.rfind("}")
+                if pos >= 0:
+                    repaired = repaired[:pos] + repaired[pos + 1:]
+            for _ in range(-open_square):
+                pos = repaired.rfind("]")
+                if pos >= 0:
+                    repaired = repaired[:pos] + repaired[pos + 1:]
+        return repaired
     
     def _add_row_ids(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Нормализует таблицы в unified формат: columns=[{name,type}], rows=[{col:val}]."""

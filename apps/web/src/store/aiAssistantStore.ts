@@ -8,6 +8,13 @@ import { notify } from './notificationStore'
 import type { ChatMessage, AIChatRequest } from '@/types'
 import { MessageRole } from '@/types'
 
+interface SendAssistantMessageOptions {
+    allowAutoFilter?: boolean
+    requiredTables?: string[]
+    filterExpression?: Record<string, any>
+}
+type AIAssistantScope = 'board' | 'dashboard'
+
 interface AIAssistantStore {
     // State
     messages: ChatMessage[]
@@ -29,10 +36,10 @@ interface AIAssistantStore {
     setSocket: (socket: any) => void
     setSelectedNodes: (nodeIds: string[]) => void
 
-    sendMessage: (boardId: string, message: string) => Promise<void>
-    sendMessageStream: (boardId: string, message: string) => void
-    loadHistory: (boardId: string, sessionId?: string) => Promise<void>
-    clearSession: (boardId: string) => Promise<void>
+    sendMessage: (contextId: string, message: string, options?: SendAssistantMessageOptions, scope?: AIAssistantScope) => Promise<void>
+    sendMessageStream: (contextId: string, message: string, options?: SendAssistantMessageOptions, scope?: AIAssistantScope) => Promise<void>
+    loadHistory: (contextId: string, sessionId?: string, scope?: AIAssistantScope) => Promise<void>
+    clearSession: (contextId: string, scope?: AIAssistantScope) => Promise<void>
 
     // Streaming handlers
     handleStreamStart: () => void
@@ -103,93 +110,81 @@ export const useAIAssistantStore = create<AIAssistantStore>((set, get) => ({
         notify.error(error, { title: 'AI Streaming Error' })
     },
 
-    // Send message with streaming (Socket.IO)
-    sendMessageStream: (boardId: string, message: string) => {
-        const { sessionId, selectedNodeIds, socket } = get()
+    // Sidebar assistant should use the Multi-Agent REST endpoint.
+    sendMessageStream: async (contextId: string, message: string, options?: SendAssistantMessageOptions, scope: AIAssistantScope = 'board') => {
+        await get().sendMessage(contextId, message, options, scope)
+    },
 
-        if (!socket) {
-            console.error('❌ Socket not available')
-            set({ error: 'Socket connection not available' })
-            return
-        }
+    // Send message to AI (REST fallback)
+    sendMessage: async (
+        contextId: string,
+        message: string,
+        options?: SendAssistantMessageOptions,
+        scope: AIAssistantScope = 'board',
+    ) => {
+        const { sessionId, selectedNodeIds } = get()
+        const optimisticUserMessageId = `user-${Date.now()}`
 
-        // Добавляем сообщение пользователя сразу
-        const userMessage: ChatMessage = {
-            id: `user-${Date.now()}`,
-            board_id: boardId,
+        set({ isLoading: true, error: null })
+
+        // Optimistic update: message should appear immediately in chat.
+        const optimisticUserMessage: ChatMessage = {
+            id: optimisticUserMessageId,
+            board_id: contextId,
             user_id: '',
             session_id: sessionId || '',
             role: MessageRole.USER,
             content: message,
             created_at: new Date().toISOString(),
         }
-
         set((state) => ({
-            messages: [...state.messages, userMessage]
+            messages: [...state.messages, optimisticUserMessage],
         }))
-
-        console.log('📤 Sending AI chat stream request:', {
-            board_id: boardId,
-            session_id: sessionId,
-            message,
-            socket_id: socket.id
-        })
-
-        // Отправляем через Socket.IO
-        socket.emit('ai_chat_stream', {
-            board_id: boardId,
-            session_id: sessionId,
-            message,
-            selected_node_ids: selectedNodeIds.length > 0 ? selectedNodeIds : undefined,
-        })
-    },
-
-    // Send message to AI (REST fallback)
-    sendMessage: async (boardId: string, message: string) => {
-        const { sessionId, selectedNodeIds } = get()
-
-        set({ isLoading: true, error: null })
 
         try {
             const request: AIChatRequest = {
                 message,
                 session_id: sessionId || undefined,
-                context: selectedNodeIds.length > 0 ? { selected_nodes: selectedNodeIds } : undefined,
+                context: {
+                    mode: scope,
+                    selected_node_ids: selectedNodeIds,
+                    allow_auto_filter: Boolean(options?.allowAutoFilter),
+                    required_tables: options?.requiredTables,
+                    filter_expression: options?.filterExpression,
+                },
             }
 
-            const response = await aiAssistantAPI.chat(boardId, request)
+            const response = scope === 'dashboard'
+                ? await aiAssistantAPI.chatDashboard(contextId, request)
+                : await aiAssistantAPI.chat(contextId, request)
+            const responseSessionId = response.data.session_id
 
             // Update session ID if new
-            if (!sessionId) {
-                set({ sessionId: response.data.session_id })
-            }
-
-            // Create user message
-            const userMessage: ChatMessage = {
-                id: `temp-user-${Date.now()}`,
-                board_id: boardId,
-                user_id: '',
-                session_id: response.data.session_id,
-                role: MessageRole.USER,
-                content: message,
-                created_at: new Date().toISOString(),
-            }
+            if (!sessionId) set({ sessionId: responseSessionId })
 
             // Create assistant message
             const assistantMessage: ChatMessage = {
                 id: `temp-assistant-${Date.now()}`,
-                board_id: boardId,
+                board_id: contextId,
                 user_id: '',
-                session_id: response.data.session_id,
+                session_id: responseSessionId,
                 role: MessageRole.ASSISTANT,
-                content: response.data.message,
+                content: response.data.response,
+                context: response.data.context_used || undefined,
                 suggested_actions: response.data.suggested_actions,
                 created_at: new Date().toISOString(),
             }
 
-            // Add messages to state
+            // Append assistant and reconcile optimistic user message session.
             set((state) => ({
-                messages: [...state.messages, userMessage, assistantMessage],
+                messages: [
+                    ...state.messages.map((msg) =>
+                        msg.id === optimisticUserMessageId
+                            ? { ...msg, session_id: responseSessionId }
+                            : msg
+                    ),
+                    assistantMessage,
+                ],
                 isLoading: false,
             }))
 
@@ -201,12 +196,14 @@ export const useAIAssistantStore = create<AIAssistantStore>((set, get) => ({
     },
 
     // Load chat history
-    loadHistory: async (boardId: string, sessionId?: string) => {
+    loadHistory: async (contextId: string, sessionId?: string, scope: AIAssistantScope = 'board') => {
         set({ isLoading: true, error: null })
 
         try {
             // Используем новый endpoint для получения истории пользователя
-            const response = await aiAssistantAPI.getMyHistory(boardId, 50)
+            const response = scope === 'dashboard'
+                ? await aiAssistantAPI.getMyHistoryDashboard(contextId, 50)
+                : await aiAssistantAPI.getMyHistory(contextId, 50)
 
             set({
                 messages: response.data.messages,
@@ -226,12 +223,16 @@ export const useAIAssistantStore = create<AIAssistantStore>((set, get) => ({
     },
 
     // Clear chat session
-    clearSession: async (boardId: string) => {
+    clearSession: async (contextId: string, scope: AIAssistantScope = 'board') => {
         const { sessionId } = get()
         if (!sessionId) return
 
         try {
-            await aiAssistantAPI.deleteSession(boardId, sessionId)
+            if (scope === 'dashboard') {
+                await aiAssistantAPI.deleteSessionDashboard(contextId, sessionId)
+            } else {
+                await aiAssistantAPI.deleteSession(contextId, sessionId)
+            }
             set({
                 messages: [],
                 sessionId: null,

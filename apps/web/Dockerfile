@@ -1,37 +1,26 @@
-# Multi-stage build for Frontend
-
-# Stage 1: Build
+# Multi-stage: production build. Контекст — корень репозитория (npm workspaces + copy-libs).
 FROM node:20-alpine AS builder
 
-WORKDIR /app
+WORKDIR /workspace
 
-# Copy package files
-COPY apps/web/package.json ./
+COPY package.json package-lock.json ./
+COPY apps/web/package.json ./apps/web/
 
-# Install dependencies
-RUN npm install
+RUN npm ci
 
-# Copy source code
-COPY apps/web/ ./
+COPY apps/web ./apps/web
 
-# Build application
+WORKDIR /workspace/apps/web
 RUN npm run build
 
-# Stage 2: Production with nginx
 FROM nginx:alpine
 
-# Copy built assets from builder stage
-COPY --from=builder /app/dist /usr/share/nginx/html
-
-# Copy nginx configuration
+COPY --from=builder /workspace/apps/web/dist /usr/share/nginx/html
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
 
-# Expose port
 EXPOSE 80
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget --quiet --tries=1 --spider http://localhost/health || exit 1
+    CMD wget -q -O /dev/null http://127.0.0.1/health || exit 1
 
-# Start nginx
 CMD ["nginx", "-g", "daemon off;"]

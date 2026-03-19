@@ -3,6 +3,7 @@
  * The center area (#topbar-context) serves as a portal target for
  * context-specific toolbars rendered by BoardCanvas / DashboardPage.
  */
+import { useNavigate } from 'react-router-dom'
 import { Menu, User, LogOut, Settings, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ThemeToggle } from '@/components/ThemeToggle'
@@ -19,6 +20,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 
 export function TopBar() {
+    const navigate = useNavigate()
     const { user, logout } = useAuthStore()
     const { toggleProjectExplorer, isAIPanelOpen, toggleAIPanel } = useUIStore()
 
@@ -53,7 +55,7 @@ export function TopBar() {
                             size="icon"
                             className="h-8 w-8 relative"
                             onClick={toggleAIPanel}
-                            title={isAIPanelOpen ? 'Скрыть AI помощник' : 'Показать AI помощник'}
+                            title={isAIPanelOpen ? 'Скрыть ИИ-ассистента' : 'Показать ИИ-ассистента'}
                         >
                             <Sparkles className="h-4 w-4" />
                             {isAIPanelOpen && (
@@ -78,7 +80,7 @@ export function TopBar() {
                                 </div>
                             </DropdownMenuLabel>
                             <DropdownMenuSeparator />
-                            <DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => navigate('/profile')}>
                                 <Settings className="mr-2 h-4 w-4" />
                                 <span>Настройки</span>
                             </DropdownMenuItem>

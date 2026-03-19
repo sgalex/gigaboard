@@ -433,6 +433,65 @@ class TestAIAssistantController:
         assert isinstance(result, ControllerResult)
         assert result.status == "error"
 
+    def test_referential_focus_extracts_previous_brand(self, controller):
+        chat_history = [
+            {"role": "user", "content": "Расскажи чем занимается Hobby World"},
+            {"role": "assistant", "content": "Hobby World — это бренд настольных игр."},
+        ]
+        hints = controller._extract_dialog_referential_focus(
+            user_message="какая самая топовая у них игра?",
+            chat_history=chat_history,
+        )
+        assert hints
+        assert "Hobby World" in hints[0]
+
+    def test_build_assistant_request_adds_dialog_focus_block(self, controller):
+        chat_history = [
+            {"role": "user", "content": "что с Hobby World?"},
+            {"role": "assistant", "content": "Hobby World — бренд настольных игр."},
+        ]
+        request = controller._build_assistant_request(
+            user_message="о чем она?",
+            board_context={},
+            selected_nodes_data=[],
+            chat_history=chat_history,
+        )
+        assert "[ФОКУС ДИАЛОГА:" in request
+        assert "Hobby World" in request
+
+    def test_referential_focus_prioritizes_user_brand_over_assistant_product(self, controller):
+        chat_history = [
+            {"role": "user", "content": "что с Bradex?"},
+            {
+                "role": "assistant",
+                "content": (
+                    "Бренд Bradex в порядке. Топовый продукт — "
+                    "массажер для стоп «Блаженство»."
+                ),
+            },
+        ]
+        hints = controller._extract_dialog_referential_focus(
+            user_message="а какой самый топовый продукт у них?",
+            chat_history=chat_history,
+        )
+        assert hints
+        assert "Bradex" in hints[0]
+        assert "Блаженство" not in hints[0]
+
+    def test_referential_focus_requires_entity_overlap_between_user_and_assistant(self, controller):
+        chat_history = [
+            {"role": "user", "content": "что с Bradex?"},
+            {
+                "role": "assistant",
+                "content": "Самый частый продукт — «Блаженство».",
+            },
+        ]
+        hints = controller._extract_dialog_referential_focus(
+            user_message="а какой самый топовый продукт у них?",
+            chat_history=chat_history,
+        )
+        assert hints == []
+
 
 # ============================================================
 # TransformSuggestionsController

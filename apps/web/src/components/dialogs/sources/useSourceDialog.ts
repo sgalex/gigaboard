@@ -32,7 +32,8 @@ export function useSourceDialog({ sourceType, onClose, position = { x: 100, y: 1
 
     const create = useCallback(async (
         config: SourceConfig,
-        metadata?: Record<string, any>
+        metadata?: Record<string, any>,
+        data?: { text?: string; tables?: Array<{ name?: string; columns?: Array<{ name: string; type?: string }>; rows?: Record<string, unknown>[]; row_count?: number; column_count?: number }> }
     ): Promise<CreateSourceResult> => {
         if (!boardId) {
             notify.error('Board ID не найден')
@@ -47,14 +48,16 @@ export function useSourceDialog({ sourceType, onClose, position = { x: 100, y: 1
         setIsLoading(true)
 
         try {
-            const result = await createSourceNode(boardId, {
+            const payload: Parameters<typeof createSourceNode>[1] = {
                 board_id: boardId,
                 source_type: sourceType,
                 config,
                 metadata: metadata || {},
                 position,
                 created_by: user.id,
-            })
+            }
+            if (data != null) payload.data = data
+            const result = await createSourceNode(boardId, payload)
 
             if (result) {
                 onClose()

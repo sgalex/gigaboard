@@ -118,12 +118,10 @@ class DocumentSource(BaseSource):
             else:
                 text, tables = self._extract_txt(file_content, config)
             
-            # Generate summary if text is long
-            text_summary = text[:500] + "..." if len(text) > 500 else text
+            total_rows = sum(len(t.rows) for t in tables)
             summary_line = f"Документ «{filename}»"
             if tables:
                 summary_line += f". Найдено таблиц: {len(tables)}"
-            total_rows = sum(len(t.rows) for t in tables)
             if total_rows:
                 summary_line += f", всего строк: {total_rows}"
             summary_line += f". Длина текста: {len(text)} символов."
@@ -134,16 +132,18 @@ class DocumentSource(BaseSource):
             
             return ExtractionResult(
                 success=True,
-                text=summary_line + "\n\n" + text_summary,
+                text=text,
                 tables=tables,
                 extraction_time_ms=extraction_time,
                 metadata={
                     "document_type": document_type,
                     "filename": filename,
+                    "summary": summary_line,
                     "text_length": len(text),
                     "table_count": len(tables),
                     "total_rows": total_rows,
                     "page_count": config.get("_page_count", None),
+                    "is_scanned": bool(config.get("_is_scanned", False)),
                 }
             )
             
@@ -179,10 +179,13 @@ class DocumentSource(BaseSource):
         # Try extracting tables from text using heuristic
         tables = self._extract_tables_from_text(text)
         
+        config["_is_scanned"] = False
+
         # If no text at all, document might be scanned
         if not text.strip():
             text = "[Документ не содержит текстового слоя. Возможно, это скан — требуется OCR.]"
             logger.warning("PDF has no text layer, likely scanned")
+            config["_is_scanned"] = True
         
         return text, tables
     

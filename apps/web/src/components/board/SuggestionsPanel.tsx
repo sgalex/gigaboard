@@ -1,6 +1,28 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { Loader2, Sparkles, TrendingUp, Lightbulb, Library, Palette, AlertCircle } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
+import {
+    Loader2,
+    Sparkles,
+    TrendingUp,
+    Lightbulb,
+    Library,
+    Palette,
+    AlertCircle,
+    BarChart3,
+    LineChart,
+    PieChart,
+    ScatterChart,
+    Flame,
+    Table2,
+    LayoutDashboard,
+    Map,
+    Filter,
+    Gauge,
+    LayoutGrid,
+    Radar,
+    ChartColumn,
+} from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -9,6 +31,8 @@ import { contentNodesAPI } from '@/services/api'
 interface Suggestion {
     id: string
     type: 'improvement' | 'alternative' | 'insight' | 'library' | 'style'
+    /** Тип визуализации для иконки/цвета бейджа (с бэкенда) */
+    viz_category?: string
     priority: 'high' | 'medium' | 'low'
     title: string
     description: string
@@ -23,7 +47,7 @@ interface SuggestionsPanelProps {
     onSuggestionClick: (prompt: string) => void
 }
 
-const SUGGESTION_ICONS = {
+const SUGGESTION_TYPE_ICONS = {
     improvement: Sparkles,
     alternative: TrendingUp,
     insight: Lightbulb,
@@ -31,10 +55,116 @@ const SUGGESTION_ICONS = {
     style: Palette,
 }
 
-const PRIORITY_COLORS = {
-    high: 'border-red-500 bg-red-50',
-    medium: 'border-yellow-500 bg-yellow-50',
-    low: 'border-gray-300 bg-gray-50',
+const VIZ_KEYS = new Set([
+    'bar',
+    'line',
+    'pie',
+    'scatter',
+    'heatmap',
+    'table',
+    'kpi',
+    'map',
+    'funnel',
+    'gauge',
+    'treemap',
+    'radar',
+    'chart',
+])
+
+const VIZ_BADGE: Record<
+    string,
+    { Icon: LucideIcon; className: string; label: string }
+> = {
+    bar: {
+        Icon: BarChart3,
+        className:
+            'border-gray-200 bg-blue-50 text-blue-950 border-l-[3px] border-l-blue-600 hover:bg-blue-100',
+        label: 'Столбцы',
+    },
+    line: {
+        Icon: LineChart,
+        className:
+            'border-gray-200 bg-emerald-50 text-emerald-950 border-l-[3px] border-l-emerald-600 hover:bg-emerald-100',
+        label: 'Линия',
+    },
+    pie: {
+        Icon: PieChart,
+        className:
+            'border-gray-200 bg-violet-50 text-violet-950 border-l-[3px] border-l-violet-600 hover:bg-violet-100',
+        label: 'Круг / доли',
+    },
+    scatter: {
+        Icon: ScatterChart,
+        className:
+            'border-gray-200 bg-cyan-50 text-cyan-950 border-l-[3px] border-l-cyan-600 hover:bg-cyan-100',
+        label: 'Точки',
+    },
+    heatmap: {
+        Icon: Flame,
+        className:
+            'border-gray-200 bg-orange-50 text-orange-950 border-l-[3px] border-l-orange-600 hover:bg-orange-100',
+        label: 'Тепловая карта',
+    },
+    table: {
+        Icon: Table2,
+        className:
+            'border-gray-200 bg-slate-50 text-slate-900 border-l-[3px] border-l-slate-600 hover:bg-slate-100',
+        label: 'Таблица',
+    },
+    kpi: {
+        Icon: LayoutDashboard,
+        className:
+            'border-gray-200 bg-amber-50 text-amber-950 border-l-[3px] border-l-amber-600 hover:bg-amber-100',
+        label: 'KPI',
+    },
+    map: {
+        Icon: Map,
+        className:
+            'border-gray-200 bg-teal-50 text-teal-950 border-l-[3px] border-l-teal-600 hover:bg-teal-100',
+        label: 'Карта',
+    },
+    funnel: {
+        Icon: Filter,
+        className:
+            'border-gray-200 bg-pink-50 text-pink-950 border-l-[3px] border-l-pink-600 hover:bg-pink-100',
+        label: 'Воронка',
+    },
+    gauge: {
+        Icon: Gauge,
+        className:
+            'border-gray-200 bg-indigo-50 text-indigo-950 border-l-[3px] border-l-indigo-600 hover:bg-indigo-100',
+        label: 'Датчик',
+    },
+    treemap: {
+        Icon: LayoutGrid,
+        className:
+            'border-gray-200 bg-lime-50 text-lime-950 border-l-[3px] border-l-lime-600 hover:bg-lime-100',
+        label: 'Treemap',
+    },
+    radar: {
+        Icon: Radar,
+        className:
+            'border-gray-200 bg-rose-50 text-rose-950 border-l-[3px] border-l-rose-600 hover:bg-rose-100',
+        label: 'Радар',
+    },
+    chart: {
+        Icon: ChartColumn,
+        className:
+            'border-gray-200 bg-gray-50 text-gray-900 border-l-[3px] border-l-gray-500 hover:bg-gray-100',
+        label: 'График',
+    },
+}
+
+function vizConfig(viz?: string) {
+    const key =
+        viz && VIZ_KEYS.has(viz.toLowerCase()) ? viz.toLowerCase() : 'chart'
+    return VIZ_BADGE[key] ?? VIZ_BADGE.chart
+}
+
+const PRIORITY_DOT = {
+    high: 'bg-red-500',
+    medium: 'bg-amber-400',
+    low: 'bg-gray-400',
 }
 
 const PRIORITY_BADGE_COLORS = {
@@ -155,13 +285,24 @@ export const SuggestionsPanel = ({
     return (
         <div className="p-2">
             {/* Compact tag view with tooltips */}
-            <div className="flex flex-wrap gap-1.5">
-                {suggestions.map((suggestion) => {
-                    const Icon = SUGGESTION_ICONS[suggestion.type] || Sparkles // Fallback icon
+            <div className="grid w-full grid-cols-6 gap-1.5">
+                {suggestions.map((suggestion, index) => {
+                    const { Icon, className: vizClass } = vizConfig(
+                        suggestion.viz_category
+                    )
+                    const n = suggestions.length
+                    const r = n % 3
+                    const colSpan =
+                        r === 1 && index === n - 1
+                            ? 'col-span-6'
+                            : r === 2 && index >= n - 2
+                              ? 'col-span-3'
+                              : 'col-span-2'
 
                     return (
                         <div
                             key={suggestion.id}
+                            className={cn('min-w-0 w-full', colSpan)}
                             ref={(el) => (badgeRefs.current[suggestion.id] = el)}
                             onMouseEnter={(e) => {
                                 const rect = e.currentTarget.getBoundingClientRect()
@@ -174,14 +315,30 @@ export const SuggestionsPanel = ({
                             onMouseLeave={() => setHoveredSuggestion(null)}
                         >
                             <Badge
+                                variant="outline"
                                 className={cn(
-                                    'cursor-pointer text-[10px] px-2 py-0.5 flex items-center gap-1 transition-all max-w-[120px]',
-                                    PRIORITY_BADGE_COLORS[suggestion.priority]
+                                    'w-full min-w-0 cursor-pointer text-[11px] px-3 py-0.5 flex items-center gap-1.5 transition-all justify-start',
+                                    vizClass
                                 )}
                                 onClick={() => onSuggestionClick(suggestion.prompt)}
                             >
-                                <Icon className="w-2.5 h-2.5 flex-shrink-0" />
-                                <span className="truncate">{suggestion.title}</span>
+                                <Icon className="w-2.5 h-2.5 flex-shrink-0 opacity-90" />
+                                <span className="truncate min-w-0 flex-1">
+                                    {suggestion.title}
+                                </span>
+                                <span
+                                    className={cn(
+                                        'w-1.5 h-1.5 rounded-full flex-shrink-0',
+                                        PRIORITY_DOT[suggestion.priority]
+                                    )}
+                                    title={
+                                        suggestion.priority === 'high'
+                                            ? 'Высокий приоритет'
+                                            : suggestion.priority === 'medium'
+                                              ? 'Средний приоритет'
+                                              : 'Низкий приоритет'
+                                    }
+                                />
                             </Badge>
                         </div>
                     )
@@ -200,14 +357,18 @@ export const SuggestionsPanel = ({
                     {(() => {
                         const suggestion = suggestions.find(s => s.id === hoveredSuggestion)
                         if (!suggestion) return null
-                        const Icon = SUGGESTION_ICONS[suggestion.type] || Sparkles // Fallback icon
+                        const { Icon: VizIcon, label: vizLabel } = vizConfig(
+                            suggestion.viz_category
+                        )
+                        const TypeIcon =
+                            SUGGESTION_TYPE_ICONS[suggestion.type] || Sparkles
 
                         return (
                             <>
                                 <div className="flex items-start gap-2 mb-2">
-                                    <Icon className="w-4 h-4 mt-0.5 flex-shrink-0 text-gray-600" />
+                                    <VizIcon className="w-4 h-4 mt-0.5 flex-shrink-0 text-gray-700" />
                                     <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-2 mb-1">
+                                        <div className="flex items-center gap-2 mb-1 flex-wrap">
                                             <h4 className="text-sm font-semibold text-gray-900">
                                                 {suggestion.title}
                                             </h4>
@@ -225,7 +386,12 @@ export const SuggestionsPanel = ({
                                                         : 'Низко'}
                                             </Badge>
                                         </div>
-                                        <p className="text-xs text-gray-500 mb-1">
+                                        <p className="text-xs text-gray-500 mb-0.5">
+                                            <span className="font-medium text-gray-600">
+                                                {vizLabel}
+                                            </span>
+                                            <span className="mx-1 text-gray-300">·</span>
+                                            <TypeIcon className="w-3 h-3 inline align-text-bottom mr-0.5" />
                                             {TYPE_LABELS[suggestion.type]}
                                         </p>
                                     </div>

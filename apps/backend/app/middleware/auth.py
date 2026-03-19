@@ -8,23 +8,36 @@ from ..services.auth_service import AuthService
 
 security = HTTPBearer()
 
+
 async def get_current_user(
     credentials = Depends(security),
     db: AsyncSession = Depends(get_db)
 ) -> User:
     """Dependency to get current authenticated user"""
     token = credentials.credentials
-    
+
     user = await AuthService.get_current_user(db, token)
-    
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     return user
+
+
+async def get_current_admin_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Требует, чтобы текущий пользователь имел роль admin. Иначе 403."""
+    if getattr(current_user, "role", "user") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return current_user
 
 
 async def get_current_user_with_token(

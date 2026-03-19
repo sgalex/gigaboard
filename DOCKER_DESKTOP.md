@@ -35,23 +35,17 @@ REDIS_PORT=6379
 
 # Backend
 BACKEND_PORT=8000
-SECRET_KEY=dev-secret-key-min-32-characters-long
-JWT_SECRET=dev-jwt-secret-key-min-32-characters
+JWT_SECRET_KEY=dev-jwt-secret-key-min-32-characters-random
 ENVIRONMENT=development
 DEBUG=true
 
-# Frontend
-FRONTEND_PORT=3000
+# Frontend (nginx в compose по умолчанию :80)
+FRONTEND_PORT=80
 
-# GigaChat API (получите на https://developers.sber.ru/portal/products/gigachat)
-GIGACHAT_API_KEY=ваш_ключ_api_здесь
-GIGACHAT_SCOPE=GIGACHAT_API_PERS
+# CORS (при необходимости)
+CORS_ORIGINS=http://localhost,http://127.0.0.1,http://localhost:5173
 
-# CORS
-CORS_ORIGINS=http://localhost:3000,http://localhost:5173
-
-# File Uploads
-MAX_UPLOAD_SIZE=104857600
+# LLM / GigaChat — только в UI после входа (пресеты), не через .env
 ```
 
 ### 2. Сборка и запуск
@@ -201,8 +195,7 @@ docker-compose logs backend
 # 2. Ошибка миграции БД
 docker-compose exec backend alembic upgrade head
 
-# 3. Нет GIGACHAT_API_KEY
-# Проверьте .env файл
+# 3. Ошибки LLM — настройте пресеты в приложении (профиль / админ), не .env
 ```
 
 ### Проблема: Frontend показывает "Cannot connect to API"

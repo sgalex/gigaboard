@@ -64,6 +64,7 @@ class ResearchAgent(BaseAgent):
         message_bus: AgentMessageBus,
         gigachat_service: GigaChatService,
         system_prompt: Optional[str] = None,
+        llm_router: Optional[Any] = None,
     ):
         super().__init__(
             agent_name="research",
@@ -71,19 +72,11 @@ class ResearchAgent(BaseAgent):
             system_prompt=system_prompt,
         )
         self.gigachat = gigachat_service
+        self.llm_router = llm_router
 
-        # HTTP client с User-Agent и отключённой SSL верификацией
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
-        }
+        # HTTP client with Firefox-like browser headers.
+        # Some sites aggressively block generic bot/default clients.
+        headers = self._build_firefox_headers()
 
         self.http_client = httpx.AsyncClient(
             timeout=30.0,
@@ -92,6 +85,30 @@ class ResearchAgent(BaseAgent):
             verify=False,
             headers=headers,
         )
+
+    @staticmethod
+    def _build_firefox_headers() -> Dict[str, str]:
+        """Return browser-like headers that emulate a regular Firefox request."""
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) "
+                "Gecko/20100101 Firefox/124.0"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,*/*;q=0.8"
+            ),
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.7,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "TE": "trailers",
+            "DNT": "1",
+        }
 
     def _get_default_system_prompt(self) -> str:
         return RESEARCH_SYSTEM_PROMPT
@@ -219,6 +236,23 @@ class ResearchAgent(BaseAgent):
 
         # Изменение #2: agent_results — list (см. docs/CONTEXT_ARCHITECTURE_PROPOSAL.md)
         agent_results = context["agent_results"]
+
+        def _norm(u: str) -> str:
+            return (u or "").split("#")[0].rstrip("/").lower()
+
+        already_fetched: set[str] = set()
+        for result in agent_results:
+            if not isinstance(result, dict):
+                continue
+            if result.get("agent") != "research":
+                continue
+            if result.get("status") not in ("success", None):
+                continue
+            for s in result.get("sources") or []:
+                if isinstance(s, dict) and s.get("fetched") and s.get("url"):
+                    already_fetched.add(_norm(s["url"]))
+
+        seen_in_batch: set[str] = set()
         for result in agent_results:
             if not isinstance(result, dict):
                 continue
@@ -229,6 +263,10 @@ class ResearchAgent(BaseAgent):
                 for s in sources_raw:
                     if isinstance(s, dict):
                         if not s.get("fetched", False) and s.get("url"):
+                            nu = _norm(s["url"])
+                            if nu in already_fetched or nu in seen_in_batch:
+                                continue
+                            seen_in_batch.add(nu)
                             unfetched.append(Source(
                                 url=s["url"],
                                 title=s.get("title"),
@@ -244,6 +282,10 @@ class ResearchAgent(BaseAgent):
             if isinstance(results_raw, list) and not sources_raw:
                 for r in results_raw:
                     if isinstance(r, dict) and r.get("url"):
+                        nu = _norm(r["url"])
+                        if nu in already_fetched or nu in seen_in_batch:
+                            continue
+                        seen_in_batch.add(nu)
                         unfetched.append(Source(
                             url=r["url"],
                             title=r.get("title"),
@@ -269,7 +311,10 @@ class ResearchAgent(BaseAgent):
             self.logger.info(f"   [{idx}/{total}] Fetching: {url}")
 
             response = await self.http_client.get(
-                url, timeout=15.0, follow_redirects=True
+                url,
+                timeout=15.0,
+                follow_redirects=True,
+                headers=self._build_firefox_headers(),
             )
             response.raise_for_status()
 

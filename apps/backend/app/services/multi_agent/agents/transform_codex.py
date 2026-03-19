@@ -53,6 +53,7 @@ class TransformCodexAgent(BaseAgent):
         message_bus: AgentMessageBus,
         gigachat_service: GigaChatService,
         system_prompt: Optional[str] = None,
+        llm_router: Optional[Any] = None,
     ):
         super().__init__(
             agent_name="transform_codex",
@@ -60,6 +61,7 @@ class TransformCodexAgent(BaseAgent):
             system_prompt=system_prompt,
         )
         self.gigachat = gigachat_service
+        self.llm_router = llm_router
 
     # ── default prompt ───────────────────────────────────────────────
     def _get_default_system_prompt(self) -> str:
@@ -209,8 +211,8 @@ class TransformCodexAgent(BaseAgent):
             f"📨 Codex prompt to LLM ({total_chars} chars, {len(messages)} messages)"
         )
         
-        response = await self.gigachat.chat_completion(
-            messages=messages, temperature=0.2, max_tokens=16384
+        response = await self._call_llm(
+            messages, context=context, temperature=0.2, max_tokens=16384
         )
 
         parsed = self._parse_json_from_llm(response)
@@ -436,8 +438,8 @@ class TransformCodexAgent(BaseAgent):
             {"role": "system", "content": WIDGET_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
-        response = await self.gigachat.chat_completion(
-            messages=messages, temperature=0.3, max_tokens=16384
+        response = await self._call_llm(
+            messages, context=context, temperature=0.3, max_tokens=16384
         )
 
         parsed = self._parse_json_from_llm(response)
@@ -1672,7 +1674,7 @@ df.groupby('brand').agg(
 • ❌ НЕ ссылайся на df_xxx без определения — будет NameError!
 
 ━━━ ПРАВИЛО 5: БЕЗОПАСНОСТЬ И БИБЛИОТЕКИ ━━━
-✅ Разрешено: pandas (pd), numpy (np), re, datetime, gb (AI-помощник)
+✅ Разрешено: pandas (pd), numpy (np), re, datetime, gb (ИИ-ассистент)
 🚫 Запрещено: eval, exec, __import__, os, sys, subprocess, open, файловый I/O
 
 ━━━ ПРАВИЛО 6: ТИПЫ ДАННЫХ ━━━

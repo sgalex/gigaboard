@@ -44,6 +44,7 @@ class WidgetCodexAgent(BaseAgent):
         message_bus: AgentMessageBus,
         gigachat_service: GigaChatService,
         system_prompt: Optional[str] = None,
+        llm_router: Optional[Any] = None,
     ):
         super().__init__(
             agent_name="widget_codex",
@@ -51,6 +52,7 @@ class WidgetCodexAgent(BaseAgent):
             system_prompt=system_prompt,
         )
         self.gigachat = gigachat_service
+        self.llm_router = llm_router
 
     # ── default prompt ───────────────────────────────────────────────
     def _get_default_system_prompt(self) -> str:
@@ -128,8 +130,8 @@ class WidgetCodexAgent(BaseAgent):
         first_parsed = {}  # Keep metadata from first attempt for retry fallback
 
         for attempt in range(MAX_TRUNCATION_RETRIES + 1):
-            response = await self.gigachat.chat_completion(
-                messages=messages, temperature=0.3, max_tokens=16384
+            response = await self._call_llm(
+                messages, context=context, temperature=0.3, max_tokens=16384
             )
 
             self.logger.info(
@@ -214,7 +216,8 @@ class WidgetCodexAgent(BaseAgent):
         self.logger.info(f"🏷️ FINAL widget_name={widget_name!r}")
 
         # ── Scaffold-based assembly (render_body + styles + scripts) ──
-        render_body = self._unescape_html_code(parsed.get("render_body", ""))
+        raw_render_body = parsed.get("render_body", "")
+        render_body = self._unescape_html_code(raw_render_body)
         custom_styles = parsed.get("styles", "")
         scripts = parsed.get("scripts", "")
 
@@ -228,12 +231,27 @@ class WidgetCodexAgent(BaseAgent):
             render_body = self._fix_undefined_col_vars(render_body)      # undefined colName vars
             render_body = self._fix_echarts_yaxis_index(render_body)     # missing dual yAxis array
             render_body = self._fix_echarts_missing_axis(render_body)    # bar/line without xAxis
-            render_body = self._fix_echarts_onclick_in_series(render_body)  # onclick → .on('click')
+            render_body = self._fix_echarts_onclick_in_series(render_body)  # onclick → .on('click') [ECharts]
+            render_body = self._strip_echarts_onclick_from_chartjs(render_body)  # Chart.js ≠ .on('click')
+            render_body = self._fix_formatter_multiline_strings(render_body)  # '...\\n...' not raw newline in '
+            render_body = self._fix_illegal_js_string_line_terminators(render_body)  # U+2028/U+2029, \\n from JSON
             render_body = self._fix_invalid_formatter(render_body)       # ${} in formatter strings
+            render_body = self._normalize_echarts_string_formatters_to_functions(render_body)
+            if render_body.startswith("\ufeff"):
+                render_body = render_body.lstrip("\ufeff")
             scripts = self._sanitize_scripts_section(scripts)
             scripts = self._ensure_scripts_for_libs(render_body, scripts)
 
             widget_code = self._assemble_widget(render_body, custom_styles, scripts)
+            widget_code = self._sanitize_srcdoc_inline_script(widget_code)
+
+            # ── Diagnostic: dump suspicious lines after assembly ──
+            issues = self._detect_js_string_issues(widget_code)
+            if issues:
+                self.logger.warning(
+                    f"⚠️ JS string issues detected in final widget code:\n"
+                    + "\n".join(f"  line {ln}: {desc}" for ln, desc in issues[:10])
+                )
             self.logger.info("🧩 Widget assembled from scaffold + render_body")
         else:
             # Fallback: legacy widget_code (full HTML)
@@ -792,6 +810,64 @@ class WidgetCodexAgent(BaseAgent):
         return scripts
 
     @staticmethod
+    def _detect_js_string_issues(widget_code: str) -> list:
+        """Scan assembled widget for common JS SyntaxError triggers. Returns [(line_no, description)]."""
+        issues: list = []
+        lines = widget_code.split("\n")
+        in_script = False
+        for idx, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if "<script" in stripped.lower() and "src=" not in stripped.lower():
+                in_script = True
+                continue
+            if "</script>" in stripped.lower():
+                in_script = False
+                continue
+            if not in_script:
+                continue
+            # Real newline inside a non-template string literal on this line
+            # (would be caught as multi-line, but check for sanity)
+            for q in ("'", '"'):
+                parts = stripped.split(q)
+                # odd-indexed parts are inside quotes (rough heuristic)
+                for pi in range(1, len(parts), 2):
+                    if "\n" in parts[pi] or "\r" in parts[pi]:
+                        issues.append((idx, f"raw newline inside {q}...{q}"))
+                    if "\u2028" in parts[pi] or "\u2029" in parts[pi]:
+                        issues.append((idx, f"U+2028/U+2029 inside {q}...{q}"))
+            # Unescaped </script> inside inline script
+            if "</script" in stripped.lower() and in_script:
+                issues.append((idx, "literal </script> inside <script> block"))
+        return issues
+
+    @staticmethod
+    def _sanitize_srcdoc_inline_script(widget_code: str) -> str:
+        """В iframe/srcdoc HTML-парсер закрывает <script> на любом литерале </script>.
+
+        Остаток документа перестаёт быть JS → SyntaxError («Invalid or unexpected token»)
+        на далёкой строке). Экранируем только тело RENDER_BODY между маркерами каркаса."""
+        start_m = "// ── RENDER_BODY_START ──"
+        end_m = "// ── RENDER_BODY_END ──"
+        i0 = widget_code.find(start_m)
+        i1 = widget_code.find(end_m)
+        if i0 < 0 or i1 <= i0:
+            return widget_code
+        line_after = widget_code.find("\n", i0)
+        if line_after < 0:
+            return widget_code
+        seg_start = line_after + 1
+        mid = widget_code[seg_start:i1]
+        if "</script" not in mid.lower():
+            return widget_code
+        mid_fixed = re.sub(r"</script\s*>", r"<\\/script>", mid, flags=re.IGNORECASE)
+        if mid_fixed != mid:
+            logger.warning(
+                "🔧 Auto-fix: </script> inside RENDER_BODY escaped for srcdoc "
+                "(HTML must not see raw closing script tag inside inline JS)"
+            )
+        return widget_code[:seg_start] + mid_fixed + widget_code[i1:]
+
+    @staticmethod
     def _assemble_widget(
         render_body: str,
         custom_styles: str = "",
@@ -1250,6 +1326,74 @@ class WidgetCodexAgent(BaseAgent):
 
         return '\n'.join(cleaned_lines)
 
+    @staticmethod
+    def _js_closing_paren_after(s: str, open_paren_idx: int) -> int:
+        """Индекс символа сразу после `)`, закрывающего `(` на позиции open_paren_idx.
+
+        Учитывает строки ' \" `, // и /* */. Нужно для вставки кода после setOption(...),
+        где внутри объекта есть `formatter: function () { return x; }` с точкой с запятой."""
+        n = len(s)
+        if open_paren_idx < 0 or open_paren_idx >= n or s[open_paren_idx] != "(":
+            return -1
+        depth = 1
+        i = open_paren_idx + 1
+        while i < n and depth > 0:
+            c = s[i]
+            if c == "'":
+                i += 1
+                while i < n:
+                    if s[i] == "\\" and i + 1 < n:
+                        i += 2
+                        continue
+                    if s[i] == "'":
+                        i += 1
+                        break
+                    i += 1
+                continue
+            if c == '"':
+                i += 1
+                while i < n:
+                    if s[i] == "\\" and i + 1 < n:
+                        i += 2
+                        continue
+                    if s[i] == '"':
+                        i += 1
+                        break
+                    i += 1
+                continue
+            if c == "`":
+                i += 1
+                while i < n:
+                    if s[i] == "\\" and i + 1 < n:
+                        i += 2
+                        continue
+                    if s[i] == "`":
+                        i += 1
+                        break
+                    i += 1
+                continue
+            if c == "/" and i + 1 < n:
+                if s[i + 1] == "/":
+                    i = s.find("\n", i + 2)
+                    if i < 0:
+                        return -1
+                    i += 1
+                    continue
+                if s[i + 1] == "*":
+                    j = s.find("*/", i + 2)
+                    if j < 0:
+                        return -1
+                    i = j + 2
+                    continue
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+            i += 1
+        return -1
+
     def _fix_echarts_onclick_in_series(self, render_body: str) -> str:
         """Fix onclick/onClick properties inside ECharts series/data config.
 
@@ -1289,7 +1433,14 @@ class WidgetCodexAgent(BaseAgent):
                 "🔧 Auto-fix: removed onclick from ECharts series config (not supported by ECharts)"
             )
 
-            # Inject .on('click', ...) after setOption if not already present
+            # Chart.js: нет chartInstance.on('click') — только options.onClick (см. промпт)
+            if re.search(r"\bnew\s+Chart\s*\(", cleaned):
+                self.logger.info(
+                    "🔧 Chart.js: пропуск вставки ECharts .on('click') — используй options.onClick"
+                )
+                return cleaned
+
+            # Inject .on('click', ...) after setOption if not already present (ECharts)
             if '.on(' not in cleaned and 'chartInstance' in cleaned:
                 # Build a minimal click handler that calls toggleFilter if available
                 if handler_match:
@@ -1309,20 +1460,196 @@ class WidgetCodexAgent(BaseAgent):
                     f"  {handler_body}\n"
                     f"}});"
                 )
-                # Insert after last setOption(...) call
-                setoption_pattern = re.compile(r'(window\.chartInstance\.setOption\([^;]+;)', re.DOTALL)
-                last_match = None
-                for m in setoption_pattern.finditer(cleaned):
-                    last_match = m
-                if last_match:
-                    pos = last_match.end()
-                    cleaned = cleaned[:pos] + inject + cleaned[pos:]
-                    self.logger.info("🔧 Auto-fix: injected chartInstance.on('click', ...) after setOption")
+                # После ПОЛНОГО вызова setOption(...); — не после первой «;» внутри option
+                # (иначе вставка ломает formatter: function () { return x; } → SyntaxError).
+                n = len(cleaned)
+                insert_at = -1
+                for m in re.finditer(
+                    r"window\.chartInstance\.setOption\s*\(", cleaned
+                ):
+                    close = self._js_closing_paren_after(cleaned, m.end() - 1)
+                    if close < 0:
+                        continue
+                    j = close
+                    while j < n and cleaned[j] in " \t\n\r":
+                        j += 1
+                    if j < n and cleaned[j] == ";":
+                        insert_at = j + 1
+                    else:
+                        insert_at = close
+                if insert_at >= 0:
+                    cleaned = cleaned[:insert_at] + inject + cleaned[insert_at:]
+                    self.logger.info(
+                        "🔧 Auto-fix: injected chartInstance.on('click', ...) after setOption(...)"
+                    )
                 else:
                     cleaned = cleaned + inject
-                    self.logger.info("🔧 Auto-fix: appended chartInstance.on('click', ...) at end")
+                    self.logger.info(
+                        "🔧 Auto-fix: appended chartInstance.on('click', ...) at end"
+                    )
 
         return cleaned
+
+    def _strip_echarts_onclick_from_chartjs(self, render_body: str) -> str:
+        """Chart.js: у инстанса нет .on('click'). LLM иногда вставляет шаблон ECharts → SyntaxError/рантайм."""
+        if not render_body or "new Chart" not in render_body:
+            return render_body
+        if "chartInstance.on" not in render_body:
+            return render_body
+        original = render_body
+        while True:
+            m = re.search(r"window\.chartInstance\.on\s*\(", render_body)
+            if not m:
+                break
+            open_paren = m.end() - 1
+            close = self._js_closing_paren_after(render_body, open_paren)
+            if close < 0:
+                break
+            j = close
+            n = len(render_body)
+            while j < n and render_body[j] in " \t\n\r":
+                j += 1
+            if j < n and render_body[j] == ";":
+                j += 1
+            start = m.start()
+            while start > 0 and render_body[start - 1] in " \t\n\r":
+                start -= 1
+            render_body = render_body[:start] + render_body[j:]
+        if render_body != original:
+            self.logger.warning(
+                "🔧 Auto-fix: удалён chartInstance.on('click') при Chart.js — нужен options.onClick"
+            )
+        return render_body
+
+    def _fix_formatter_multiline_strings(self, render_body: str) -> str:
+        """LLM часто пишет formatter: '{b}
+        {c}%' — в JS строка в '...' не может содержать сырой перенос → SyntaxError."""
+        if not render_body or "formatter:" not in render_body:
+            return render_body
+        original = render_body
+
+        def repair(text: str, quote: str) -> str:
+            pos = 0
+            parts: list[str] = []
+            pat = re.compile(r"formatter:\s*" + re.escape(quote))
+
+            while True:
+                m = pat.search(text, pos)
+                if not m:
+                    parts.append(text[pos:])
+                    break
+                parts.append(text[pos : m.start()])
+                i = m.end()
+                chunks: list[str] = []
+                while i < len(text):
+                    c = text[i]
+                    if c == "\\" and i + 1 < len(text):
+                        chunks.append(text[i : i + 2])
+                        i += 2
+                        continue
+                    if c == quote:
+                        parts.append("formatter: " + quote + "".join(chunks) + quote)
+                        pos = i + 1
+                        break
+                    if c == "\n":
+                        j = i + 1
+                        while j < len(text) and text[j] in " \t\r":
+                            j += 1
+                        chunks.append("\\n")
+                        i = j
+                        continue
+                    chunks.append(c)
+                    i += 1
+                else:
+                    parts.append(text[m.start() :])
+                    break
+            return "".join(parts)
+
+        render_body = repair(render_body, "'")
+        render_body = repair(render_body, '"')
+        if render_body != original:
+            self.logger.warning(
+                "🔧 Auto-fix: formatter string had illegal newline inside quotes → escaped as \\n"
+            )
+        return render_body
+
+    def _fix_illegal_js_string_line_terminators(self, render_body: str) -> str:
+        """В '...' и \"...\" в JS недопустимы переводы строк и U+2028/U+2029 → SyntaxError.
+
+        Частые источники: копипаст из Word/документов; JSON, где \\n в значении стал реальным LF
+        внутри formatter/tooltip до закрывающей кавычки."""
+        if not render_body:
+            return render_body
+        _LT = frozenset("\n\r\u2028\u2029")
+        out: list[str] = []
+        i = 0
+        n = len(render_body)
+        changed = False
+        while i < n:
+            if i + 1 < n and render_body[i : i + 2] == "//":
+                j = render_body.find("\n", i)
+                if j == -1:
+                    out.append(render_body[i:])
+                    break
+                out.append(render_body[i : j + 1])
+                i = j + 1
+                continue
+            if i + 1 < n and render_body[i : i + 2] == "/*":
+                j = render_body.find("*/", i + 2)
+                if j == -1:
+                    out.append(render_body[i:])
+                    break
+                out.append(render_body[i : j + 2])
+                i = j + 2
+                continue
+            c = render_body[i]
+            if c in "'\"":
+                q = c
+                out.append(q)
+                i += 1
+                while i < n:
+                    c = render_body[i]
+                    if c == "\\" and i + 1 < n:
+                        out.append(render_body[i : i + 2])
+                        i += 2
+                        continue
+                    if c == q:
+                        out.append(q)
+                        i += 1
+                        break
+                    if c in _LT:
+                        out.append("\\n")
+                        changed = True
+                        if c == "\r" and i + 1 < n and render_body[i + 1] == "\n":
+                            i += 2
+                        else:
+                            i += 1
+                        continue
+                    out.append(c)
+                    i += 1
+                continue
+            if c == "`":
+                out.append(c)
+                i += 1
+                while i < n:
+                    if render_body[i] == "\\" and i + 1 < n:
+                        out.append(render_body[i : i + 2])
+                        i += 2
+                        continue
+                    if render_body[i] == "`":
+                        out.append(render_body[i])
+                        i += 1
+                        break
+                    out.append(render_body[i])
+                    i += 1
+                continue
+            out.append(c)
+            i += 1
+        if changed:
+            self.logger.warning(
+                "🔧 Auto-fix: LF/CR/U+2028/U+2029 inside JS '...' / \"...\" → escaped \\\\n"
+            )
+        return "".join(out)
 
     def _fix_invalid_formatter(self, render_body: str) -> str:
         """Fix invalid ${} template literals inside ECharts formatter strings.
@@ -1359,6 +1686,47 @@ class WidgetCodexAgent(BaseAgent):
             render_body,
         )
 
+        return render_body
+
+    def _normalize_echarts_string_formatters_to_functions(self, render_body: str) -> str:
+        """Tooltip/label formatter в виде '...<b>...</b>...' или '{b}\\n{d}%' часто дают SyntaxError
+        после сериализации (невидимые символы, сломанный \\n). Function(p) стабильнее."""
+        if not render_body or "formatter" not in render_body:
+            return render_body
+        if "setOption" not in render_body and "echarts.init" not in render_body:
+            return render_body
+        original = render_body
+        repl = [
+            (
+                re.compile(
+                    r"formatter\s*:\s*'\{b\}\s*:\s*<b>\{c\}</b>\s*\(\{d\}%\)'",
+                    re.IGNORECASE,
+                ),
+                "formatter: function(p){return p.name+': <b>'+p.value+'</b> ('+(p.percent!=null?Number(p.percent).toFixed(1):0)+'%)';}",
+            ),
+            (
+                re.compile(r'formatter\s*:\s*"\{b\}\s*:\s*<b>\{c\}</b>\s*\(\{d\}%\)"'),
+                'formatter: function(p){return p.name+": <b>"+p.value+"</b> ("+(p.percent!=null?Number(p.percent).toFixed(1):0)+"%)";}',
+            ),
+            (
+                re.compile(r"formatter\s*:\s*'\{b\}\\n\{d\}%'"),
+                "formatter: function(p){return p.name+'\\n'+(p.percent!=null?Number(p.percent).toFixed(1):'')+'%';}",
+            ),
+            (
+                re.compile(r'formatter\s*:\s*"\{b\}\\n\{d\}%"'),
+                'formatter: function(p){return p.name+"\\n"+(p.percent!=null?Number(p.percent).toFixed(1):"")+"%";}',
+            ),
+            (
+                re.compile(r"formatter\s*:\s*'\{b\}\s*\n\s*\{d\}%'"),
+                "formatter: function(p){return p.name+'\\n'+(p.percent!=null?Number(p.percent).toFixed(1):'')+'%';}",
+            ),
+        ]
+        for pat, sub in repl:
+            render_body = pat.sub(sub, render_body)
+        if render_body != original:
+            self.logger.warning(
+                "🔧 Auto-fix: строковые ECharts formatter (HTML/перенос) → function(p){...}"
+            )
         return render_body
 
     def _sanitize_scripts_section(self, scripts: str) -> str:
@@ -1399,18 +1767,29 @@ class WidgetCodexAgent(BaseAgent):
     def _unescape_html_code(code: str) -> str:
         """Fix double-escaped newlines/tabs/quotes from GigaChat.
 
-        GigaChat often returns JSON with \\n instead of \n inside string values.
-        After json.loads() these become literal 2-char sequences (backslash + n)
-        instead of real newline characters, rendering the HTML as one long line.
+        GigaChat sometimes returns all code on one line with literal \\n / \\t
+        instead of real newlines (double-escaping after json.loads).
+
+        IMPORTANT: only unescape when code is genuinely double-escaped
+        (no real newlines at all). If code already has real newlines,
+        any \\n sequences are valid JS escapes and MUST NOT be touched —
+        otherwise formatter: '{b}\\n{c}%' becomes '{b}[REAL_LF]{c}%' → SyntaxError.
         """
         if not code:
             return code
-        # Detect double-escaping: if code looks like HTML but has literal \n
-        if '\\n' in repr(code) and ('<' in code):
+
+        has_real_newlines = "\n" in code
+        has_literal_backslash_n = "\\" + "n" in code
+
+        if has_literal_backslash_n and not has_real_newlines:
+            # Entire code is on one line with literal \n → genuinely double-escaped.
             code = (code
                     .replace('\\n', '\n')
                     .replace('\\t', '\t')
                     .replace('\\"', '"'))
+            logger.info(
+                "🔧 _unescape_html_code: code had 0 real newlines + literal \\n → unescaped"
+            )
         return code
 
     @staticmethod
@@ -2020,6 +2399,7 @@ WIDGET_SYSTEM_PROMPT = '''
 3. Используй ТОЛЬКО локальные библиотеки /libs/*. НЕ подключай CDN.
 4. Доступ к данным ТОЛЬКО через tables["name"]; не используй несуществующие переменные table/rows/colNames и не переопределяй data/tables.
 5. Для ECharts ВСЕГДА инициализируй/освобождай window.chartInstance и задавай xAxis + yAxis; не выдумывай несуществующие API.
+6. **Одна главная визуализация по умолчанию**: если пользователь не просит явно «несколько графиков», «дашборд», «две диаграммы рядом» — делай **один** график ECharts в #chart (один setOption на window.chartInstance). Таблица с несколькими числовыми колонками (mean_salary, median_salary, vacancy_count и т.п.) **не требует** нескольких отдельных «половинок-виджетов»: объединяй метрики в **одной** диаграмме — grouped/stacked bar, несколько series в одном option, или bar+line на двух осях (yAxisIndex). Два и более независимых крупных графика (два init, два div-контейнера с отдельными диаграммами) — только когда запрос явно про сравнение разных представлений.
 
 ═══════════════════════════════════════════════════════════
  ДОСТУП К ДАННЫМ (предоставлены каркасом)
@@ -2115,6 +2495,10 @@ const firstTbl = tables[first.name];
 - ✅ ECharts — для графиков (bar, line, pie, scatter, heatmap, gauge и т.п.)
 - ✅ D3 — для продвинутых визуализаций (force graph, treemap, chord, geo и т.п.)
 - ✅ Chart.js — альтернатива ECharts для canvas-графиков (bar, line, pie, doughnut, radar и т.п.)
+  • Клик / кросс-фильтр: только **options.onClick** (сигнатура (event, elements)), например:
+    onClick: function(ev, els) { if (els.length && window.toggleFilter) window.toggleFilter(dimCol, labels[els[0].index]); }
+  • **ЗАПРЕЩЕНО** для Chart.js: window.chartInstance.on('click', …) — это API **только ECharts**.
+  • В new Chart(ctx, { … }) проверь баланс **{ }**: после plugins: { … } закрываешь options одной **}**, конфиг графика — **});** без лишних скобок.
 - ✅ Библиотеки можно комбинировать (например, D3 для обработки данных + ECharts для рендера)
 - ❌ НЕ используй Plotly или другие внешние библиотеки
 - ❌ НЕ указывай CDN-ссылки — только /libs/ пути
@@ -2128,7 +2512,7 @@ const firstTbl = tables[first.name];
 
 REMINDER: Вся сложная логика уже в каркасе — стек данных, выбор источника (предыдущее/текущее),
 проверка на пустые данные. В RENDER_BODY пиши только минимум: взять tbl из tables, задать dimCol,
-построить option (или innerHTML), вызвать setOption/on('click') и при необходимости __widgetResize.
+построить option (или innerHTML), вызвать setOption + .on('click') **для ECharts** либо options.onClick **для Chart.js**, и __widgetResize.
 Не дублируй проверки и не вызывай getPreviousData() — каркас уже подготовил tables.
 
 Каркас УЖЕ содержит (НЕ генерируй это):
@@ -2831,8 +3215,10 @@ edgeShape: 'polyline' — ломаные рёбра
   };
 
 ═══════════════════════════════════════════════════════════
- КОМБИНИРОВАННЫЕ ВИДЖЕТЫ
+ КОМБИНИРОВАННЫЕ ВИДЖЕТЫ (в рамках ОДНОГО option)
 ═══════════════════════════════════════════════════════════
+
+Ниже — **одна** диаграмма ECharts с несколькими series или двумя осями Y, а не два отдельных виджета.
 
 Line + Bar (две оси Y):
   yAxis: [{ type: 'value', name: 'Sales' }, { type: 'value', name: 'Profit' }],
@@ -3234,6 +3620,12 @@ fetchContentData() УЖЕ возвращает отфильтрованные д
 - 🚫 НЕ смешивай ECharts formatter-строки с JS template literals:
   ❌ formatter: '{b}: {c}<br>${r["col"]}' — ${} не вычисляется внутри обычной строки!
   ✅ formatter: '{b}: {c} ({d}%)'  — используй только ECharts placeholders: {a}{b}{c}{d}
+- 🚫 Строка в '...' или "..." не может содержать реальный перенос строки (SyntaxError в браузере).
+  ✅ formatter: '{b}\\n{c}%'  — перенос только как \\n внутри одной строки кода
+- 🚫 Не вставляй невидимые разделители строк (U+2028/U+2029 из Word) — только ASCII.
+  Предпочтительно tooltip/label: formatter: function(p) { return p.name + ': ' + p.value + '%'; }
+- 🚫 Во встроенном <script> нельзя писать подряд символы </script> даже внутри строки — браузер обрежет скрипт.
+  Если нужна эта подстрока: '<' + '/script>' или '<\\/script>' в кавычках.
 
 ═══ ПОЛНЫЙ ПРИМЕР ОТВЕТА (BAR CHART) ══════════════════════
 

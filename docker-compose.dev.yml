@@ -1,7 +1,5 @@
-# Development override for docker-compose
-# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
-
-version: '3.8'
+# Разработка: docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Backend: uvicorn --reload. Frontend: Vite :5173 с прокси на сервис backend.
 
 services:
   backend:
@@ -10,48 +8,56 @@ services:
       dockerfile: apps/backend/Dockerfile
       target: development
     volumes:
-      # Mount source code for hot reload
-      - ./apps/backend/app:/app/app:ro
+      - ./apps/backend/app:/app/app
     environment:
       DEBUG: "true"
       ENVIRONMENT: development
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      SKIP_ALEMBIC_UPGRADE: ${SKIP_ALEMBIC_UPGRADE:-0}
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
 
   frontend:
     build:
       context: .
       dockerfile: apps/web/Dockerfile.dev
+    ports:
+      - "${FRONTEND_DEV_PORT:-5173}:5173"
     volumes:
-      # Mount source code for hot reload
-      - ./apps/web/src:/app/src:ro
-      - ./apps/web/public:/app/public:ro
+      - ./apps/web/src:/workspace/apps/web/src
+      - ./apps/web/public:/workspace/apps/web/public
+      - ./apps/web/vite.config.ts:/workspace/apps/web/vite.config.ts
+      - ./apps/web/index.html:/workspace/apps/web/index.html
     environment:
       NODE_ENV: development
-    command: npm run dev -- --host 0.0.0.0
+      VITE_DEV_PROXY_TARGET: http://backend:8000
+    command: [ "npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173" ]
+    depends_on:
+      - backend
 
-  # Optional: pgAdmin for database management
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: gigaboard-pgadmin
+    profiles:
+      - tools
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@gigaboard.local
-      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@gigaboard.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
     ports:
-      - "5050:80"
+      - "${PGADMIN_PORT:-5050}:80"
     depends_on:
       - postgres
     networks:
       - gigaboard-network
     restart: unless-stopped
 
-  # Optional: Redis Commander for Redis management
   redis-commander:
     image: rediscommander/redis-commander:latest
     container_name: gigaboard-redis-commander
+    profiles:
+      - tools
     environment:
       REDIS_HOSTS: local:redis:6379
     ports:
-      - "8081:8081"
+      - "${REDIS_COMMANDER_PORT:-8081}:8081"
     depends_on:
       - redis
     networks:

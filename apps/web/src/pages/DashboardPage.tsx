@@ -322,7 +322,7 @@ export function DashboardPage() {
         return (
             <AppLayout
                 sidebar={<ProjectExplorer context="dashboard" />}
-                rightPanel={dashboardId ? <AIAssistantPanel boardId={dashboardId} /> : undefined}
+                rightPanel={dashboardId ? <AIAssistantPanel contextId={dashboardId} scope="dashboard" /> : undefined}
             >
                 <div className="h-full flex items-center justify-center">
                     <p className="text-muted-foreground">Загрузка дашборда...</p>
@@ -336,7 +336,7 @@ export function DashboardPage() {
     return (
         <AppLayout
             sidebar={<ProjectExplorer context="dashboard" />}
-            rightPanel={dashboardId ? <AIAssistantPanel boardId={dashboardId} /> : undefined}
+            rightPanel={dashboardId ? <AIAssistantPanel contextId={dashboardId} scope="dashboard" /> : undefined}
         >
             {/* Dashboard toolbar rendered into TopBar via portal */}
             {topbarTarget && createPortal(

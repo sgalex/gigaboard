@@ -1,44 +1,57 @@
 # Backend Dockerfile for GigaBoard
-FROM python:3.11-slim
+# Сборка из корня репозитория: docker build -f apps/backend/Dockerfile .
 
-# Set working directory
+FROM python:3.12-slim AS base
+
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv for faster dependency management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy pyproject.toml and uv.lock first for better caching
-COPY apps/backend/pyproject.toml apps/backend/uv.lock* ./
+# Медленный канал / блокировка pypi.org из VM Docker Desktop — увеличенные таймауты
+ENV UV_HTTP_TIMEOUT=300
 
-# Install Python dependencies using uv
-RUN uv pip install --system -r pyproject.toml
+# Явный индекс (переопределите при сборке: --build-arg PYPI_INDEX_URL=...)
+ARG PYPI_INDEX_URL=https://pypi.org/simple
+ENV UV_INDEX_URL=${PYPI_INDEX_URL}
 
-# Ensure asyncpg is installed (PostgreSQL async driver)
-RUN uv pip install --system asyncpg==0.30.0
+# Зависимости строго по uv.lock (без установки самого пакета в site-packages — код на PYTHONPATH)
+COPY apps/backend/pyproject.toml apps/backend/uv.lock ./
 
-# Copy backend application code
+# Сначала основной индекс; при сбое — публичные зеркала (удобно, если pypi.org недоступен из Docker VM)
+RUN uv export --frozen --no-dev --no-hashes --no-emit-package gigaboard-backend -o /tmp/requirements.txt \
+    && ( UV_INDEX_URL="${PYPI_INDEX_URL}" uv pip install --system --no-cache -r /tmp/requirements.txt \
+    || UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv pip install --system --no-cache -r /tmp/requirements.txt \
+    || UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ uv pip install --system --no-cache -r /tmp/requirements.txt ) \
+    && rm /tmp/requirements.txt \
+    && ( UV_INDEX_URL="${PYPI_INDEX_URL}" uv pip install --system --no-cache "python-multipart>=0.0.6" \
+    || UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv pip install --system --no-cache "python-multipart>=0.0.6" \
+    || UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ uv pip install --system --no-cache "python-multipart>=0.0.6" )
+
 COPY apps/backend/app ./app
 COPY apps/backend/migrations ./migrations
+COPY apps/backend/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
-# Create directory for uploads
 RUN mkdir -p /app/uploads && chmod 755 /app/uploads
 
-# Set PYTHONPATH to include /app for imports
 ENV PYTHONPATH=/app
 
-# Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
-# Run Alembic migrations and start server
-# Skip migrations for now - run them manually if needed
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+ENTRYPOINT ["/docker-entrypoint.sh"]
+
+# Dev-образ (docker-compose.dev.yml задаёт target: development и CMD с --reload)
+FROM base AS development
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Продакшен — последняя стадия по умолчанию при docker build без --target
+FROM base AS production
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

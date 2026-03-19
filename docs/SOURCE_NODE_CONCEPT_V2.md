@@ -924,7 +924,7 @@ ALTER TYPE edge_type DROP VALUE 'EXTRACT';
 - [ ] JSON Dialog
 - [x] Excel Dialog
 - [ ] Document Dialog
-- [ ] AI Research Dialog
+- [x] AI Research Dialog (реализовано; план и детали: [AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md](./AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md))
 
 ### Phase 4: AI Integration
 - [ ] CSV Schema Analyzer Agent

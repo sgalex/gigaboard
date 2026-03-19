@@ -134,10 +134,11 @@ Rules:
                     {"role": "user", "content": resolve_prompt}
                 ]
                 
-                response = await self.gigachat.chat_completion(
+                response = await self._call_llm(
                     messages=messages,
+                    context=context,
                     temperature=0.1,  # Низкая температура для consistency
-                    max_tokens=2000
+                    max_tokens=2000,
                 )
                 
                 # Парсим результаты

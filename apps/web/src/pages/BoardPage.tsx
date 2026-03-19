@@ -56,7 +56,7 @@ export function BoardPage() {
         return (
             <AppLayout
                 sidebar={<ProjectExplorer context="board" />}
-                rightPanel={boardId ? <AIAssistantPanel boardId={boardId} /> : undefined}
+                rightPanel={boardId ? <AIAssistantPanel contextId={boardId} scope="board" /> : undefined}
             >
                 <div className="h-full flex items-center justify-center">
                     <p className="text-muted-foreground">Загрузка доски...</p>
@@ -68,7 +68,7 @@ export function BoardPage() {
     return (
         <AppLayout
             sidebar={<ProjectExplorer context="board" />}
-            rightPanel={boardId ? <AIAssistantPanel boardId={boardId} /> : undefined}
+            rightPanel={boardId ? <AIAssistantPanel contextId={boardId} scope="board" /> : undefined}
         >
             <div className="flex flex-col h-full min-h-0">
                 <FilterBar />

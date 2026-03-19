@@ -9,13 +9,14 @@ WidgetController — Satellite Controller для генерации виджет
 Аналогичен TransformationController, но:
 - Извлекает code_blocks[purpose="widget"]
 - widget_type из metadata["widget_type"]
-- Имя из CodeBlock.description
+- Имя из metadata widget_codex (и код только из widget_codex, не из reporter)
 - Вместо PythonExecutor → preview HTML
 
 См. docs/MULTI_AGENT_V2_CONCEPT.md → Phase 4.4
 """
 
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -114,11 +115,18 @@ class WidgetController(BaseController):
         results: Dict[str, Any] = orch_result.get("results", {})
         returned_session = orch_result.get("session_id", session_id)
 
-        # 3. Извлечь code_blocks[purpose="widget"]
-        code_blocks = self._extract_code_blocks(results, purpose="widget")
-
+        # 3. Извлечь code_blocks только из widget_codex (не из reporter — иначе
+        # последний блок может быть копией с искажённым description / именем)
+        code_blocks = self._extract_code_blocks_from_widget_codex(
+            results, purpose="widget"
+        )
         if not code_blocks:
-            # Попробовать без фильтра purpose — агент мог не выставить
+            code_blocks = self._extract_code_blocks_from_widget_codex(
+                results, purpose=None
+            )
+        if not code_blocks:
+            code_blocks = self._extract_code_blocks(results, purpose="widget")
+        if not code_blocks:
             code_blocks = self._extract_code_blocks(results)
 
         if not code_blocks:
@@ -130,14 +138,12 @@ class WidgetController(BaseController):
                 start_time=start_time,
             )
 
-        # 4. Извлечь widget-специфичные поля
-        # FIX: Берём ПОСЛЕДНИЙ code_block — после replan первый блок может быть устаревшим
+        # 4. Извлечь widget-специфичные поля (последний блок последнего прогона widget_codex)
         best_block = code_blocks[-1]
         widget_code = best_block.get("code", "")
         code_language = best_block.get("language", "html")
 
-        # Извлечь metadata из AgentPayload (НЕ из CodeBlock — у него нет metadata)
-        payload_meta = self._extract_widget_metadata(results)
+        payload_meta = self._extract_widget_codex_metadata(results)
         block_desc = best_block.get("description")
         meta_name = payload_meta.get("widget_name")
         logger.info(
@@ -145,9 +151,10 @@ class WidgetController(BaseController):
             f"block.description={block_desc!r}, "
             f"meta.widget_name={meta_name!r}"
         )
+        # Имя из metadata виджет-кодекса надёжнее, чем description в CodeBlock (меньше опечаток LLM)
         widget_name = (
-            block_desc
-            or meta_name
+            meta_name
+            or block_desc
             or "AI Visualization"
         )
         widget_type = payload_meta.get("widget_type", "custom")
@@ -183,12 +190,53 @@ class WidgetController(BaseController):
     # ══════════════════════════════════════════════════════════════════
 
     @staticmethod
-    def _extract_widget_metadata(results: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract widget metadata from agent payload (top-level metadata).
+    def _widget_codex_result_keys(results: Dict[str, Any]) -> List[str]:
+        """Ключи результатов оркестратора для прогонов widget_codex (порядок по номеру)."""
+        keys: List[str] = []
+        for k in results:
+            if k == "widget_codex" or re.match(r"^widget_codex_\d+$", k):
+                keys.append(k)
 
-        AgentPayload.metadata contains widget_type, widget_name, widget_description
-        set by WidgetCodexAgent.  CodeBlock itself has no metadata field.
-        """
+        def order(k: str) -> tuple:
+            if k == "widget_codex":
+                return (0, 0)
+            return (1, int(k.rsplit("_", 1)[-1]))
+
+        return sorted(keys, key=order)
+
+    @classmethod
+    def _extract_code_blocks_from_widget_codex(
+        cls,
+        results: Dict[str, Any],
+        purpose: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        blocks: List[Dict[str, Any]] = []
+        for agent_key in cls._widget_codex_result_keys(results):
+            payload = results.get(agent_key)
+            if not isinstance(payload, dict):
+                continue
+            for cb in payload.get("code_blocks", []):
+                if not isinstance(cb, dict):
+                    continue
+                if purpose is None or cb.get("purpose") == purpose:
+                    blocks.append(cb)
+        return blocks
+
+    @classmethod
+    def _extract_widget_codex_metadata(cls, results: Dict[str, Any]) -> Dict[str, Any]:
+        """Metadata только от последнего widget_codex (имя/тип без подмеса от reporter/plan)."""
+        for agent_key in reversed(cls._widget_codex_result_keys(results)):
+            payload = results.get(agent_key)
+            if not isinstance(payload, dict):
+                continue
+            meta = payload.get("metadata")
+            if isinstance(meta, dict) and meta.get("widget_name"):
+                return meta
+        return {}
+
+    @staticmethod
+    def _extract_widget_metadata(results: Dict[str, Any]) -> Dict[str, Any]:
+        """Устаревший обход всех агентов — для совместимости; предпочтительно _extract_widget_codex_metadata."""
         for _agent, payload in results.items():
             if not isinstance(payload, dict):
                 continue

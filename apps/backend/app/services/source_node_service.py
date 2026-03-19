@@ -21,6 +21,7 @@ from app.services.extractors import (
     ManualExtractor,
 )
 from app.services.file_storage import get_file_storage
+from app.sources import get_source_handler
 from app.sources.csv.extractor import CSVSource
 from app.sources.json.extractor import JSONSource
 from app.sources.excel.extractor import ExcelSource
@@ -31,6 +32,34 @@ logger = logging.getLogger(__name__)
 
 class SourceNodeService:
     """Service for managing SourceNodes."""
+
+    @staticmethod
+    def _normalize_prefilled_content(data: dict[str, Any] | None) -> dict[str, Any]:
+        """Normalize externally provided content payload to SourceNode content format."""
+        if not isinstance(data, dict):
+            return {"text": None, "tables": []}
+
+        tables_in = data.get("tables") or []
+        normalized_tables: list[dict[str, Any]] = []
+        for idx, table in enumerate(tables_in):
+            if not isinstance(table, dict):
+                continue
+            columns = table.get("columns") or []
+            rows = table.get("rows") or []
+            normalized_tables.append(
+                {
+                    "name": table.get("name") or f"table_{idx + 1}",
+                    "columns": columns,
+                    "rows": rows,
+                    "row_count": table.get("row_count", len(rows)),
+                    "column_count": table.get("column_count", len(columns)),
+                }
+            )
+
+        return {
+            "text": data.get("text"),
+            "tables": normalized_tables,
+        }
 
     @staticmethod
     async def _auto_detect_dimensions(
@@ -88,9 +117,27 @@ class SourceNodeService:
         
         source_type = source_data.source_type
         config = source_data.config
+
+        # If frontend already provided extracted content (e.g. AI document extraction),
+        # persist this content as-is instead of re-running file heuristics.
+        if source_data.data and (
+            source_data.data.get("text") is not None
+            or (source_data.data.get("tables") and len(source_data.data.get("tables", [])) > 0)
+        ):
+            content = SourceNodeService._normalize_prefilled_content(source_data.data)
+            lineage = {
+                "operation": "extract",
+                "source_node_id": None,
+                "transformation_history": [],
+                "source": "prefilled_dialog_data",
+            }
+            logger.info(
+                f"Using prefilled content for SourceNode create: "
+                f"type={source_type}, tables={len(content.get('tables', []))}"
+            )
         
         # Auto-extract for CSV, JSON, EXCEL, DOCUMENT
-        if source_type in [SourceType.CSV, SourceType.JSON, SourceType.EXCEL, SourceType.DOCUMENT]:
+        elif source_type in [SourceType.CSV, SourceType.JSON, SourceType.EXCEL, SourceType.DOCUMENT]:
             content, lineage = await SourceNodeService._extract_file_content(
                 db, source_type, config
             )
@@ -98,6 +145,25 @@ class SourceNodeService:
         # Auto-extract for MANUAL source — config already contains table data
         elif source_type == SourceType.MANUAL:
             content, lineage = await SourceNodeService._extract_manual_content(config)
+
+        # RESEARCH: используем переданный data (результат из диалога) или запускаем извлечение
+        elif source_type == SourceType.RESEARCH:
+            if source_data.data and (
+                source_data.data.get("text") is not None
+                or (source_data.data.get("tables") and len(source_data.data.get("tables", [])) > 0)
+            ):
+                content = source_data.data
+                lineage = {
+                    "operation": "extract",
+                    "source_node_id": None,
+                    "transformation_history": [],
+                }
+                logger.info(
+                    f"Research source created with pre-filled content: "
+                    f"{len(content.get('tables', []))} tables"
+                )
+            else:
+                content, lineage = await SourceNodeService._extract_research_content(config)
         
         # Create SourceNode with content
         # Note: используем node_metadata (Python attr), а не metadata (зарезервировано SQLAlchemy)
@@ -265,6 +331,41 @@ class SourceNodeService:
                 
         except Exception as e:
             logger.exception(f"Error extracting manual content: {e}")
+            return None, None
+
+    @staticmethod
+    async def _extract_research_content(
+        config: dict[str, Any],
+    ) -> tuple[dict | None, dict | None]:
+        """Extract content for RESEARCH source via ResearchSource + Orchestrator."""
+        try:
+            from app.main import get_orchestrator
+
+            orchestrator = get_orchestrator()
+            if not orchestrator:
+                logger.warning("Orchestrator not available for RESEARCH extraction")
+                return None, None
+
+            handler = get_source_handler("research")
+            result = await handler.extract(config, orchestrator=orchestrator)
+
+            if not result.success:
+                logger.error(f"Research extraction failed: {result.error}")
+                return None, None
+
+            content = result.to_content()
+            lineage = {
+                "operation": "extract",
+                "source_node_id": None,
+                "transformation_history": [],
+            }
+            logger.info(
+                f"Successfully extracted research content: "
+                f"{len(content.get('tables', []))} tables"
+            )
+            return content, lineage
+        except Exception as e:
+            logger.exception(f"Error extracting research content: {e}")
             return None, None
 
     @staticmethod
@@ -515,6 +616,8 @@ class SourceNodeService:
     @staticmethod
     def _get_extractor(source_type: SourceType):
         """Get extractor instance for source type."""
+        if source_type == SourceType.RESEARCH:
+            return get_source_handler("research")
         extractors = {
             SourceType.FILE: FileExtractor(),
             SourceType.DATABASE: DatabaseExtractor(),
@@ -567,6 +670,24 @@ class SourceNodeService:
         extraction_params = params or {}
         extraction_params["db"] = db  # Pass db session for file storage access
         
+        # Orchestrator for RESEARCH extraction
+        if source.source_type == SourceType.RESEARCH:
+            try:
+                from app.main import get_orchestrator
+                orchestrator = get_orchestrator()
+                if orchestrator:
+                    extraction_params["orchestrator"] = orchestrator
+                    logger.info("Orchestrator available for RESEARCH extraction")
+                else:
+                    raise RuntimeError("Orchestrator not initialized")
+            except Exception as e:
+                logger.warning(f"Orchestrator unavailable for RESEARCH: {e}")
+                return {
+                    "success": False,
+                    "content": None,
+                    "errors": [f"AI services unavailable: {str(e)}"],
+                }
+
         # Try Orchestrator V2 for PROMPT extraction (with fallback to simple mode)
         if source.source_type == SourceType.PROMPT:
             try:
@@ -600,8 +721,11 @@ class SourceNodeService:
         
         # Extract data
         try:
-            result = await extractor.extract(source.config, extraction_params)
-            
+            if source.source_type == SourceType.RESEARCH:
+                result = await extractor.extract(source.config, **extraction_params)
+            else:
+                result = await extractor.extract(source.config, extraction_params)
+
             if result.is_success:
                 return {
                     "success": True,

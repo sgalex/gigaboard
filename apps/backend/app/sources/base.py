@@ -46,7 +46,17 @@ class ExtractionResult:
     @classmethod
     def failure(cls, error: str) -> "ExtractionResult":
         return cls(success=False, error=error)
-    
+
+    @property
+    def is_success(self) -> bool:
+        """Совместимость с routes/extraction.py и SourceNodeService.extract_data."""
+        return self.success
+
+    @property
+    def errors(self) -> list[str]:
+        """Список ошибок при success=False (для совместимости с существующим API)."""
+        return [self.error] if self.error else []
+
     def to_content(self) -> dict[str, Any]:
         """Convert to ContentNode content format.
         
@@ -69,6 +79,10 @@ class ExtractionResult:
             "text": self.text,
             "tables": tables
         }
+
+    def to_content_dict(self) -> dict[str, Any]:
+        """Алиас для совместимости с extraction.py и SourceNodeService.extract_data."""
+        return self.to_content()
 
 
 @dataclass

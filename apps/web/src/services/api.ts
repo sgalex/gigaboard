@@ -29,6 +29,8 @@ import type {
     AIChatRequest,
     AIChatResponse,
     AIChatHistoryResponse,
+    ResearchChatRequest,
+    ResearchChatResponse,
 } from '@/types'
 import type {
     ProjectWidget, ProjectWidgetCreate, ProjectWidgetUpdate,
@@ -323,13 +325,29 @@ export const edgesAPI = {
         api.delete(`/api/v1/boards/${boardId}/edges/${edgeId}`),
 }
 
-/** Base URL for API (e.g. for building image URLs for dashboard thumbnails). */
+/** Base URL for API (e.g. for fetch/axios). */
 export const apiBaseURL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-/** URL to display an uploaded image by file_id (used for dashboard splash/thumbnail). */
+const FILE_IMAGE_PATH = '/api/v1/files/image'
+
+/** URL to display an uploaded image by file_id (relative path — идёт через прокси, без CORS/ORB). */
 export function getFileImageUrl(fileId: string): string {
-    const base = apiBaseURL.replace(/\/$/, '')
-    return `${base}/api/v1/files/image/${fileId}`
+    return `${FILE_IMAGE_PATH}/${fileId}`
+}
+
+/** Нормализует thumbnail_url в относительный путь для <img> (чтобы запрос шёл через прокси фронта). */
+export function getProxiedImageUrl(thumbnailUrl: string | null | undefined): string | null {
+    if (!thumbnailUrl) return null
+    try {
+        if (thumbnailUrl.startsWith('http://') || thumbnailUrl.startsWith('https://')) {
+            const u = new URL(thumbnailUrl)
+            if (u.pathname.startsWith('/api/v1/files/image/')) return u.pathname
+        }
+        if (thumbnailUrl.startsWith(FILE_IMAGE_PATH)) return thumbnailUrl
+    } catch {
+        /* ignore */
+    }
+    return thumbnailUrl
 }
 
 // Files API
@@ -464,16 +482,34 @@ export const filesAPI = {
 export const aiAssistantAPI = {
     chat: (boardId: string, data: AIChatRequest) =>
         api.post<AIChatResponse>(`/api/v1/boards/${boardId}/ai/chat`, data),
+    chatDashboard: (dashboardId: string, data: AIChatRequest) =>
+        api.post<AIChatResponse>(`/api/v1/dashboards/${dashboardId}/ai/chat`, data),
     getMyHistory: (boardId: string, limit?: number) =>
         api.get<AIChatHistoryResponse>(`/api/v1/boards/${boardId}/ai/chat/history/me`, {
+            params: { limit },
+        }),
+    getMyHistoryDashboard: (dashboardId: string, limit?: number) =>
+        api.get<AIChatHistoryResponse>(`/api/v1/dashboards/${dashboardId}/ai/chat/history/me`, {
             params: { limit },
         }),
     getHistory: (boardId: string, sessionId: string, limit?: number) =>
         api.get<AIChatHistoryResponse>(`/api/v1/boards/${boardId}/ai/chat/history`, {
             params: { session_id: sessionId, limit },
         }),
+    getHistoryDashboard: (dashboardId: string, sessionId: string, limit?: number) =>
+        api.get<AIChatHistoryResponse>(`/api/v1/dashboards/${dashboardId}/ai/chat/history`, {
+            params: { session_id: sessionId, limit },
+        }),
     deleteSession: (boardId: string, sessionId: string) =>
         api.delete(`/api/v1/boards/${boardId}/ai/chat/session/${sessionId}`),
+    deleteSessionDashboard: (dashboardId: string, sessionId: string) =>
+        api.delete(`/api/v1/dashboards/${dashboardId}/ai/chat/session/${sessionId}`),
+}
+
+// Research Chat API (ResearchSourceDialog)
+export const researchAPI = {
+    chat: (data: ResearchChatRequest) =>
+        api.post<ResearchChatResponse>('/api/v1/research/chat', data),
 }
 
 // Database API — connection testing, table introspection, preview

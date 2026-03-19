@@ -1,4 +1,4 @@
-import { Menu, Search, User, Settings, LogOut, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Sparkles } from 'lucide-react'
+import { Menu, Search, User, Settings, LogOut, PanelLeftClose, PanelLeftOpen, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { useAuthStore } from '@/store/authStore'
@@ -56,7 +56,7 @@ export function TopBar() {
                         variant={isAIPanelOpen ? "default" : "outline"}
                         size="icon"
                         onClick={toggleAIPanel}
-                        title={isAIPanelOpen ? 'Скрыть AI помощник' : 'Показать AI помощник'}
+                        title={isAIPanelOpen ? 'Скрыть ИИ-ассистента' : 'Показать ИИ-ассистента'}
                         className="relative"
                     >
                         <Sparkles className="h-5 w-5" />
@@ -70,13 +70,31 @@ export function TopBar() {
 
                 {user && (
                     <>
-                        <Button variant="ghost" size="icon" title="Настройки">
+                        {user.role === 'admin' && (
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                title="Системные настройки LLM и Playground"
+                                onClick={() => navigate('/admin/llm')}
+                            >
+                                Настройки LLM
+                            </Button>
+                        )}
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Профиль"
+                            onClick={() => navigate('/profile')}
+                        >
                             <Settings className="h-5 w-5" />
                         </Button>
 
                         <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-muted">
                             <User className="h-4 w-4" />
                             <span className="text-sm font-medium">{user.username}</span>
+                            {user.role === 'admin' && (
+                                <span className="text-xs px-1.5 py-0.5 rounded bg-primary/20 text-primary font-medium">Админ</span>
+                            )}
                         </div>
 
                         <Button

@@ -254,89 +254,181 @@ def register_socketio_events(sio_instance: socketio.AsyncServer):
         - ai:stream:end - конец streaming
         - ai:stream:error - ошибка
         """
+        session_id = data.get("session_id")
         try:
-            from ..services.ai_service import AIService
+            import asyncio
+            from uuid import UUID, uuid4
+            from sqlalchemy import select
+
             from ..core.database import get_db
-            from uuid import UUID
-            
+            from ..models.board import Board
+            from ..models.chat_message import ChatMessage, MessageRole
+            from ..services.ai_service import AIService
+            from ..services.controllers import AIAssistantController
+            from ..main import get_orchestrator
+
             board_id = data.get("board_id")
-            session_id = data.get("session_id")
             message = data.get("message")
             selected_node_ids = data.get("selected_node_ids", [])
-            
+            required_tables = data.get("required_tables", [])
+            allow_auto_filter = bool(data.get("allow_auto_filter", False))
+            filter_expression = data.get("filter_expression")
+
             if not board_id or not message:
                 await sio_instance.emit("ai:stream:error", {
                     "error": "board_id and message are required"
                 }, to=sid)
                 return
-            
-            # Уведомление о начале streaming
+
+            board_uuid = UUID(str(board_id))
+            session_uuid = UUID(str(session_id)) if session_id else uuid4()
+            session_id = str(session_uuid)
+
+            # Уведомление о начале streaming с уже нормализованным session_id.
             await sio_instance.emit("ai:stream:start", {
                 "session_id": session_id,
-                "board_id": board_id
+                "board_id": str(board_uuid),
             }, to=sid)
-            
-            logger.info(f"🤖 Starting AI stream for board {board_id}, message: {message[:50]}...")
-            
+
+            logger.info(
+                "🤖 Starting AI stream via Multi-Agent for board %s, message: %s",
+                board_uuid,
+                str(message)[:80],
+            )
+
             # Получить DB session
             async for db in get_db():
                 try:
-                    logger.info(f"🤖 Got DB session, creating AIService...")
                     ai_service = AIService(db)
-                    
+
                     # Получить user_id из доски
-                    from ..models.board import Board
-                    from sqlalchemy import select
-                    board_query = select(Board).where(Board.id == UUID(board_id))
+                    board_query = select(Board).where(Board.id == board_uuid)
                     board_result = await db.execute(board_query)
                     board = board_result.scalar_one_or_none()
-                    
+
                     if not board:
                         await sio_instance.emit("ai:stream:error", {
-                            "error": "Board not found"
+                            "error": "Board not found",
+                            "session_id": session_id,
                         }, to=sid)
                         break
-                    
+
                     user_id = board.user_id
-                    logger.info(f"🤖 Board user_id: {user_id}")
-                    
-                    logger.info(f"🤖 Starting chat_stream...")
-                    # Streaming ответ
-                    full_response = ""
-                    async for chunk in ai_service.chat_stream(
-                        board_id=UUID(board_id),
-                        user_message=message,
-                        session_id=session_id,
+
+                    # Validate selected node ids from client.
+                    selected_node_uuids = []
+                    for raw_id in selected_node_ids or []:
+                        try:
+                            selected_node_uuids.append(UUID(str(raw_id)))
+                        except (TypeError, ValueError):
+                            logger.warning("Invalid selected_node_id ignored: %s", raw_id)
+
+                    board_context = await ai_service.get_board_context(
+                        board_uuid,
+                        selected_node_uuids or None,
+                    )
+                    chat_history_raw = await ai_service.get_chat_history(
+                        board_uuid,
+                        session_uuid,
+                        limit=10,
+                    )
+
+                    # Save user message before AI response.
+                    user_msg = ChatMessage(
+                        board_id=board_uuid,
                         user_id=user_id,
-                        selected_node_ids=[UUID(nid) for nid in selected_node_ids] if selected_node_ids else None
-                    ):
-                        full_response += chunk
-                        logger.debug(f"🤖 Chunk received: {len(chunk)} chars")
+                        session_id=session_uuid,
+                        role=MessageRole.USER,
+                        content=str(message),
+                        context={
+                            "selected_nodes": [str(nid) for nid in selected_node_uuids]
+                        } if selected_node_uuids else None,
+                    )
+                    db.add(user_msg)
+
+                    orchestrator = get_orchestrator()
+                    if not orchestrator:
+                        await sio_instance.emit("ai:stream:error", {
+                            "error": "Orchestrator not initialized. Check backend logs.",
+                            "session_id": session_id,
+                        }, to=sid)
+                        break
+
+                    controller = AIAssistantController(orchestrator)
+                    result = await controller.process_request(
+                        user_message=str(message),
+                        context={
+                            "board_id": str(board_uuid),
+                            "user_id": str(user_id),
+                            "session_id": session_id,
+                            "db": db,
+                            "board_context": board_context,
+                            "selected_node_ids": [str(nid) for nid in selected_node_uuids],
+                            "selected_nodes_data": board_context.get("selected_nodes_data", []),
+                            "required_tables": required_tables if isinstance(required_tables, list) else [],
+                            "allow_auto_filter": allow_auto_filter,
+                            "filter_expression": filter_expression if isinstance(filter_expression, dict) else None,
+                            "chat_history": chat_history_raw,
+                        },
+                    )
+
+                    response_text = (
+                        result.narrative
+                        or result.code_description
+                        or "Нет ответа от AI"
+                    )
+
+                    suggested_actions = []
+                    if isinstance(result.suggestions, list):
+                        suggested_actions.extend(result.suggestions)
+                    meta_actions = result.metadata.get("suggested_actions") if isinstance(result.metadata, dict) else None
+                    if isinstance(meta_actions, list):
+                        suggested_actions.extend(meta_actions)
+
+                    # Save assistant message to DB.
+                    assistant_msg = ChatMessage(
+                        board_id=board_uuid,
+                        user_id=user_id,
+                        session_id=session_uuid,
+                        role=MessageRole.ASSISTANT,
+                        content=response_text,
+                        context={"board_context": board_context},
+                        suggested_actions=suggested_actions or None,
+                    )
+                    db.add(assistant_msg)
+                    await db.commit()
+
+                    # Imitate stream by chunking final text from Multi-Agent response.
+                    chunk_size = 120
+                    for i in range(0, len(response_text), chunk_size):
+                        chunk = response_text[i:i + chunk_size]
                         await sio_instance.emit("ai:stream:chunk", {
                             "session_id": session_id,
-                            "chunk": chunk
+                            "chunk": chunk,
                         }, to=sid)
-                    
-                    # Уведомление о завершении
+                        await asyncio.sleep(0)
+
                     await sio_instance.emit("ai:stream:end", {
                         "session_id": session_id,
-                        "full_response": full_response
+                        "full_response": response_text,
+                        "suggested_actions": suggested_actions or None,
                     }, to=sid)
-                    
-                    logger.info(f"🤖 AI stream completed for session {session_id}")
-                    
+
+                    logger.info("🤖 AI stream completed via Multi-Agent for session %s", session_id)
+
                 except Exception as inner_e:
+                    await db.rollback()
                     logger.error(f"❌ Error in AI streaming loop: {inner_e}", exc_info=True)
                     raise
                 finally:
                     # DB session будет автоматически закрыта при выходе из async for get_db()
                     break
-                    
+
         except Exception as e:
             logger.error(f"❌ AI stream error: {e}", exc_info=True)
             await sio_instance.emit("ai:stream:error", {
                 "error": str(e),
-                "session_id": session_id
+                "session_id": session_id,
             }, to=sid)
 
 

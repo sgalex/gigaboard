@@ -42,7 +42,7 @@
 4. Для streaming источников: автоматические обновления ContentNode транслируются всем клиентам
 **Ожидаемый результат**: Все клиенты видят синхронное состояние канваса без перезагрузки, включая real-time обновления от streaming источников.
 
-### FR-4: AI-помощник (GigaChat)
+### FR-4: ИИ-ассистент (GigaChat)
 **Описание**: Пользователь задаёт вопрос на естественном языке, система создаёт:
 - **SourceNode** с конфигурацией источника (если нужен новый источник данных)
 - **ContentNode** с данными (результат извлечения/анализа/трансформации)
@@ -52,7 +52,7 @@
 **Шаги**:
 1. Отправить вопрос /ai/query
 2. Planner анализирует запрос, определяет нужны ли новые источники данных
-3. Researcher создаёт SourceNode (если нужно) и извлекает данные → ContentNode
+3. По плану создаются/обновляются узлы: при необходимости новый **SourceNode** (в т.ч. тип `research` через диалог и `ResearchController`), извлечение данных → **ContentNode**
 4. Transformation Agent выполняет трансформации → новые ContentNode
 5. WidgetCodexAgent анализирует ContentNode, генерирует визуализацию → WidgetNode
 6. Узлы размещаются на борде со связями (TRANSFORMATION, VISUALIZATION)
@@ -86,20 +86,21 @@
 **Описание**: За AI Assistant Panel находится мультиагентная система (Orchestrator V2), где специализированные AI агенты решают сложные задачи анализа данных через Redis Message Bus.
 **Агенты** (9 core):
 - Planner: Разбивает запросы на подзадачи, маршрутизирует, адаптивный replan
-- Researcher: Получает данные из URL, API, веб-страниц
-- Analyst: Анализирует структурированные данные → insights
+- ResearchAgent (core): загрузка текста по URL из результатов Discovery; не путать с типом источника **research** на доске
+- Analyst: Анализирует структурированные данные → insights; при ошибке парсинга JSON-ответа LLM — повтор с требованием валидного JSON и резервное извлечение findings из сырого текста (см. `docs/MULTI_AGENT.md`)
 - Reporter: Генерирует WidgetNode визуализации (HTML/CSS/JS)
-- Validator: Dry-run валидация сгенерированного кода
-- Quality Gate: Валидация результатов на соответствие требованиям
+- Validator (`validator.py`): валидация сгенерированного Python-кода (безопасность, синтаксис)
+- Quality Gate (`quality_gate.py`, в шине: `validator`): валидация результатов пайплайна на соответствие запросу; итог `valid` от confidence (порог 0,8) и severity issues; не более одного replan по эвристике «analyst без findings», затем завершение без повторного `suggested_replan` (см. `docs/MULTI_AGENT.md`)
 - Discovery: Поиск и обнаружение данных
 - Resolver: Batch AI resolution (пол по имени, sentiment, категоризация)
 - Structurizer: Извлечение структуры из текста → таблицы, сущности
-**Контроллеры** (5 satellite):
+**Контроллеры** (satellite, основные сценарии):
 - AI Assistant: управление диалогом и контекстом доски
 - Transformation: генерация Python/pandas кода трансформаций
 - Transform Suggestions: предложения трансформаций
 - Widget: генерация визуализаций
 - Widget Suggestions: предложения визуализаций на основе данных
+- Research: источник AI Research и API `POST /api/v1/research/chat` (`ResearchController` → Orchestrator)
 **Коммуникация**: Orchestrator V2 через Redis Message Bus (`request_response()`)
 **Ожидаемый результат**:
 - Сложные многошаговые аналитические задачи решаются автоматически
@@ -1279,7 +1280,7 @@ SourceNode (источник, наследует ContentNode) ──TRANSFORMATI
 4. **document**: PDF, Word, текстовые документы
 5. **api**: REST API endpoints
 6. **database**: SQL запросы (PostgreSQL, MySQL, SQLite)
-7. **research**: AI-генерация данных из текстового промпта
+7. **research**: мультиагентное исследование по промпту/чату (`ResearchSource` / `ResearchController`, см. [AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md](./AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md))
 8. **manual**: Ручной ввод данных
 9. **stream**: WebSocket/SSE потоки данных в реальном времени
 

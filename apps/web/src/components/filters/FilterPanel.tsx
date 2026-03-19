@@ -3,32 +3,67 @@
  * Opens when user clicks ⚙ in the FilterBar.
  * See docs/CROSS_FILTER_SYSTEM.md §7.4 (Phase 6.1)
  */
-import { X, SlidersHorizontal } from 'lucide-react'
+import { X, SlidersHorizontal, Sparkles } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { FilterBuilder } from './FilterBuilder'
 import { PresetSelector } from './PresetSelector'
 import { FilterStats } from './FilterStats'
 import { useFilterStore } from '@/store/filterStore'
+import { cn } from '@/lib/utils'
 
-export function FilterPanel() {
+interface FilterPanelProps {
+    showAIAssistantButton?: boolean
+    onOpenAIAssistant?: () => void
+}
+
+const PANEL_ANIMATION_MS = 380
+
+export function FilterPanel({
+    showAIAssistantButton = false,
+    onOpenAIAssistant,
+}: FilterPanelProps = {}) {
     const isOpen = useFilterStore((s) => s.isFilterPanelOpen)
     const setOpen = useFilterStore((s) => s.setFilterPanelOpen)
     const activeFilters = useFilterStore((s) => s.activeFilters)
     const dimensions = useFilterStore((s) => s.dimensions)
     const setFilters = useFilterStore((s) => s.setFilters)
 
-    if (!isOpen) return null
+    const [isRendered, setIsRendered] = useState(isOpen)
+    const [isVisible, setIsVisible] = useState(isOpen)
+
+    useEffect(() => {
+        if (isOpen) {
+            setIsRendered(true)
+            const rafId = requestAnimationFrame(() => setIsVisible(true))
+            return () => cancelAnimationFrame(rafId)
+        }
+
+        setIsVisible(false)
+        const timerId = setTimeout(() => setIsRendered(false), PANEL_ANIMATION_MS)
+        return () => clearTimeout(timerId)
+    }, [isOpen])
+
+    if (!isRendered) return null
 
     return (
         <>
             {/* Backdrop */}
             <div
-                className="fixed inset-0 bg-black/20 z-40"
+                className={cn(
+                    'fixed inset-0 z-40 bg-black/20 transition-opacity duration-[380ms]',
+                    isVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
+                )}
                 onClick={() => setOpen(false)}
             />
 
             {/* Panel */}
-            <div className="fixed top-0 right-0 h-full w-[400px] max-w-[90vw] bg-background border-l shadow-xl z-50 flex flex-col overflow-hidden animate-in slide-in-from-right duration-200">
+            <div
+                className={cn(
+                    'fixed top-0 right-0 z-50 flex h-full w-[400px] max-w-[90vw] flex-col overflow-hidden border-l bg-background shadow-xl transition-transform duration-[380ms] ease-out',
+                    isVisible ? 'translate-x-0' : 'translate-x-full'
+                )}
+            >
                 {/* Header */}
                 <div className="flex items-center justify-between px-4 py-3 border-b flex-shrink-0">
                     <h3 className="text-sm font-semibold flex items-center gap-2">
@@ -85,6 +120,17 @@ export function FilterPanel() {
 
                 {/* Footer */}
                 <div className="px-4 py-3 border-t flex-shrink-0 flex items-center gap-2">
+                    {showAIAssistantButton && onOpenAIAssistant && (
+                        <Button
+                            variant="secondary"
+                            size="sm"
+                            className="text-xs"
+                            onClick={onOpenAIAssistant}
+                        >
+                            <Sparkles className="h-3.5 w-3.5 mr-1" />
+                            ИИ-ассистент
+                        </Button>
+                    )}
                     <Button
                         variant="outline"
                         size="sm"

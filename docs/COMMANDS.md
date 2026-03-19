@@ -133,16 +133,51 @@ npm run -w apps/web test
 
 ---
 
-## Сервисы (Docker)
+## Docker Compose (весь стек)
+
+Сборка из **корня репозитория** (контекст — монорепозиторий: `package-lock.json`, `apps/web`, `apps/backend`).
+
+### Продакшен-сборка (nginx + backend + Postgres + Redis)
+
+```powershell
+docker compose up --build
+```
+
+- Frontend: `http://localhost` (порт `FRONTEND_PORT`, по умолчанию 80), API проксируется через nginx (`/api/`, `/socket.io/`).
+- Backend: порт `BACKEND_PORT` (по умолчанию 8000).
+- При старте backend: `alembic upgrade head` (отключить: `SKIP_ALEMBIC_UPGRADE=1` в окружении сервиса `backend`).
+
+Переопределите **`JWT_SECRET_KEY`** (и при необходимости `POSTGRES_*`, `ADMIN_*`) через корневой `.env` или переменные окружения хоста — в `docker-compose.yml` используются подстановки `${...}`.
+
+### Разработка (Vite + uvicorn --reload)
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+- Frontend: `http://localhost:5173` (`FRONTEND_DEV_PORT`). В контейнере задано `VITE_DEV_PROXY_TARGET=http://backend:8000` (см. `apps/web/vite.config.ts`).
+
+### Утилиты (pgAdmin, Redis Commander)
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile tools up --build
+```
+
+- pgAdmin: порт `PGADMIN_PORT` (по умолчанию 5050).
+- Redis Commander: `REDIS_COMMANDER_PORT` (по умолчанию 8081).
+
+---
+
+## Сервисы (Docker, только БД/кэш)
 
 ### PostgreSQL
 ```bash
 docker run -d --name gigaboard-postgres \
   -e POSTGRES_USER=gigaboard \
   -e POSTGRES_PASSWORD=gigaboard_password \
-  -e POSTGRES_DB=gigaboard_db \
+  -e POSTGRES_DB=gigaboard \
   -p 5432:5432 \
-  postgres:15-alpine
+  postgres:16-alpine
 ```
 
 ### Redis

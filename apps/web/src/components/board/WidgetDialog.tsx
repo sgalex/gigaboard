@@ -510,8 +510,9 @@ export const WidgetDialog = ({
                     connectionType: 'visualization'
                 })
 
+                const rawName = code.widget_name || `Visualization ${contentNode.id.slice(0, 8)}`
                 const response = await widgetNodesAPI.create(contentNode.board_id, {
-                    name: code.widget_name || `Visualization ${contentNode.id.slice(0, 8)}`,
+                    name: rawName.length > 200 ? rawName.slice(0, 200) : rawName,
                     description: code.description || 'AI-generated visualization',
                     html_code: unescapeWidgetHtml(code.widget_code || ''),
                     css_code: code.css || '',
@@ -525,8 +526,9 @@ export const WidgetDialog = ({
                     refresh_interval: autoRefresh ? refreshInterval * 1000 : undefined,
                     generated_by: 'reporter_agent',
                     generation_prompt: chatMessages.length > 0 ? chatMessages[0].content : 'visualize data',
-                    x: optimalPosition.x,
-                    y: optimalPosition.y,
+                    // API ожидает int; findOptimalNodePosition даёт float (центрирование по ширине)
+                    x: Math.round(optimalPosition.x),
+                    y: Math.round(optimalPosition.y),
                     width: targetWidth,
                     height: targetHeight
                 })

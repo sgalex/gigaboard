@@ -15,8 +15,13 @@ import {
 import { FilterChip } from './FilterChip'
 import { useFilterStore } from '@/store/filterStore'
 import { flattenConditions } from '@/types/crossFilter'
+import type { ReactNode } from 'react'
 
-export function FilterBar() {
+interface FilterBarProps {
+    rightActions?: ReactNode
+}
+
+export function FilterBar({ rightActions }: FilterBarProps = {}) {
     const activeFilters = useFilterStore((s) => s.activeFilters)
     const dimensions = useFilterStore((s) => s.dimensions)
     const presets = useFilterStore((s) => s.presets)
@@ -100,6 +105,9 @@ export function FilterBar() {
                         </DropdownMenuContent>
                     </DropdownMenu>
                 )}
+
+                {/* Optional host-specific actions (e.g. AI assistant in dashboard view mode) */}
+                {rightActions}
 
                 {/* Settings button — open full panel */}
                 <Button

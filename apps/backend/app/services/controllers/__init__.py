@@ -15,6 +15,7 @@ from .widget_controller import WidgetController
 from .widget_suggestions_controller import WidgetSuggestionsController
 from .ai_assistant_controller import AIAssistantController
 from .document_extraction_controller import DocumentExtractionController
+from .research_controller import ResearchController
 
 __all__ = [
     "BaseController",
@@ -25,4 +26,5 @@ __all__ = [
     "WidgetSuggestionsController",
     "AIAssistantController",
     "DocumentExtractionController",
+    "ResearchController",
 ]

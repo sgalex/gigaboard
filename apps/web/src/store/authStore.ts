@@ -5,6 +5,7 @@ interface AuthState {
         id: string
         email: string
         username: string
+        role?: string // "user" | "admin"
         created_at: string
         updated_at: string
     } | null

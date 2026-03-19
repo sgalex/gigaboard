@@ -201,52 +201,72 @@ async def get_image(
     from uuid import UUID
 
     try:
-        # Get file metadata
+        # Явно читаем из БД: id, filename, mime_type, content (таблица uploaded_files)
         result = await db.execute(
-            select(UF).where(UF.id == UUID(file_id))
+            select(UF.id, UF.filename, UF.mime_type, UF.content).where(UF.id == UUID(file_id))
         )
-        uploaded_file = result.scalar_one_or_none()
+        row = result.one_or_none()
 
-        if not uploaded_file:
+        if not row:
             raise HTTPException(status_code=404, detail="File not found")
 
+        # Сразу сохраняем в переменные (данные из результата запроса к БД)
+        filename = row.filename
+        mime_type_raw = row.mime_type
+        content_from_db = row.content
+
+        if content_from_db is None:
+            raise HTTPException(status_code=404, detail="File content not found")
+
         # If mime_type is generic, try to guess from filename
-        mime_type = uploaded_file.mime_type
-        if mime_type == "application/octet-stream" and uploaded_file.filename:
+        mime_type = mime_type_raw
+        if mime_type == "application/octet-stream" and filename:
             import mimetypes
-            guessed, _ = mimetypes.guess_type(uploaded_file.filename)
+            guessed, _ = mimetypes.guess_type(filename)
             if guessed:
                 mime_type = guessed
 
         if mime_type not in ALLOWED_IMAGE_MIMES:
             raise HTTPException(status_code=403, detail="Not an image file")
 
-        # Get file content via storage backend
+        # CORS: avoid ORB when <img src="..."> loads from another origin
+        orb_safe_headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "public, max-age=86400",
+        }
+
+        # Database backend: отдаём байты, прочитанные из БД выше
+        if settings.STORAGE_BACKEND in ("database", "db"):
+            return Response(
+                content=content_from_db,
+                media_type=mime_type,
+                headers=orb_safe_headers,
+            )
+
+        # Local or S3: get content/path/URL via storage
         storage = get_storage()
         file_content = await storage.get(file_id, db=db)
 
-        # For database storage, file_content is bytes
         if isinstance(file_content, bytes):
             return Response(
                 content=file_content,
                 media_type=mime_type,
-                headers={
-                    "Content-Disposition": f'inline; filename="{uploaded_file.filename}"',
-                    "Cache-Control": "public, max-age=86400",
-                },
+                headers=orb_safe_headers,
             )
 
-        # For local storage, file_content is a Path
         from pathlib import Path
         if isinstance(file_content, (str, Path)):
             return FileResponse(
                 path=str(file_content),
                 media_type=mime_type,
-                filename=uploaded_file.filename,
-                headers={"Cache-Control": "public, max-age=86400"},
+                filename=filename,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Cache-Control": "public, max-age=86400",
+                },
             )
 
-        # For S3 storage, file_content is a presigned URL
         if settings.STORAGE_BACKEND == "s3":
             from fastapi.responses import RedirectResponse
             return RedirectResponse(url=str(file_content))
@@ -254,6 +274,10 @@ async def get_image(
         raise HTTPException(status_code=500, detail="Invalid storage response")
     except HTTPException:
         raise
+    except ValueError as e:
+        if "UUID" in str(e) or "uuid" in str(e).lower():
+            raise HTTPException(status_code=400, detail="Invalid file id")
+        raise HTTPException(status_code=500, detail=str(e))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="File not found")
     except Exception as e:
@@ -840,15 +864,14 @@ async def analyze_document_file(
             })
         
         total_rows = sum(len(t.rows) for t in extraction.tables)
-        is_scanned = "не содержит текстового слоя" in extraction.text if extraction.text else False
-        
-        # Return text preview (up to 5000 chars)
-        text_preview = extraction.text[:5000] if extraction.text else ""
+        is_scanned = bool(extraction.metadata.get("is_scanned")) or (
+            "не содержит текстового слоя" in extraction.text if extraction.text else False
+        )
         
         return DocumentAnalysisResult(
             document_type=doc_type,
             filename=filename,
-            text=text_preview,
+            text=extraction.text or "",
             text_length=len(extraction.text) if extraction.text else 0,
             page_count=extraction.metadata.get("page_count"),
             tables=tables_data,

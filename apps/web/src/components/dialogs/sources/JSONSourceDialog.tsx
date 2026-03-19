@@ -180,7 +180,7 @@ export function JSONSourceDialog({
                 </div>
 
                 <div className="rounded-lg bg-muted/50 p-4 text-sm text-muted-foreground">
-                    <p className="font-medium mb-2">AI-помощник:</p>
+                    <p className="font-medium mb-2">ИИ-ассистент:</p>
                     <ul className="list-disc list-inside space-y-1">
                         <li>Автоматически найдёт массивы данных</li>
                         <li>Предложит структуру таблицы</li>

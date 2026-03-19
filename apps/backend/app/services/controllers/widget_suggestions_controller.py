@@ -26,6 +26,7 @@ FALLBACK_WIDGET_SUGGESTIONS: List[Dict[str, Any]] = [
     {
         "id": "fallback-bar-chart",
         "type": "improvement",
+        "viz_category": "bar",
         "priority": "high",
         "title": "Столбчатая диаграмма",
         "description": "Построить столбчатую диаграмму для сравнения значений по категориям",
@@ -35,6 +36,7 @@ FALLBACK_WIDGET_SUGGESTIONS: List[Dict[str, Any]] = [
     {
         "id": "fallback-table-view",
         "type": "alternative",
+        "viz_category": "table",
         "priority": "high",
         "title": "Интерактивная таблица",
         "description": "Создать таблицу с сортировкой, поиском и пагинацией",
@@ -44,6 +46,7 @@ FALLBACK_WIDGET_SUGGESTIONS: List[Dict[str, Any]] = [
     {
         "id": "fallback-pie-chart",
         "type": "improvement",
+        "viz_category": "pie",
         "priority": "medium",
         "title": "Круговая диаграмма",
         "description": "Показать распределение долей по категориям",
@@ -53,6 +56,7 @@ FALLBACK_WIDGET_SUGGESTIONS: List[Dict[str, Any]] = [
     {
         "id": "fallback-line-chart",
         "type": "alternative",
+        "viz_category": "line",
         "priority": "medium",
         "title": "Линейный график",
         "description": "Показать тренды и динамику изменений во времени",
@@ -62,6 +66,7 @@ FALLBACK_WIDGET_SUGGESTIONS: List[Dict[str, Any]] = [
     {
         "id": "fallback-kpi-cards",
         "type": "insight",
+        "viz_category": "kpi",
         "priority": "medium",
         "title": "KPI-карточки",
         "description": "Показать ключевые метрики в виде карточек",
@@ -71,6 +76,7 @@ FALLBACK_WIDGET_SUGGESTIONS: List[Dict[str, Any]] = [
     {
         "id": "fallback-heatmap",
         "type": "alternative",
+        "viz_category": "heatmap",
         "priority": "low",
         "title": "Тепловая карта",
         "description": "Визуализировать корреляции или распределение данных",
@@ -270,6 +276,20 @@ class WidgetSuggestionsController(BaseController):
         if text:
             request += f"  • Текстовые данные: {len(text)} символов\n"
 
+        # Мало строк — иначе модель часто выдаёт 10 «универсальных» идей (heatmap, map…)
+        if tables:
+            max_rows = max(
+                int(t.get("row_count") or len(t.get("rows") or []))
+                for t in tables[:3]
+            )
+            if max_rows <= 5:
+                request += (
+                    "\n⚠️ Данных мало (≤5 строк в основной таблице): в первую очередь предлагай "
+                    "реалистичные варианты — столбчатая/круговая диаграмма по категориям, "
+                    "простая таблица, KPI-карточки. Не рекомендуй heatmap, корреляции или карту "
+                    "без геоданных и без достаточного числа наблюдений.\n"
+                )
+
         if chat_history:
             recent = chat_history[-3:]
             request += "\nИстория чата:\n"
@@ -334,7 +354,8 @@ class WidgetSuggestionsController(BaseController):
                 meta.get("category")
                 or self._infer_widget_category(text)
             )
-            
+            viz_category = self._normalize_viz_category(meta, text, category)
+
             # Map category to SuggestionType enum
             suggestion_type = self._category_to_suggestion_type(category, text)
             
@@ -357,6 +378,7 @@ class WidgetSuggestionsController(BaseController):
             suggestion = {
                 "id": f"widget-suggestion-{len(suggestions) + 1}",
                 "type": suggestion_type,
+                "viz_category": viz_category,
                 "priority": priority,
                 "title": title,
                 "description": description,
@@ -420,7 +442,58 @@ class WidgetSuggestionsController(BaseController):
             return "scatter"
         if any(w in text_lower for w in ["heatmap", "теплов"]):
             return "heatmap"
+        if any(w in text_lower for w in ["воронк", "funnel"]):
+            return "funnel"
+        if any(w in text_lower for w in ["radar", "радар", "паутин"]):
+            return "radar"
+        if any(w in text_lower for w in ["treemap", "древовидн", "иерарх"]):
+            return "treemap"
+        if any(w in text_lower for w in ["gauge", "спидометр", "полукруг"]):
+            return "gauge"
         return "chart"
+
+    @staticmethod
+    def _normalize_viz_category(
+        meta: Dict[str, Any], text: str, category_guess: str
+    ) -> str:
+        """Ключ типа визуализации для UI (иконка + цвет бейджа)."""
+        t = (meta.get("type") or "").lower().replace("-", "_")
+        if "histogram" in t or "bar" in t:
+            return "bar"
+        if "line" in t:
+            return "line"
+        if "pie" in t or "doughnut" in t:
+            return "pie"
+        if "scatter" in t:
+            return "scatter"
+        if "heatmap" in t or t == "heat_map":
+            return "heatmap"
+        if "table" in t:
+            return "table"
+        if "funnel" in t:
+            return "funnel"
+        if "treemap" in t or "tree_map" in t:
+            return "treemap"
+        if "radar" in t:
+            return "radar"
+        if "gauge" in t:
+            return "gauge"
+        if "map" in t or "geo" in t:
+            return "map"
+        if "kpi" in t or "metric" in t or "scorecard" in t:
+            return "kpi"
+        cat = (meta.get("category") or "").lower()
+        if cat == "table":
+            return "table"
+        if cat == "kpi":
+            return "kpi"
+        if cat == "map":
+            return "map"
+        if cat == "chart":
+            return WidgetSuggestionsController._infer_widget_category(text)
+        return WidgetSuggestionsController._infer_widget_category(
+            text or category_guess or ""
+        )
 
     # ══════════════════════════════════════════════════════════════════
     #  Fallback

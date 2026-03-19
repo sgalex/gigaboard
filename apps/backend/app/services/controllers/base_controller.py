@@ -11,6 +11,7 @@ BaseController — базовый класс для Satellite Controllers (V2).
 """
 
 import logging
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -56,6 +57,10 @@ class ControllerResult:
 
     # ── Suggestions ─────────────────────────────────────────────────
     suggestions: List[Dict[str, Any]] = field(default_factory=list)
+
+    # ── Research (narrative + tables + sources) ─────────────────────
+    tables: List[Dict[str, Any]] = field(default_factory=list)
+    sources: List[Dict[str, Any]] = field(default_factory=list)
 
     # ── Validation ──────────────────────────────────────────────────
     validation: Optional[Dict[str, Any]] = None
@@ -208,9 +213,9 @@ class BaseController:
                 continue
             nar = payload.get("narrative")
             if isinstance(nar, dict) and nar.get("text"):
-                text = nar["text"]
+                text = BaseController._coerce_narrative_text(str(nar["text"]))
             elif isinstance(nar, str) and nar:
-                text = nar
+                text = BaseController._coerce_narrative_text(nar)
             # Collect findings for fallback (dedup by text)
             for f in payload.get("findings", []):
                 if isinstance(f, dict) and f.get("text"):
@@ -225,6 +230,59 @@ class BaseController:
             text = "## Результаты анализа\n\n" + "\n".join(parts)
 
         return text
+
+    @staticmethod
+    def _coerce_narrative_text(raw_text: str) -> str:
+        """
+        Convert occasional JSON-like LLM outputs into user-friendly text.
+        """
+        text = str(raw_text or "").strip()
+        if not text:
+            return text
+
+        # Unwrap markdown json fences if present.
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+
+        candidate = text
+        if not (candidate.startswith("{") or candidate.startswith("[")):
+            return text
+
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            return text
+
+        def _value_to_text(v: Any) -> str:
+            if v is None:
+                return ""
+            if isinstance(v, str):
+                return v.strip()
+            if isinstance(v, (int, float, bool)):
+                return str(v)
+            if isinstance(v, list):
+                parts = [_value_to_text(i) for i in v[:20]]
+                parts = [p for p in parts if p]
+                return "\n".join(f"- {p}" for p in parts)
+            if isinstance(v, dict):
+                preferred_keys = ("message", "response", "text", "summary", "итог", "вывод")
+                for key in preferred_keys:
+                    if key in v:
+                        got = _value_to_text(v.get(key))
+                        if got:
+                            return got
+                lines: List[str] = []
+                for k, val in list(v.items())[:20]:
+                    val_text = _value_to_text(val)
+                    if val_text:
+                        lines.append(f"{k}: {val_text}")
+                return "\n".join(lines)
+            return str(v)
+
+        normalized = _value_to_text(parsed).strip()
+        return normalized or text
 
     @staticmethod
     def _extract_findings(

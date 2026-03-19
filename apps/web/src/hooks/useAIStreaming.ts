@@ -4,7 +4,10 @@
 import { useEffect } from 'react'
 import { useAIAssistantStore } from '@/store/aiAssistantStore'
 
-export function useAIStreaming(boardId: string | undefined) {
+export function useAIStreaming(
+    contextId: string | undefined,
+    scope: 'board' | 'dashboard' = 'board',
+) {
     const {
         socket,
         handleStreamStart,
@@ -16,16 +19,16 @@ export function useAIStreaming(boardId: string | undefined) {
 
     // Загрузка истории при монтировании
     useEffect(() => {
-        if (!boardId) return
+        if (!contextId) return
 
-        console.log('📚 Loading chat history for board:', boardId)
-        loadHistory(boardId)
-    }, [boardId, loadHistory])
+        console.log(`📚 Loading chat history for ${scope}:`, contextId)
+        loadHistory(contextId, undefined, scope)
+    }, [contextId, scope, loadHistory])
 
     useEffect(() => {
-        if (!boardId || !socket) return
+        if (!contextId || !socket) return
 
-        console.log('🤖 Setting up AI streaming handlers for board:', boardId, 'socket:', socket.id)
+        console.log(`🤖 Setting up AI streaming handlers for ${scope}:`, contextId, 'socket:', socket.id)
 
         // Handler для начала streaming
         const onStreamStart = (data: { session_id: string; board_id: string }) => {
@@ -69,5 +72,5 @@ export function useAIStreaming(boardId: string | undefined) {
             socket.off('ai:stream:end', onStreamEnd)
             socket.off('ai:stream:error', onStreamError)
         }
-    }, [boardId, socket, handleStreamStart, handleStreamChunk, handleStreamEnd, handleStreamError])
+    }, [contextId, scope, socket, handleStreamStart, handleStreamChunk, handleStreamEnd, handleStreamError])
 }

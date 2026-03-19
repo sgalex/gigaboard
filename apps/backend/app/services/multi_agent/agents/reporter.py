@@ -237,7 +237,8 @@ class ReporterAgent(BaseAgent):
         self,
         message_bus: AgentMessageBus,
         gigachat_service: GigaChatService,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        llm_router: Optional[Any] = None,
     ):
         super().__init__(
             agent_name="reporter",
@@ -245,6 +246,7 @@ class ReporterAgent(BaseAgent):
             system_prompt=system_prompt
         )
         self.gigachat = gigachat_service
+        self.llm_router = llm_router
         
     def _get_default_system_prompt(self) -> str:
         return REPORTER_SYSTEM_PROMPT
@@ -287,6 +289,18 @@ class ReporterAgent(BaseAgent):
         3. Passthrough: code_blocks и tables пробрасываются как есть.
         """
         description = task.get("description", "Сформируй итоговый отчёт")
+        original_user_request = (
+            (context or {}).get("original_user_request")
+            or (context or {}).get("user_request")
+            or description
+        )
+        direct_fact_mode = self._is_direct_fact_question(str(original_user_request))
+        response_style = self._detect_response_style(str(original_user_request))
+
+        reporter_style_instruction = self._build_reporter_style_instruction(
+            direct_fact_mode=direct_fact_mode,
+            response_style=response_style,
+        )
         # Изменение #2: agent_results — list (см. docs/CONTEXT_ARCHITECTURE_PROPOSAL.md)
         # FIX: Читаем только результаты текущего плана, чтобы не подтягивать
         # стейл code_blocks из предыдущих replan-циклов.
@@ -356,69 +370,57 @@ class ReporterAgent(BaseAgent):
         # ── LLM synthesis ────────────────────────────────────────────
         if narrative_parts:
             synthesis_prompt = (
-                "Собери связный итоговый отчёт из фрагментов ниже.\n"
-                f"Запрос пользователя: {description}\n\n"
+                "Сформулируй итоговый ответ пользователю на основе фрагментов ниже.\n"
+                f"Оригинальный запрос пользователя: {original_user_request}\n"
+                f"Техническое описание шага: {description}\n\n"
                 + "\n\n".join(narrative_parts)
             )
             messages = [
-                {"role": "system", "content": "Ты — ReporterAgent. Формируй краткий markdown-отчёт."},
+                {"role": "system", "content": reporter_style_instruction},
                 {"role": "user", "content": synthesis_prompt},
             ]
             try:
-                synthesized = await self.gigachat.chat_completion(
-                    messages=messages, temperature=0.3, max_tokens=2000
+                synthesized = await self._call_llm(
+                    messages, context=context, temperature=0.3, max_tokens=2000
                 )
             except Exception as e:
                 self.logger.warning(f"LLM synthesis failed, using raw: {e}")
                 synthesized = "\n\n".join(narrative_parts)
         else:
-            # Нет narrative от агентов — попробовать сгенерировать ответ
-            # на основе описания задачи и контекста
+            # Нет narrative от агентов — формируем ответ из того, что есть в контексте.
+            # Принцип: что есть в контексте — используем; чего нет — не подставляем специальных сообщений.
             user_request = (context or {}).get("user_request", description)
             board_context = (context or {}).get("board_context", {})
-            # content_nodes хранятся на верхнем уровне board_context (не внутри nodes)
-            # См. ai_service.py → get_board_context()
             content_nodes = board_context.get("content_nodes", [])
 
-            if user_request and (content_nodes or all_findings):
-                context_str = ""
-                if content_nodes:
-                    context_str = "\nДанные на доске:\n"
-                    for cn in content_nodes[:5]:
-                        context_str += f"  • {cn.get('name', 'Node')}: {cn.get('content_summary', '')}\n"
-                if all_findings:
-                    context_str += "\nНайденные факты:\n"
-                    for f in all_findings[:10]:
-                        context_str += f"  • {f.text if hasattr(f, 'text') else f.get('text', str(f))}\n"
+            parts = [f"Запрос пользователя: {user_request or '(нет текста)'}", f"Описание задачи: {description}"]
+            if content_nodes:
+                parts.append("Данные на доске:")
+                for cn in content_nodes[:5]:
+                    parts.append(f"  • {cn.get('name', 'Node')}: {cn.get('content_summary', '')}")
+            if all_findings:
+                parts.append("Найденные факты:")
+                for f in all_findings[:10]:
+                    parts.append(f"  • {f.text if hasattr(f, 'text') else f.get('text', str(f))}")
 
-                messages = [
-                    {"role": "system", "content": "Ты — ReporterAgent. Отвечай на вопрос пользователя на основе данных доски."},
-                    {"role": "user", "content": f"Запрос: {user_request}{context_str}"},
-                ]
-                try:
-                    synthesized = await self.gigachat.chat_completion(
-                        messages=messages, temperature=0.5, max_tokens=2000
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Reporter LLM fallback failed: {e}")
-                    # Fallback: если LLM недоступен, собираем ответ из имеющихся данных
-                    if all_findings:
-                        parts = [f.text if hasattr(f, 'text') else f.get('text', str(f)) for f in all_findings[:10]]
-                        synthesized = "## Результаты анализа\n\n" + "\n".join(f"- {p}" for p in parts)
-                    elif content_nodes:
-                        node_names = [cn.get('name', 'Node') for cn in content_nodes[:5]]
-                        synthesized = f"На доске найдены данные: {', '.join(node_names)}. Попробуйте уточнить запрос."
-                    else:
-                        synthesized = "Не удалось сформировать отчёт. Попробуйте уточнить запрос."
-            else:
-                # Нет ни контекста доски, ни findings — дать конкретную причину
-                self.logger.warning(
-                    f"Reporter: no data for report. "
-                    f"user_request={'set' if user_request else 'empty'}, "
-                    f"content_nodes={len(content_nodes)}, "
-                    f"all_findings={len(all_findings)}"
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты — ReporterAgent. Сформируй ответ пользователю по запросу и имеющемуся контексту. "
+                        "Используй только то, что передано; если контекста нет — отвечай по существу запроса. "
+                        f"{reporter_style_instruction}"
+                    ),
+                },
+                {"role": "user", "content": "\n\n".join(parts)},
+            ]
+            try:
+                synthesized = await self._call_llm(
+                    messages, context=context, temperature=0.5, max_tokens=2000
                 )
-                synthesized = "На доске не найдено данных для анализа. Добавьте ContentNode с данными и повторите запрос."
+            except Exception as e:
+                self.logger.warning(f"Reporter LLM failed: {e}")
+                synthesized = "Не удалось сформировать ответ. Попробуйте уточнить запрос."
 
         # Reporter не копирует чужие findings в свой payload,
         # чтобы _extract_findings не собирал дубли из analyst + reporter
@@ -427,6 +429,91 @@ class ReporterAgent(BaseAgent):
             findings=[],
             tables=all_tables,
             code_blocks=all_code_blocks,
+        )
+
+    @staticmethod
+    def _is_direct_fact_question(user_request: str) -> bool:
+        low = (user_request or "").lower()
+        has_fact_pattern = any(
+            p in low
+            for p in (
+                "какой самый",
+                "кто самый",
+                "самый ходовой",
+                "самый продаваем",
+                "топ-1",
+                "лидер",
+                "сколько",
+                "какова",
+            )
+        )
+        # Avoid forcing ultra-short style for broad ideation requests.
+        broad_markers = (
+            "рекомендац",
+            "как улучшить",
+            "варианты",
+            "подробно",
+            "сделай отчёт",
+            "исследуй",
+        )
+        return has_fact_pattern and not any(m in low for m in broad_markers)
+
+    @staticmethod
+    def _detect_response_style(user_request: str) -> str:
+        """Detect preferred response volume from user phrasing."""
+        low = (user_request or "").lower()
+
+        concise_markers = (
+            "кратко",
+            "в двух словах",
+            "одним предложением",
+            "без деталей",
+            "коротко",
+            "только ответ",
+        )
+        detailed_markers = (
+            "подробно",
+            "детально",
+            "развернуто",
+            "с отчётом",
+            "с отчетом",
+            "пошагово",
+            "с примерами",
+            "обоснуй",
+        )
+        if any(m in low for m in concise_markers):
+            return "concise"
+        if any(m in low for m in detailed_markers):
+            return "detailed"
+        return "normal"
+
+    @staticmethod
+    def _build_reporter_style_instruction(
+        *,
+        direct_fact_mode: bool,
+        response_style: str,
+    ) -> str:
+        """Build response-style instruction for Reporter LLM call."""
+        if direct_fact_mode:
+            return (
+                "Это узкий фактологический вопрос. "
+                "Формат ответа: 1) первая строка — прямой факт-ответ с конкретным именем/значением; "
+                "2) далее максимум 2 коротких пункта с ключевыми метриками. "
+                "Не пиши длинный отчёт и общие рекомендации."
+            )
+        if response_style == "concise":
+            return (
+                "Отвечай кратко: максимум 3 коротких предложения, без лишних разделов и длинных списков. "
+                "Сначала суть, потом (опционально) одна уточняющая деталь."
+            )
+        if response_style == "detailed":
+            return (
+                "Пользователь просит подробный ответ. Можно структурировать markdown-секциями и короткими списками, "
+                "но только по делу запроса и на основе предоставленного контекста."
+            )
+        return (
+            "Подбирай объём под запрос пользователя: не превращай каждый ответ в отчёт. "
+            "Если вопрос узкий — отвечай компактно; если запрос исследовательский — можно подробнее."
         )
 
     # ══════════════════════════════════════════════════════════════════
@@ -537,13 +624,14 @@ class ReporterAgent(BaseAgent):
             
             self.logger.info(f"📨 Sending {len(messages)} messages to GigaChat")
             
-            response = await self.gigachat.chat_completion(
-                messages=messages,
-                temperature=0.4,  # Средняя температура для креативности
-                max_tokens=8000  # Увеличено для больших HTML/CSS/JS кодов
+            response = await self._call_llm(
+                messages,
+                context=context,
+                temperature=0.4,
+                max_tokens=8000,
             )
             
-            self.logger.info(f"✅ GigaChat response received: {len(response)} chars")
+            self.logger.info(f"✅ LLM response received: {len(response)} chars")
             
             # Логируем в файл для анализа
             try:
@@ -668,9 +756,8 @@ Return updated code as JSON: {{"widget_code": "...", "changes": ["..."]}}
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": update_prompt}
             ]
-            response = await self.gigachat.chat_completion(
-                messages=messages,
-                temperature=0.4
+            response = await self._call_llm(
+                messages, context=context, temperature=0.4
             )
             
             result = self._parse_json_response(response)

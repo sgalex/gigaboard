@@ -8,6 +8,7 @@ V2: Возвращает AgentPayload(narrative=..., findings=[...]) вмест�
 
 import logging
 import json
+import re
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -134,6 +135,89 @@ WIDGET_SUGGESTIONS_SYSTEM_PROMPT = '''
 - Все строки — в двойных кавычках
 - Используй \\n для переносов строк в text
 - НЕ рекомендуй трансформации данных (filter, aggregation) — только ВИЗУАЛИЗАЦИИ!
+'''
+
+# Третья попытка при двойном blacklist GigaChat: промпт без sample_rows и без имён таблиц/нод
+NEUTRAL_SUGGESTIONS_JSON_SYSTEM = (
+    "Ты аналитик табличных данных. Ответь одним JSON-объектом на русском, без markdown и без текста вне JSON."
+)
+
+
+# ══════════════════════════════════════════════════════════════════
+# System Prompt для Transform Suggestions (подсказки по трансформациям)
+# Используется когда context.controller == "transform_suggestions"
+# ══════════════════════════════════════════════════════════════════
+TRANSFORM_SUGGESTIONS_SYSTEM_PROMPT = '''
+Вы — Analyst Agent в режиме ПОДСКАЗОК ПО ТРАНСФОРМАЦИЯМ в системе GigaBoard.
+Ваша ЕДИНСТВЕННАЯ задача — проанализировать СУЩЕСТВУЮЩИЕ структурированные данные
+(schemas / input_data_preview) и предложить РАЗНООБРАЗНЫЕ варианты ТРАНСФОРМАЦИЙ.
+
+## ВАЖНО:
+- ДАННЫЕ УЖЕ ЗАГРУЖЕНЫ и представлены в виде схем/примеров строк.
+- НЕЛЬЗЯ запускать поиск в интернете или извлечение структуры — вы работаете с тем, что есть.
+- ВАША ЗАДАЧА — идеи трансформаций, а не генерация кода.
+
+## КРИТИЧЕСКИ ВАЖНО — ФОРМАТ ВЫВОДА:
+
+Всегда возвращайте ТОЛЬКО ЧИСТЫЙ JSON без markdown-обёрток.
+
+Структура ответа:
+{
+  "text": "Краткое описание доступных данных и возможных направлений анализа.",
+  "insights": [
+    {
+      "finding": "Краткий вывод о данных",
+      "confidence": 0.9,
+      "column_refs": ["col1", "col2"],
+      "importance": "high"
+    }
+  ],
+  "recommendations": [
+    {
+      "action": "ЧТО сделать: краткое описание трансформации",
+      "columns": ["col_a", "col_b"],
+      "rationale": "ПОЧЕМУ эта трансформация полезна",
+      "type": "filter | aggregation | calculation | sorting | cleaning | merge | reshape",
+      "relevance": 0.0-1.0,
+      "priority": "high | medium | low",
+      "confidence": 0.0-1.0
+    }
+  ],
+  "data_quality_issues": [],
+  "tables": [],
+  "confidence": 0.0-1.0
+}
+
+## ПРАВИЛА ДЛЯ РЕКОМЕНДАЦИЙ:
+
+1. Рекомендуйте ТОЛЬКО ТРАНСФОРМАЦИИ, а не визуализации и не код.
+   Примеры типов:
+   - filter — фильтрация строк по условиям (WHERE)
+   - aggregation — группировка и агрегация (GROUP BY, SUM, AVG, COUNT)
+   - calculation — вычисляемые столбцы (новые колонки на основе формул)
+   - sorting — сортировка и ранжирование (ORDER BY, TOP N, RANK)
+   - cleaning — очистка данных (NULL, дубликаты, trim, нормализация)
+   - merge — объединение таблиц (JOIN по ключу)
+   - reshape — изменение формы (PIVOT, UNPIVOT, агрегирующие сводные таблицы)
+
+2. Каждая рекомендация ДОЛЖНА ссылаться на реальные колонки из данных ("columns" и "column_refs").
+   НЕЛЬЗЯ придумывать несуществующие колонки.
+
+3. Генерируйте минимум 8 РАЗНООБРАЗНЫХ рекомендаций, покрывая разные типы трансформаций
+   (filter, aggregation, calculation, cleaning, sorting, merge/reshape и т.п.).
+
+4. НЕ предлагайте визуализации (chart, dashboard, pie chart, bar chart и т.п.) —
+   это задача других агентов. Здесь нужны именно ИДЕИ ТРАНСФОРМАЦИЙ.
+
+5. НЕ генерируйте код; поле "action" — это ЧЕЛОВЕЧЕСКОЕ описание операции.
+
+6. Если входные данные скудные или не позволяют сделать много трансформаций,
+   честно укажите это в "text" и уменьшите количество рекомендаций, но
+   всё равно верните хотя бы 3 осмысленных варианта.
+
+7. Числа (confidence, relevance) — это ЧИСЛА, а не строки.
+
+8. НЕ оборачивайте JSON в ```json ... ``` и не добавляйте текст до/после JSON.
 '''
 
 
@@ -369,7 +453,8 @@ class AnalystAgent(BaseAgent):
         self,
         message_bus: AgentMessageBus,
         gigachat_service: GigaChatService,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        llm_router: Optional[Any] = None,
     ):
         super().__init__(
             agent_name="analyst",
@@ -377,10 +462,121 @@ class AnalystAgent(BaseAgent):
             system_prompt=system_prompt
         )
         self.gigachat = gigachat_service
+        self.llm_router = llm_router
         
     def _get_default_system_prompt(self) -> str:
         return ANALYST_SYSTEM_PROMPT
-    
+
+    @staticmethod
+    def _neutral_schema_user_widget(
+        input_data: Optional[List[Dict[str, Any]]],
+    ) -> Optional[str]:
+        """Схема без примеров строк и без rub_vacs/vacancies в контексте — снижает blacklist."""
+        if not input_data:
+            return None
+        lines = [
+            "Структура набора (только имена полей и типы, без примеров значений):",
+        ]
+        for node in input_data:
+            for table in node.get("tables") or []:
+                cols = table.get("columns") or []
+                rc = int(table.get("row_count") or 0)
+                col_desc = ", ".join(
+                    f"{c.get('name', '?')}:{c.get('type', 'string')}" for c in cols
+                )
+                lines.append(f"~{rc} строк, полей {len(cols)}: {col_desc}")
+        lines.append(
+            "\nНужно 8 идей визуализации (график, таблица или KPI). "
+            "В columns — только имена из списка полей. "
+            'JSON: {"text":"кратко","recommendations":['
+            '{"action":"...","columns":["..."],"rationale":"...","type":"bar_chart","category":"chart"}]}. '
+            "category: chart|table|kpi|map."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _neutral_schema_user_transform(
+        input_data: Optional[List[Dict[str, Any]]],
+    ) -> Optional[str]:
+        if not input_data:
+            return None
+        lines = ["Схема таблиц (имена столбцов и типы, без примеров строк):"]
+        for node in input_data:
+            for table in node.get("tables") or []:
+                cols = table.get("columns") or []
+                rc = int(table.get("row_count") or 0)
+                col_desc = ", ".join(
+                    f"{c.get('name', '?')}:{c.get('type', 'string')}" for c in cols
+                )
+                lines.append(f"~{rc} строк: {col_desc}")
+        lines.append(
+            "\n6 идей обработки в pandas (groupby, фильтр, производный столбец). "
+            'JSON: {"text":"...","recommendations":['
+            '{"action":"...","rationale":"...","priority":"medium","type":"aggregation"}]}. '
+            "type: filter|aggregation|join|derived_column."
+        )
+        return "\n".join(lines)
+
+    def _findings_from_analyst_parsed_raw(
+        self, raw: Dict[str, Any]
+    ) -> tuple[List[Finding], str]:
+        """Строит findings и narrative из распарсенного JSON ответа аналитика."""
+        narrative_text = raw.get("text") or raw.get("message", "")
+        findings: List[Finding] = []
+        for ins in raw.get("insights", []) or []:
+            if isinstance(ins, dict):
+                findings.append(
+                    Finding(
+                        type="insight",
+                        text=ins.get("finding", ""),
+                        severity=self._map_importance(ins.get("importance", "medium")),
+                        confidence=ins.get("confidence"),
+                        refs=ins.get("column_refs", []),
+                    )
+                )
+        for rec in raw.get("recommendations", []) or []:
+            if isinstance(rec, dict):
+                priority = rec.get("priority", "medium")
+                conf = rec.get("confidence")
+                if conf is None:
+                    conf = {"critical": 0.95, "high": 0.85, "medium": 0.7, "low": 0.5}.get(
+                        priority, 0.7
+                    )
+                action_text = rec.get("action", "")
+                rationale_text = rec.get("rationale", "")
+                main_text = action_text or rationale_text or "Рекомендация без описания"
+                if not action_text:
+                    self.logger.warning(f"⚠️ Recommendation without 'action' field: {rec}")
+                metadata: Dict[str, Any] = {}
+                if "type" in rec:
+                    metadata["type"] = rec["type"]
+                if "relevance" in rec:
+                    metadata["relevance"] = rec["relevance"]
+                if "category" in rec:
+                    metadata["category"] = rec["category"]
+                metadata["prompt"] = rec.get("prompt") or action_text or rationale_text
+                findings.append(
+                    Finding(
+                        type="recommendation",
+                        text=main_text,
+                        severity=self._map_importance(priority),
+                        confidence=conf,
+                        refs=rec.get("columns", []),
+                        action=rationale_text if action_text else None,
+                        metadata=metadata if metadata else None,
+                    )
+                )
+        for dq in raw.get("data_quality_issues", []) or []:
+            if isinstance(dq, dict):
+                findings.append(
+                    Finding(
+                        type="data_quality_issue",
+                        text=f"{dq.get('column', 'N/A')}: {dq.get('issue', '')}",
+                        severity=dq.get("severity", "medium"),  # type: ignore[arg-type]
+                    )
+                )
+        return findings, narrative_text
+
     async def process_task(
         self,
         task: Dict[str, Any],
@@ -411,6 +607,12 @@ class AnalystAgent(BaseAgent):
                     else:
                         agent_results = all_results
                     self.logger.info(f"📦 Loaded {len(agent_results)} results from Redis")
+
+            # Ограничиваем объём контекста для LLM, чтобы избежать ошибок
+            # вида "context too long" от GigaChat: оставляем только
+            # наиболее релевантные и свежие результаты.
+            if agent_results:
+                agent_results = self._limit_agent_results_for_prompt(agent_results)
             
             # Изменение #5/#7: извлекаем input_data из контекста в отдельный метод, не мутируем task
             input_data_for_prompt = task.get("input_data")
@@ -421,101 +623,172 @@ class AnalystAgent(BaseAgent):
                         f"📊 Enriched from context: {len(input_data_for_prompt)} table(s)"
                     )
 
+            # Targeted runtime diagnostics for assistant/research issues:
+            # log exactly what structured tables reached Analyst prompt.
+            if input_data_for_prompt:
+                table_names: List[str] = []
+                total_tables = 0
+                for node_info in input_data_for_prompt:
+                    if not isinstance(node_info, dict):
+                        continue
+                    tables = node_info.get("tables", [])
+                    if not isinstance(tables, list):
+                        continue
+                    for table in tables:
+                        if not isinstance(table, dict):
+                            continue
+                        total_tables += 1
+                        node_name = str(node_info.get("node_name", "node"))
+                        table_name = str(table.get("name", "table"))
+                        table_names.append(f"{node_name}.{table_name}")
+                self.logger.info(
+                    "🧭 Analyst input tables: %s table(s): %s",
+                    total_tables,
+                    ", ".join(table_names[:20]) if table_names else "<none>",
+                )
+
             # Формируем prompt
             task_for_prompt = {**task, "input_data": input_data_for_prompt} if input_data_for_prompt else task
             task_prompt = self._build_universal_prompt(task_for_prompt, agent_results)
+            original_user_request = (
+                (context or {}).get("original_user_request")
+                or (context or {}).get("user_request")
+                or description
+            )
+            response_style = self._detect_response_style(str(original_user_request))
+            direct_fact_mode = self._is_direct_fact_question(str(original_user_request))
             
-            # Выбор system prompt: специализированный для widget_suggestions,
-            # стандартный для остального
+            # Выбор system prompt: специализированный для widget_suggestions /
+            # transform_suggestions, стандартный для остального
             controller = (context or {}).get("controller", "")
             is_widget_mode = controller == "widget_suggestions"
-            effective_prompt = WIDGET_SUGGESTIONS_SYSTEM_PROMPT if is_widget_mode else self.system_prompt
-            effective_max_tokens = 3000 if is_widget_mode else 2000
-            
+            is_transform_suggestions_mode = controller == "transform_suggestions"
+
             if is_widget_mode:
+                effective_prompt = WIDGET_SUGGESTIONS_SYSTEM_PROMPT
+                effective_max_tokens = 3000
                 self.logger.info("🎨 Using WIDGET_SUGGESTIONS system prompt for visualization recommendations")
+            elif is_transform_suggestions_mode:
+                effective_prompt = TRANSFORM_SUGGESTIONS_SYSTEM_PROMPT
+                # Подсказки по трансформациям могут быть чуть короче, чем виджетные,
+                # но всё равно требуют места для 8–10 рекомендаций.
+                effective_max_tokens = 2500
+                self.logger.info("🧮 Using TRANSFORM_SUGGESTIONS system prompt for transformation recommendations")
+            else:
+                # AI Assistant: style should follow user intent (concise vs detailed),
+                # not always a verbose report-like analysis.
+                style_hint = self._build_output_style_hint(
+                    direct_fact_mode=direct_fact_mode,
+                    response_style=response_style,
+                )
+                effective_prompt = self.system_prompt + "\n\n" + style_hint
+                effective_max_tokens = 2000
             
             messages = [
                 {"role": "system", "content": effective_prompt},
                 {"role": "user", "content": task_prompt}
             ]
             
-            response = await self.gigachat.chat_completion(
-                messages=messages,
+            response = await self._call_llm(
+                messages,
+                context=context,
                 temperature=0.4,
-                max_tokens=effective_max_tokens
+                max_tokens=effective_max_tokens,
             )
-            
-            # Парсим результат
+
             raw = self._parse_generic_response(response)
-            
-            # V2: Конвертируем в AgentPayload
-            narrative_text = raw.get("text") or raw.get("message", "")
-            
-            # Конвертируем insights в Finding
-            findings: List[Finding] = []
-            for ins in raw.get("insights", []):
-                if isinstance(ins, dict):
-                    findings.append(Finding(
-                        type="insight",
-                        text=ins.get("finding", ""),
-                        severity=self._map_importance(ins.get("importance", "medium")),
-                        confidence=ins.get("confidence"),
-                        refs=ins.get("column_refs", []),
-                    ))
-            
-            for rec in raw.get("recommendations", []):
-                if isinstance(rec, dict):
-                    # Confidence: берём из LLM или выводим из priority
-                    priority = rec.get("priority", "medium")
-                    conf = rec.get("confidence")
-                    if conf is None:
-                        conf = {"critical": 0.95, "high": 0.85, "medium": 0.7, "low": 0.5}.get(priority, 0.7)
-                    
-                    # Маппинг полей: используем action как основное описание,
-                    # а rationale как дополнительное обоснование
-                    action_text = rec.get("action", "")
-                    rationale_text = rec.get("rationale", "")
-                    
-                    # Fallback: если action пустой, используем rationale
-                    main_text = action_text or rationale_text or "Рекомендация без описания"
-                    
-                    # DEBUG: логируем если есть проблемы с данными
-                    if not action_text:
-                        self.logger.warning(f"⚠️ Recommendation without 'action' field: {rec}")
-                    
-                    # Собираем metadata: transformation type, relevance, prompt, category
-                    metadata = {}
-                    if "type" in rec:
-                        metadata["type"] = rec["type"]  # filter/aggregation/bar_chart/etc
-                    if "relevance" in rec:
-                        metadata["relevance"] = rec["relevance"]  # 0.0-1.0
-                    if "category" in rec:
-                        metadata["category"] = rec["category"]  # chart/table/kpi/map
-                    # Добавляем prompt для UI (что отправить при клике)
-                    # Приоритет: явный prompt от LLM > action > rationale
-                    metadata["prompt"] = rec.get("prompt") or action_text or rationale_text
-                    
-                    findings.append(Finding(
-                        type="recommendation",
-                        text=main_text,
-                        severity=self._map_importance(priority),
-                        confidence=conf,
-                        refs=rec.get("columns", []),
-                        action=rationale_text if action_text else None,
-                        metadata=metadata if metadata else None,
-                    ))
-            
-            for dq in raw.get("data_quality_issues", []):
-                if isinstance(dq, dict):
-                    findings.append(Finding(
-                        type="data_quality_issue",
-                        text=f"{dq.get('column', 'N/A')}: {dq.get('issue', '')}",
-                        severity=dq.get("severity", "medium"),  # type: ignore[arg-type]
-                    ))
-            
+            # If model returned JSON-like text but parsing failed, do one strict retry
+            # with explicit "valid JSON only" correction (prevents replan loops).
+            if self._looks_like_unparsed_json(raw, response):
+                self.logger.warning(
+                    "⚠️ Analyst returned JSON-like text that failed parsing; retrying with strict JSON correction"
+                )
+                try:
+                    raw = await self._call_gigachat_with_json_retry(
+                        [dict(m) for m in messages],
+                        parse_fn=self._parse_generic_response_strict,
+                        context=context,
+                        temperature=0.35,
+                        max_tokens=effective_max_tokens,
+                        max_retries=1,
+                    )
+                except Exception as retry_err:
+                    self.logger.warning(
+                        "⚠️ Strict JSON retry failed in Analyst: %s",
+                        retry_err,
+                    )
+            findings, narrative_text = self._findings_from_analyst_parsed_raw(raw)
+            if not findings and isinstance(raw, dict):
+                fallback_text = str(raw.get("message", "")).strip()
+                if fallback_text:
+                    recovered = self._extract_findings_from_raw_text(fallback_text)
+                    if recovered:
+                        findings.extend(recovered)
+                        self.logger.warning(
+                            "⚠️ Analyst fallback recovered %s finding(s) from raw text",
+                            len(recovered),
+                        )
+                    if not narrative_text:
+                        narrative_text = fallback_text
+            meta_raw: Dict[str, Any] = raw if isinstance(raw, dict) else {}
+
+            # GigaChat blacklist на спец. промптах (зарплаты/вакансии и т.п.) — повтор с нейтральным системным промптом
+            rec_count = sum(1 for f in findings if f.type == "recommendation")
+            if rec_count == 0 and (is_transform_suggestions_mode or is_widget_mode):
+                suffix = (
+                    "\n\nПредложи 5–8 вариантов трансформации табличных данных (pandas: groupby, агрегаты, фильтры, производные столбцы). "
+                    "Ответ — только JSON: {\"text\": \"...\", \"recommendations\": [{\"action\", \"rationale\", \"priority\", \"type\"}]}. "
+                    "type: filter | aggregation | join | derived_column."
+                    if is_transform_suggestions_mode
+                    else "\n\nПредложи 6–10 вариантов визуализации. Ответ — только JSON: "
+                    "{\"text\": \"...\", \"recommendations\": [{\"action\", \"columns\", \"rationale\", \"type\", \"category\"}]}. "
+                    "category: chart | table | kpi | map."
+                )
+                self.logger.warning(
+                    "Suggestions mode: 0 recommendations (возможен blacklist); повтор с базовым промптом аналитика"
+                )
+                messages_retry = [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": task_prompt + suffix},
+                ]
+                response2 = await self._call_llm(
+                    messages_retry,
+                    context=context,
+                    temperature=0.35,
+                    max_tokens=max(effective_max_tokens, 2500),
+                )
+                raw2 = self._parse_generic_response(response2)
+                findings, narrative_text = self._findings_from_analyst_parsed_raw(raw2)
+                meta_raw = raw2 if isinstance(raw2, dict) else meta_raw
+
+            rec_count = sum(1 for f in findings if f.type == "recommendation")
+            neutral: Optional[str] = None
+            if rec_count == 0 and (is_transform_suggestions_mode or is_widget_mode):
+                neutral = (
+                    self._neutral_schema_user_widget(input_data_for_prompt)
+                    if is_widget_mode
+                    else self._neutral_schema_user_transform(input_data_for_prompt)
+                )
+                if neutral:
+                    self.logger.warning(
+                        "Suggestions mode: 3rd attempt (схема без sample_rows / нейтральный промпт)"
+                    )
+                    messages3 = [
+                        {"role": "system", "content": NEUTRAL_SUGGESTIONS_JSON_SYSTEM},
+                        {"role": "user", "content": neutral},
+                    ]
+                    response3 = await self._call_llm(
+                        messages3,
+                        context=context,
+                        temperature=0.3,
+                        max_tokens=max(effective_max_tokens, 2800),
+                    )
+                    raw3 = self._parse_generic_response(response3)
+                    findings, narrative_text = self._findings_from_analyst_parsed_raw(raw3)
+                    meta_raw = raw3 if isinstance(raw3, dict) else meta_raw
+
             self.logger.info(f"✅ Analysis done: {len(findings)} findings")
-            
+
             # Если narrative_text пустой, но есть findings — построить narrative из них.
             # Это критически важно: без narrative reporter/controller не смогут
             # сформировать ответ пользователю.
@@ -530,7 +803,7 @@ class AnalystAgent(BaseAgent):
             return self._success_payload(
                 narrative=Narrative(text=narrative_text, format="markdown"),
                 findings=findings,
-                metadata={"confidence": raw.get("confidence", 0.0)},
+                metadata={"confidence": meta_raw.get("confidence", 0.0)},
             )
             
         except Exception as e:
@@ -542,38 +815,207 @@ class AnalystAgent(BaseAgent):
         """Маппинг importance/priority в severity для Finding."""
         mapping = {"high": "high", "medium": "medium", "low": "low"}
         return mapping.get(value, "medium")  # type: ignore[return-value]
+
+    @staticmethod
+    def _detect_response_style(user_request: str) -> str:
+        """Detect expected response volume from user request."""
+        low = (user_request or "").lower()
+        concise_markers = (
+            "кратко",
+            "коротко",
+            "только ответ",
+            "без деталей",
+            "одним предложением",
+        )
+        detailed_markers = (
+            "подробно",
+            "детально",
+            "развернуто",
+            "с рекомендациями",
+            "с выводами",
+            "с анализом",
+        )
+        if any(m in low for m in concise_markers):
+            return "concise"
+        if any(m in low for m in detailed_markers):
+            return "detailed"
+        return "normal"
+
+    @staticmethod
+    def _is_direct_fact_question(user_request: str) -> bool:
+        low = (user_request or "").lower()
+        has_fact = any(
+            p in low
+            for p in (
+                "какой самый",
+                "кто самый",
+                "самый ходовой",
+                "самый продаваем",
+                "топ-1",
+                "лидер",
+                "сколько",
+            )
+        )
+        has_entity = any(k in low for k in ("товар", "продукт", "бренд", "модель", "компания"))
+        broad_markers = ("рекомендац", "варианты", "исследуй", "подробно")
+        return has_fact and has_entity and not any(m in low for m in broad_markers)
+
+    @staticmethod
+    def _build_output_style_hint(*, direct_fact_mode: bool, response_style: str) -> str:
+        """Prompt hint that aligns analyst output volume with user request."""
+        if direct_fact_mode:
+            return (
+                "ADAPTIVE OUTPUT MODE:\n"
+                "- Узкий фактологический вопрос.\n"
+                "- В text: первая строка должна содержать прямой ответ (конкретное имя/значение).\n"
+                "- Далее максимум 2 коротких пункта с ключевыми метриками.\n"
+                "- recommendations: не более 2, только если действительно нужны."
+            )
+        if response_style == "concise":
+            return (
+                "ADAPTIVE OUTPUT MODE:\n"
+                "- Пользователь просит кратко.\n"
+                "- Сформируй компактный результат: text 2-4 коротких предложения.\n"
+                "- insights: 1-3, recommendations: 0-3."
+            )
+        if response_style == "detailed":
+            return (
+                "ADAPTIVE OUTPUT MODE:\n"
+                "- Пользователь просит подробный анализ.\n"
+                "- Можно дать расширенные insights и рекомендации (обычный полный формат)."
+            )
+        return (
+            "ADAPTIVE OUTPUT MODE:\n"
+            "- Подбирай объём под запрос пользователя.\n"
+            "- Для узких вопросов избегай длинного отчётного стиля."
+        )
     
     # ══════════════════════════════════════════════════════════════════
     #  Helper: extract input_data from context
     # ══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _limit_agent_results_for_prompt(
+        agent_results: List[Dict[str, Any]],
+        max_items: int = 30,
+        max_total_chars: int = 100000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Ограничивает список agent_results, используемый в промпте Analyst.
+
+        Цели:
+        - защититься от ошибок GigaChat вида "context too long";
+        - приоритизировать последние и наиболее информативные результаты;
+        - сохранить форму данных (список dict'ов), не трогая исходный context.
+
+        Стратегия:
+        - берём результаты с конца (самые свежие);
+        - ограничиваем числом элементов и суммарной длиной JSON‑представления;
+        - разворачиваем обратно, чтобы порядок по времени сохранялся.
+        """
+        if not agent_results:
+            return agent_results
+
+        limited_reversed: List[Dict[str, Any]] = []
+        total_chars = 0
+
+        for res in reversed(agent_results):
+            if not isinstance(res, dict):
+                continue
+            try:
+                serialized = json.dumps(res, ensure_ascii=False, default=str)
+            except Exception:
+                serialized = str(res)
+            length = len(serialized)
+
+            # Если даже один элемент слишком большой, всё равно попробуем включить его
+            # (LLM‑слой дополнительно обрежет контент внутри).
+            if total_chars + length > max_total_chars and limited_reversed:
+                break
+
+            limited_reversed.append(res)
+            total_chars += length
+
+            if len(limited_reversed) >= max_items:
+                break
+
+        limited = list(reversed(limited_reversed))
+
+        logger.info(
+            "📏 AnalystAgent: limited agent_results for prompt "
+            f"({len(agent_results)} → {len(limited)} items, ~{total_chars} chars)"
+        )
+        return limited
+
     @staticmethod
     def _input_data_from_context(context: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         """
         Извлекает input_data из context.input_data_preview.
+        Fallback: строит input_data из context.content_nodes_data, если preview отсутствует.
         
         Изменение #5: выделено в отдельный метод, чтобы не мутировать task.
         """
         input_data_preview = context.get("input_data_preview")
-        if not input_data_preview:
-            return None
         result: List[Dict[str, Any]] = []
-        for table_name, info in input_data_preview.items():
-            columns_raw = info.get("columns", [])
-            columns = []
-            for c in columns_raw:
-                if isinstance(c, dict):
-                    columns.append(c)
-                else:
-                    columns.append({"name": str(c), "type": "string"})
-            result.append({
-                "node_name": table_name,
-                "tables": [{
-                    "name": table_name,
+
+        if input_data_preview:
+            for table_key, info in input_data_preview.items():
+                columns_raw = info.get("columns", [])
+                columns = []
+                for c in columns_raw:
+                    if isinstance(c, dict):
+                        columns.append(c)
+                    else:
+                        columns.append({"name": str(c), "type": "string"})
+                node_name = str(info.get("node_name") or "node")
+                table_name = str(info.get("table_name") or table_key)
+                result.append({
+                    "node_name": node_name,
+                    "tables": [{
+                        "name": table_name,
+                        "columns": columns,
+                        "row_count": info.get("row_count", 0),
+                        "sample_rows": info.get("sample_rows", []),
+                    }],
+                })
+            return result or None
+
+        # Fallback for assistant flows: use prepared content_nodes_data directly.
+        content_nodes_data = context.get("content_nodes_data")
+        if not isinstance(content_nodes_data, list):
+            return None
+
+        for node in content_nodes_data:
+            if not isinstance(node, dict):
+                continue
+            node_name = str(node.get("name") or node.get("id") or "node")
+            tables = node.get("tables", [])
+            if not isinstance(tables, list) or not tables:
+                continue
+            normalized_tables = []
+            for table in tables:
+                if not isinstance(table, dict):
+                    continue
+                columns_raw = table.get("columns", [])
+                columns = []
+                for c in columns_raw if isinstance(columns_raw, list) else []:
+                    if isinstance(c, dict):
+                        columns.append(c)
+                    else:
+                        columns.append({"name": str(c), "type": "string"})
+                sample_rows = table.get("sample_rows", [])
+                normalized_tables.append({
+                    "name": table.get("name", "table"),
                     "columns": columns,
-                    "row_count": info.get("row_count", 0),
-                    "sample_rows": info.get("sample_rows", []),
-                }],
-            })
+                    "row_count": table.get("row_count", len(sample_rows) if isinstance(sample_rows, list) else 0),
+                    "sample_rows": sample_rows if isinstance(sample_rows, list) else [],
+                })
+            if normalized_tables:
+                result.append({
+                    "node_name": node_name,
+                    "tables": normalized_tables,
+                })
+
         return result or None
 
     def _build_universal_prompt(
@@ -845,44 +1287,126 @@ class AnalystAgent(BaseAgent):
         Автоматически исправляет невалидные escape-последовательности от GigaChat.
         """
         try:
-            import re
+            return self._parse_generic_response_strict(response)
             
-            # 1. Проверяем markdown блок кода ```json ... ```
-            markdown_json_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
-            if markdown_json_match:
-                raw = markdown_json_match.group(1)
-                try:
-                    return json.loads(raw)
-                except json.JSONDecodeError:
-                    return json.loads(self._fix_json_escapes(raw))
-            
-            # 2. Проверяем markdown блок без языка ``` ... ```
-            markdown_match = re.search(r'```\s*(\{.*?\})\s*```', response, re.DOTALL)
-            if markdown_match:
-                raw = markdown_match.group(1)
-                try:
-                    return json.loads(raw)
-                except json.JSONDecodeError:
-                    return json.loads(self._fix_json_escapes(raw))
-            
-            # 3. Ищем чистый JSON блок (без markdown)
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                raw = json_match.group()
-                try:
-                    return json.loads(raw)
-                except json.JSONDecodeError:
-                    return json.loads(self._fix_json_escapes(raw))
-            
-            # 4. Если JSON не найден, возвращаем как message
-            return {
-                "message": response.strip()
-            }
-            
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, ValueError) as e:
             # Если не удалось распарсить даже после fix, возвращаем как текст
             self.logger.warning(f"Failed to parse JSON from response: {e}")
             return {
                 "message": response.strip()
             }
+
+    def _parse_generic_response_strict(self, response: str) -> Dict[str, Any]:
+        """
+        Strict parser: returns parsed JSON dict or raises.
+        Used with retry helper to force model to fix malformed JSON output.
+        """
+        # 1. Проверяем markdown блок кода ```json ... ```
+        markdown_json_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
+        if markdown_json_match:
+            raw = markdown_json_match.group(1)
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return json.loads(self._fix_json_escapes(raw))
+
+        # 2. Проверяем markdown блок без языка ``` ... ```
+        markdown_match = re.search(r'```\s*(\{.*?\})\s*```', response, re.DOTALL)
+        if markdown_match:
+            raw = markdown_match.group(1)
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return json.loads(self._fix_json_escapes(raw))
+
+        # 3. Ищем чистый JSON блок (без markdown)
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            raw = json_match.group()
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return json.loads(self._fix_json_escapes(raw))
+
+        raise ValueError("No JSON object found in response")
+
+    @staticmethod
+    def _looks_like_unparsed_json(parsed: Dict[str, Any], raw_response: str) -> bool:
+        """
+        Heuristic: parser returned plain message while response visually contains JSON.
+        """
+        if not isinstance(parsed, dict):
+            return False
+        if "message" not in parsed:
+            return False
+        if any(k in parsed for k in ("insights", "recommendations", "data_quality_issues")):
+            return False
+        text = str(raw_response or "")
+        return "{" in text and "}" in text and '"' in text
+
+    @staticmethod
+    def _extract_findings_from_raw_text(raw_text: str, max_items: int = 8) -> List[Finding]:
+        """
+        Best-effort recovery when JSON is malformed:
+        - extract "finding"/"action" fields from JSON-like text via regex
+        - fallback to sentence-based insights so QualityGate gets non-empty findings
+        """
+        findings: List[Finding] = []
+        seen: set[str] = set()
+
+        for m in re.finditer(r'"finding"\s*:\s*"([^"]{3,500})"', raw_text, re.IGNORECASE):
+            text = m.group(1).strip()
+            if text and text not in seen:
+                seen.add(text)
+                findings.append(
+                    Finding(
+                        type="insight",
+                        text=text,
+                        severity="medium",
+                        confidence=0.7,
+                    )
+                )
+                if len(findings) >= max_items:
+                    return findings
+
+        for m in re.finditer(r'"action"\s*:\s*"([^"]{3,500})"', raw_text, re.IGNORECASE):
+            text = m.group(1).strip()
+            if text and text not in seen:
+                seen.add(text)
+                findings.append(
+                    Finding(
+                        type="recommendation",
+                        text=text,
+                        severity="medium",
+                        confidence=0.7,
+                    )
+                )
+                if len(findings) >= max_items:
+                    return findings
+
+        if findings:
+            return findings
+
+        sentence_parts = re.split(r"[\n.!?]+", raw_text)
+        for part in sentence_parts:
+            text = part.strip()
+            if len(text) < 25:
+                continue
+            low = text.lower()
+            if "json" in low and "```" in low:
+                continue
+            if text not in seen:
+                seen.add(text)
+                findings.append(
+                    Finding(
+                        type="insight",
+                        text=text,
+                        severity="medium",
+                        confidence=0.6,
+                    )
+                )
+                if len(findings) >= max_items:
+                    break
+
+        return findings
 

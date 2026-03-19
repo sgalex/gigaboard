@@ -15,7 +15,9 @@ from .extraction import router as extraction_router
 
 # AI Assistant routes
 from .ai_assistant import router as ai_assistant_router
+from .ai_assistant import dashboard_router as ai_assistant_dashboard_router
 from .ai_resolver import router as ai_resolver_router
+from .research import router as research_router
 
 # Database routes
 from .database import router as database_router
@@ -31,6 +33,8 @@ from .public import router as public_router
 # Cross-filter system routes
 from .dimensions import router as dimensions_router
 from .filters import board_filter_router, dashboard_filter_router, preset_router
+from .user_settings import router as user_settings_router
+from .admin import router as admin_router
 
 __all__ = [
     "auth_router",
@@ -44,6 +48,9 @@ __all__ = [
     "content_nodes_router",
     "extraction_router",
     "ai_assistant_router",
+    "ai_assistant_dashboard_router",
+    "ai_resolver_router",
+    "research_router",
     "database_router",
     "files_router",
     "library_router",
@@ -53,4 +60,6 @@ __all__ = [
     "board_filter_router",
     "dashboard_filter_router",
     "preset_router",
+    "user_settings_router",
+    "admin_router",
 ]

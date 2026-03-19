@@ -3,10 +3,12 @@ from typing import Optional
 import hashlib
 import jwt
 from passlib.context import CryptContext
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.exc import IntegrityError
 import uuid
+import logging
 
 from ..core import settings
 from ..models import User, UserSession
@@ -119,10 +121,9 @@ class AuthService:
         db: AsyncSession,
         user_login: UserLogin
     ) -> tuple[UserResponse, TokenResponse]:
-        """Login user"""
-        # Find user by email
+        """Login user (поиск по email без учёта регистра)."""
         result = await db.execute(
-            select(User).where(User.email == user_login.email)
+            select(User).where(func.lower(User.email) == user_login.email.strip().lower())
         )
         user = result.scalar_one_or_none()
         
@@ -170,3 +171,49 @@ class AuthService:
         )
         user = result.scalar_one_or_none()
         return user
+
+    @staticmethod
+    async def ensure_admin_user(db: AsyncSession) -> None:
+        """
+        Если заданы ADMIN_EMAIL и ADMIN_PASSWORD в env — создаёт или обновляет
+        пользователя с role=admin (см. docs/ADMIN_AND_SYSTEM_LLM.md).
+        """
+        if not getattr(settings, "ADMIN_EMAIL", "") or not getattr(settings, "ADMIN_PASSWORD", ""):
+            return
+        email = (settings.ADMIN_EMAIL or "").strip()
+        password = settings.ADMIN_PASSWORD or ""
+        if not email or not password:
+            return
+        # Поиск без учёта регистра (в БД email мог быть сохранён в другом регистре)
+        result = await db.execute(
+            select(User).where(func.lower(User.email) == email.lower())
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            # Генерируем уникальный username из email (до @)
+            base_username = (email.split("@")[0] or "admin").replace(".", "_")[:200]
+            username = base_username
+            n = 0
+            while True:
+                r = await db.execute(select(User).where(User.username == username))
+                if r.scalar_one_or_none() is None:
+                    break
+                n += 1
+                username = f"{base_username}_{n}"
+            user = User(
+                email=email,
+                username=username,
+                password_hash=AuthService.hash_password(password),
+                role="admin",
+            )
+            db.add(user)
+            await db.commit()
+            logging.getLogger(__name__).info("Admin user created from ADMIN_EMAIL: %s", email)
+            return
+        user.role = "admin"
+        user.password_hash = AuthService.hash_password(password)
+        await db.commit()
+        await db.refresh(user)
+        logging.getLogger(__name__).info(
+            "Existing user updated to admin (email=%s, id=%s)", email, user.id
+        )

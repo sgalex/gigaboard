@@ -37,6 +37,7 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { getProxiedImageUrl } from '@/services/api'
 import { useProjectStore } from '@/store/projectStore'
 import { useBoardStore } from '@/store/boardStore'
 import { useDashboardStore } from '@/store/dashboardStore'
@@ -306,11 +307,11 @@ export function ProjectOverviewPage() {
                                         className="group relative overflow-hidden border bg-card/80 shadow-sm transition-all duration-300 hover:shadow-md hover:border-primary/20 cursor-pointer"
                                         onClick={() => handleBoardClick(board.id)}
                                     >
-                                        {/* Thumbnail — создаётся/обновляется автоматически при изменении доски */}
+                                        {/* Thumbnail — через прокси фронта (same-origin, без CORS/ORB) */}
                                         <div className="relative w-full aspect-video shrink-0 overflow-hidden bg-muted/50">
                                             {board.thumbnail_url ? (
                                                 <img
-                                                    src={board.thumbnail_url}
+                                                    src={getProxiedImageUrl(board.thumbnail_url) ?? board.thumbnail_url}
                                                     alt=""
                                                     className="h-full w-full object-cover object-top transition-transform duration-300 group-hover:scale-[1.02]"
                                                 />
@@ -446,11 +447,11 @@ export function ProjectOverviewPage() {
                                         className="group relative overflow-hidden border bg-card/80 shadow-sm transition-all duration-300 hover:shadow-md hover:border-primary/20 cursor-pointer"
                                         onClick={() => handleDashboardClick(dashboard.id)}
                                     >
-                                        {/* Splash/thumbnail — создаётся при сохранении дашборда */}
+                                        {/* Splash/thumbnail — через прокси фронта (same-origin, без CORS/ORB) */}
                                         <div className="relative w-full aspect-video shrink-0 overflow-hidden bg-muted/50">
                                             {dashboard.thumbnail_url ? (
                                                 <img
-                                                    src={dashboard.thumbnail_url}
+                                                    src={getProxiedImageUrl(dashboard.thumbnail_url) ?? dashboard.thumbnail_url}
                                                     alt=""
                                                     className="h-full w-full object-cover object-top transition-transform duration-300 group-hover:scale-[1.02]"
                                                 />
