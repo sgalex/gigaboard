@@ -1,7 +1,7 @@
 /**
  * Общие типы для диалогов источников данных.
  * 
- * См. docs/SOURCE_NODE_CONCEPT_V2.md
+ * См. docs/SOURCE_NODE_CONCEPT.md
  */
 
 import { SourceNode } from '@/types'

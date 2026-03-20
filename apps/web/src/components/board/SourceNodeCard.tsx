@@ -4,7 +4,7 @@
  * Теперь SourceNode наследует ContentNode и содержит данные.
  * Поэтому карточка показывает как конфигурацию источника, так и извлечённые данные.
  * 
- * См. docs/SOURCE_NODE_CONCEPT_V2.md
+ * См. docs/SOURCE_NODE_CONCEPT.md
  */
 import { memo, useState } from 'react'
 import { useFilterStore } from '@/store/filterStore'

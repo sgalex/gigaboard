@@ -1113,13 +1113,13 @@ WHERE edge_type IN ('TRANSFORMATION', 'VISUALIZATION');
 
 ## Status
 
-**Status**: ✅ Актуализирован под Source-Content Node Architecture v2  
+**Status**: ✅ Актуализирован под Source-Content Node Architecture  
 **Updated**: 06 February 2026  
 **Changes**:
 - Удалён тип связи **EXTRACT** — SourceNode теперь наследует ContentNode и хранит данные напрямую
 - Обновлены диаграммы и примеры кода (SourceNode → ContentNode через TRANSFORMATION)
 - Обновлены правила валидации: TRANSFORMATION теперь поддерживает SourceNode → ContentNode
-- Приведено в соответствие с SOURCE_NODE_CONCEPT_V2.md
+- Приведено в соответствие с SOURCE_NODE_CONCEPT.md
 
 **Key Changes**:
 - 5 core edge types: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN

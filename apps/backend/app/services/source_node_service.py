@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 import logging
 from datetime import datetime
+import json
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +33,44 @@ logger = logging.getLogger(__name__)
 
 class SourceNodeService:
     """Service for managing SourceNodes."""
+
+    @staticmethod
+    def _to_json_safe(value: Any) -> Any:
+        """Convert arbitrary nested values to JSON-serializable representation."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+
+        if isinstance(value, datetime):
+            return value.isoformat()
+
+        if isinstance(value, UUID):
+            return str(value)
+
+        if isinstance(value, dict):
+            return {str(k): SourceNodeService._to_json_safe(v) for k, v in value.items()}
+
+        if isinstance(value, (list, tuple, set)):
+            return [SourceNodeService._to_json_safe(v) for v in value]
+
+        # numpy scalar support (e.g. np.int64/np.float64 from pandas)
+        if hasattr(value, "item") and callable(getattr(value, "item", None)):
+            try:
+                return SourceNodeService._to_json_safe(value.item())
+            except Exception:
+                pass
+
+        # pandas.Timestamp / date-like values usually support isoformat()
+        if hasattr(value, "isoformat") and callable(getattr(value, "isoformat", None)):
+            try:
+                return value.isoformat()
+            except Exception:
+                pass
+
+        try:
+            json.dumps(value)
+            return value
+        except TypeError:
+            return str(value)
 
     @staticmethod
     def _normalize_prefilled_content(data: dict[str, Any] | None) -> dict[str, Any]:
@@ -171,6 +210,11 @@ class SourceNodeService:
         logger.info(f"📝 SourceNode creation - incoming metadata: {incoming_metadata}")
         logger.info(f"📝 SourceNode creation - incoming metadata.name: '{incoming_metadata.get('name', '<NOT SET>>')}'")
         
+        safe_content = SourceNodeService._to_json_safe(content or {"text": None, "tables": []})
+        safe_lineage = SourceNodeService._to_json_safe(
+            lineage or {"operation": "extract", "source_node_id": None}
+        )
+
         source_node = SourceNode(
             board_id=source_data.board_id,
             source_type=source_data.source_type,
@@ -178,8 +222,8 @@ class SourceNodeService:
             node_metadata=incoming_metadata,
             position=source_data.position,
             created_by=source_data.created_by,
-            content=content or {"text": None, "tables": []},
-            lineage=lineage or {"operation": "extract", "source_node_id": None}
+            content=safe_content,
+            lineage=safe_lineage,
         )
         db.add(source_node)
         await db.commit()
@@ -428,9 +472,22 @@ class SourceNodeService:
             if source.source_type == SourceType.MANUAL:
                 content, lineage = await SourceNodeService._extract_manual_content(update_data.config)
                 if content:
-                    source.content = content
+                    source.content = SourceNodeService._to_json_safe(content)
                     if lineage:
-                        source.lineage = lineage
+                        source.lineage = SourceNodeService._to_json_safe(lineage)
+            # For JSON sources, re-extract content so edited mapping_spec is applied immediately
+            elif source.source_type == SourceType.JSON:
+                content, lineage = await SourceNodeService._extract_file_content(
+                    db,
+                    SourceType.JSON,
+                    source.config,
+                )
+                # JSON extractor may enrich config (schema_snapshot, mapping_spec, generation_meta)
+                source.config = dict(source.config or {})
+                if content:
+                    source.content = SourceNodeService._to_json_safe(content)
+                    if lineage:
+                        source.lineage = SourceNodeService._to_json_safe(lineage)
         
         if update_data.metadata is not None:
             source.node_metadata = update_data.metadata
@@ -442,11 +499,11 @@ class SourceNodeService:
         
         logger.info(f"Updated SourceNode {source_id}")
 
-        # Auto-detect dimensions if content was re-extracted (manual sources)
-        if update_data.config is not None and source.source_type == SourceType.MANUAL:
+        # Auto-detect dimensions if content was re-extracted (manual/json sources)
+        if update_data.config is not None and source.source_type in (SourceType.MANUAL, SourceType.JSON):
             tables = (source.content or {}).get("tables", [])
             logger.info(
-                f"🔍 [DIM] SourceNode {source_id} update (MANUAL): "
+                f"🔍 [DIM] SourceNode {source_id} update ({source.source_type}): "
                 f"tables_count={len(tables)}"
             )
             if tables:
@@ -529,6 +586,9 @@ class SourceNodeService:
                 content, lineage = await SourceNodeService._extract_file_content(
                     db, source.source_type, source.config
                 )
+                # JSON extractor may enrich config (schema_snapshot, mapping_spec).
+                # Reassign to mark JSONB field as dirty for SQLAlchemy.
+                source.config = dict(source.config or {})
                 if content is None:
                     error_message = "File extraction returned no content"
             # For manual sources, re-extract from config
@@ -556,9 +616,9 @@ class SourceNodeService:
             raise ValueError(msg)
         
         # Update content and lineage
-        source.content = content
+        source.content = SourceNodeService._to_json_safe(content)
         if lineage:
-            source.lineage = lineage
+            source.lineage = SourceNodeService._to_json_safe(lineage)
         
         # Update metadata (создаём новый dict, т.к. SQLAlchemy JSONB не поддерживает item assignment)
         updated_metadata = dict(source.node_metadata) if source.node_metadata else {}

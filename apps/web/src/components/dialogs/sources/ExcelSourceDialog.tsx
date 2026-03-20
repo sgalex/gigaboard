@@ -1,6 +1,6 @@
-﻿/**
+/**
  * Excel Source Dialog — интерактивный диалог для загрузки Excel файлов.
- * См. docs/SOURCE_NODE_CONCEPT_V2.md - раздел "📗 3. Excel Dialog"
+ * См. docs/SOURCE_NODE_CONCEPT.md - раздел "📗 3. Excel Dialog"
  *
  * Новый UX-концепт:
  * 1. Пользователь загружает файл (drag & drop)

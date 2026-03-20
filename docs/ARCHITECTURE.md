@@ -32,7 +32,7 @@ UI представляет бесконечное полотно (React Flow), 
 - **COMMENT** - комментирование (CommentNode → любой узел)
 - **REFERENCE**, **DRILL_DOWN** - ссылки и детализация
 
-> **Архитектура Source-Content**: SourceNode **наследует** ContentNode и содержит как конфигурацию источника, так и извлечённые данные. Отдельный тип связи EXTRACT не нужен — данные хранятся непосредственно в SourceNode. См. [SOURCE_NODE_CONCEPT_V2.md](SOURCE_NODE_CONCEPT_V2.md) для деталей.
+> **Архитектура Source-Content**: SourceNode **наследует** ContentNode и содержит как конфигурацию источника, так и извлечённые данные. Отдельный тип связи EXTRACT не нужен — данные хранятся непосредственно в SourceNode. См. [SOURCE_NODE_CONCEPT.md](SOURCE_NODE_CONCEPT.md) для деталей.
 
 Сервер обеспечивает API для управления узлами и связями, real-time обновления через Socket.IO, мультиагентную оркестрацию через GigaChat (langchain-gigachat) и безопасное выполнение трансформаций в sandbox.
 
@@ -72,12 +72,12 @@ UI представляет бесконечное полотно (React Flow), 
 - Транзит событий через Redis pub/sub для масштабирования по инстансам
 **Интерфейсы**: Socket.IO (ws + fallback), Redis pub/sub.
 
-### 4. Multi-Agent Orchestration Layer V2 (GigaChat + Redis MessageBus)
+### 4. Multi-Agent Orchestration Layer (GigaChat + Redis MessageBus)
 **Назначение**: Интерпретация естественного языка, управление командой специализированных AI агентов через единый Orchestrator, генерация кода трансформаций и виджетов, анализ данных.
 
-**Статус**: ✅ Реализовано (Multi-Agent V2). См. [`docs/MULTI_AGENT.md`](MULTI_AGENT.md) для полной спецификации.
+**Статус**: ✅ Реализовано (Multi-Agent). См. [`docs/MULTI_AGENT.md`](MULTI_AGENT.md) для полной спецификации.
 
-#### Архитектура V2
+#### Архитектура
 
 ```mermaid
 flowchart TB
@@ -97,7 +97,7 @@ flowchart TB
         C6["ResearchController"]
     end
 
-    subgraph Orchestrator["Orchestrator V2 (Single Path)"]
+    subgraph Orchestrator["Orchestrator (Single Path)"]
         O["process_request()"]
         P["PlannerAgent → Plan"]
         E["Execute Steps (zero-mapping)"]
@@ -137,7 +137,7 @@ flowchart TB
 - `sources` — источники данных
 - `suggestions` — предложения пользователю
 
-**Orchestrator V2** — единый путь выполнения:
+**Orchestrator** — единый путь выполнения:
 1. PlannerAgent создаёт план (список шагов с агентами)
 2. Последовательное выполнение шагов: каждый агент получает `pipeline_context` (мутабельный dict) и `agent_results` (хронологический list всех предыдущих AgentPayload)
 3. `execution_context` — отдельный канал для тяжёлых данных (DataFrame), не попадающих в промпты
@@ -185,7 +185,7 @@ flowchart TB
 ```
 apps/backend/app/services/
 ├── multi_agent/
-│   ├── orchestrator.py          # Orchestrator V2
+│   ├── orchestrator.py          # Orchestrator
 │   ├── message_bus.py           # Redis pub/sub
 │   ├── schemas/
 │   │   └── agent_payload.py     # AgentPayload (универсальный формат)

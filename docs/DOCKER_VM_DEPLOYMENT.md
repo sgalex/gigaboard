@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-Инструкция описывает **пошаговый запуск полного стека GigaBoard** (PostgreSQL, Redis, FastAPI backend, nginx + frontend) на **виртуальной машине с Linux** через **Docker Engine** и **Docker Compose V2**. По умолчанию **на хост публикуется только порт веб-интерфейса** (`FRONTEND_PORT`, nginx): REST (`/api/`), Socket.IO (`/socket.io/`) и документация API (`/docs`, `/redoc`) проксируются внутрь сети Compose. PostgreSQL, Redis и backend **не слушают порты на хосте**. Для локального Docker Desktop на Windows/Mac см. также [DOCKER_DESKTOP.md](../DOCKER_DESKTOP.md) в корне репозитория.
+Инструкция описывает **пошаговый запуск полного стека GigaBoard** (PostgreSQL, Redis, FastAPI backend, nginx + frontend) на **виртуальной машине с Linux** через **Docker Engine** и **Docker Compose**. По умолчанию **на хост публикуется только порт веб-интерфейса** (`FRONTEND_PORT`, nginx): REST (`/api/`), Socket.IO (`/socket.io/`) и документация API (`/docs`, `/redoc`) проксируются внутрь сети Compose. PostgreSQL, Redis и backend **не слушают порты на хосте**. Для локального Docker Desktop на Windows/Mac см. также [DOCKER_DESKTOP.md](../DOCKER_DESKTOP.md) в корне репозитория.
 
 **Ключевые файлы:** корневой `docker-compose.yml`, `apps/backend/Dockerfile`, `apps/web/Dockerfile`, шаблон [`.env.example`](../.env.example), вспомогательные ресурсы в [`res/`](../res/) (см. [`res/README.md`](../res/README.md)).
 

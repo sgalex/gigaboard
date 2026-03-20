@@ -1,7 +1,7 @@
 """SourceNode Pydantic schemas.
 
 SourceNode v2: Наследует от ContentNode, хранит и конфигурацию и данные.
-См. docs/SOURCE_NODE_CONCEPT_V2.md для деталей архитектуры.
+См. docs/SOURCE_NODE_CONCEPT.md для деталей архитектуры.
 """
 from datetime import datetime
 from typing import Any, Literal
@@ -68,7 +68,7 @@ class ExcelSourceConfig(BaseModel):
     - simple: извлечение по листам (sheets, selected_columns)
     - smart: извлечение по регионам (detected_regions)
     
-    See docs/SOURCE_NODE_CONCEPT_V2.md - section "Excel Dialog".
+    See docs/SOURCE_NODE_CONCEPT.md - section "Excel Dialog".
     """
     file_id: str = Field(..., description="Uploaded file ID")
     filename: str | None = Field(None, description="Original filename")
@@ -94,7 +94,7 @@ class ExcelSourceConfig(BaseModel):
 class DocumentSourceConfig(BaseModel):
     """Configuration for document source (PDF, DOCX, TXT).
     
-    См. docs/SOURCE_NODE_CONCEPT_V2.md — раздел "📄 4. Document Dialog".
+    См. docs/SOURCE_NODE_CONCEPT.md — раздел "📄 4. Document Dialog".
     """
     file_id: str = Field(..., description="Uploaded file ID")
     filename: str | None = Field(None, description="Original filename")

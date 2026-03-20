@@ -254,7 +254,7 @@ AnalystAgent может **читать** неструктурированный 
 
 #### 8. ValidatorAgent / QualityGateAgent (пайплайн)
 
-**Реализация**: модуль `agents/quality_gate.py`; в логах и Message Bus агент именуется **`validator`** (совместимость с V2).
+**Реализация**: модуль `agents/quality_gate.py`; в логах и Message Bus агент именуется **`validator`** (совместимость с текущей архитектурой).
 
 **Ответственность**: gate-keeper после выполнения шагов плана. Проверяет согласованность агрегированных результатов (в т.ч. Reporter) с запросом пользователя и при необходимости предлагает **replan** через `suggested_replan`.
 
@@ -273,7 +273,7 @@ AnalystAgent может **читать** неструктурированный 
 
 **Выход**: `AgentPayload.validation` (valid, confidence, issues, recommendations, suggested_replan)
 
-> **Примечание**: файл `agents/validator.py` — отдельный **ValidatorAgent** для проверки сгенерированного Python-кода (синтаксис, безопасность, `df_result` и т.д.). **Валидация мультиагентного пайплайна** после Reporter в Orchestrator V2 выполняется через **QualityGateAgent** (`quality_gate.py`, ключ `validator`), как в этом разделе.
+> **Примечание**: файл `agents/validator.py` — отдельный **ValidatorAgent** для проверки сгенерированного Python-кода (синтаксис, безопасность, `df_result` и т.д.). **Валидация мультиагентного пайплайна** после Reporter в Orchestrator выполняется через **QualityGateAgent** (`quality_gate.py`, ключ `validator`), как в этом разделе.
 
 ### Типичные pipelines
 
@@ -287,7 +287,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     subgraph TRANSFORM["Transform Pipeline"]
-        P2[Planner] --> A2[Analyst] --> C2[Codex\nPython] --> REP2[Reporter] --> V2[Validator]
+        P2[Planner] --> A2[Analyst] --> C2[Codex\nPython] --> REP2[Reporter] --> VAL[Validator]
     end
 ```
 
@@ -1262,7 +1262,7 @@ await _orchestrator.initialize()
 | 8.1 | Обновить ARCHITECTURE.md                        | `docs/ARCHITECTURE.md`                                                                            | 8 core-агентов, 5 controllers, AgentPayload, Single Path     |
 | 8.2 | Обновить API.md (если есть изменения endpoints) | `docs/API.md`                                                                                     | Консолидированные endpoints                                  |
 | 8.3 | Пометить устаревшие документы                   | `docs/MULTI_AGENT_SYSTEM.md`, `docs/CRITIC_AGENT_SYSTEM.md`, `docs/STRUCTURIZER_AGENT_CONCEPT.md` | Добавить баннер "УСТАРЕВШЕЕ — см. MULTI_AGENT.md" |
-| 8.4 | Обновить README.md                              | `docs/README.md`                                                                                  | Ссылки на V2 документацию                                    |
+| 8.4 | Обновить README.md                              | `docs/README.md`                                                                                  | Ссылки на актуальную документацию                            |
 
 ---
 
@@ -1322,21 +1322,21 @@ gantt
 | MessageBus timeout при новом flow                    | Средняя     | Высокое     | Phase 2.5: Обновить timeouts в config.py                                            |
 | LLM-промпты не работают после переименования агентов | Средняя     | Высокое     | Phase 3.1: Тщательная проверка PlannerAgent промптов                                |
 | Frontend несовместимость при консолидации endpoints  | Средняя     | Среднее     | Phase 5.4 опциональна — можно оставить старые URL                                   |
-| Big Bang ломает всё одновременно                     | Высокая     | Критическое | Git branch `feature/multi-agent-v2`. Поэтапные коммиты по фазам. Возможность отката |
+| Big Bang ломает всё одновременно                     | Высокая     | Критическое | Git branch `feature/multi-agent-refactor`. Поэтапные коммиты по фазам. Возможность отката |
 
 ### Стратегия коммитов
 
 ```
-feature/multi-agent-v2
+feature/multi-agent-refactor
 ├── commit: "feat: AgentPayload schemas + BaseAgent update"           (Phase 1)
 ├── commit: "refactor: Orchestrator single-path, remove Engine init"  (Phase 2)
-├── commit: "refactor: PlannerAgent V2 prompts"                       (Phase 3.1)
+├── commit: "refactor: PlannerAgent prompts"                          (Phase 3.1)
 ├── commit: "feat: DiscoveryAgent (ex SearchAgent)"                   (Phase 3.2)
 ├── commit: "feat: ResearchAgent (ex ResearcherAgent)"                (Phase 3.3)
 ├── commit: "refactor: StructurizerAgent → ContentTable only"         (Phase 3.4)
-├── commit: "refactor: AnalystAgent V2 (tables + findings)"           (Phase 3.5)
+├── commit: "refactor: AnalystAgent (tables + findings)"              (Phase 3.5)
 ├── commit: "feat: CodexAgent (unified code generation)"              (Phase 3.6)
-├── commit: "refactor: ReporterAgent V2 (no code gen)"                (Phase 3.7)
+├── commit: "refactor: ReporterAgent (no code gen)"                   (Phase 3.7)
 ├── commit: "refactor: ValidatorAgent (ex CriticAgent)"               (Phase 3.8)
 ├── commit: "feat: Satellite Controllers (5 controllers)"             (Phase 4)
 ├── commit: "refactor: Routes → Controllers integration"              (Phase 5)

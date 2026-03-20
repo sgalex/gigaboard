@@ -82,8 +82,8 @@
 - Мгновенное создание/обновление узлов из предложений ассистента
 - История сообщений доступна в текущей сессии
 
-### FR-7: Multi-Agent System (V2)
-**Описание**: За AI Assistant Panel находится мультиагентная система (Orchestrator V2), где специализированные AI агенты решают сложные задачи анализа данных через Redis Message Bus.
+### FR-7: Multi-Agent System
+**Описание**: За AI Assistant Panel находится мультиагентная система (Orchestrator), где специализированные AI агенты решают сложные задачи анализа данных через Redis Message Bus.
 **Агенты** (9 core):
 - Planner: Разбивает запросы на подзадачи, маршрутизирует, адаптивный replan
 - ResearchAgent (core): загрузка текста по URL из результатов Discovery; не путать с типом источника **research** на доске
@@ -101,7 +101,7 @@
 - Widget: генерация визуализаций
 - Widget Suggestions: предложения визуализаций на основе данных
 - Research: источник AI Research и API `POST /api/v1/research/chat` (`ResearchController` → Orchestrator)
-**Коммуникация**: Orchestrator V2 через Redis Message Bus (`request_response()`)
+**Коммуникация**: Orchestrator через Redis Message Bus (`request_response()`)
 **Ожидаемый результат**:
 - Сложные многошаговые аналитические задачи решаются автоматически
 - Агенты показывают свой ход мышления в чате

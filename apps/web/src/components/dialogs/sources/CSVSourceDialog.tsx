@@ -1,6 +1,6 @@
 /**
  * CSV Source Dialog - полноценный диалог для загрузки CSV файлов с AI-анализом.
- * См. docs/SOURCE_NODE_CONCEPT_V2.md - раздел "📊 1. CSV Dialog"
+ * См. docs/SOURCE_NODE_CONCEPT.md - раздел "📊 1. CSV Dialog"
  */
 import { useState, useCallback, useEffect } from 'react'
 import { FileSpreadsheet, Upload, Check, X, ChevronDown, ChevronRight, Loader2 } from 'lucide-react'

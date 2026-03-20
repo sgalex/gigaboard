@@ -8,7 +8,7 @@
 1. Эвристический pass — openpyxl raw cells → нахождение прямоугольных регионов
 2. AI pass (GigaChat/StructurizerAgent) — уточнение границ при неоднозначности
 
-См. docs/SOURCE_NODE_CONCEPT_V2.md — Excel Dialog.
+См. docs/SOURCE_NODE_CONCEPT.md — Excel Dialog.
 """
 import logging
 import io

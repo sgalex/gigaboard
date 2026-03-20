@@ -72,7 +72,7 @@ flowchart TB
 
 > **Примечание**: Агенты **не общаются друг с другом напрямую**. Orchestrator медиирует все вызовы.
 
-**См. также**: [MULTI_AGENT.md](./MULTI_AGENT.md) для детальной архитектуры Orchestrator V2
+**См. также**: [MULTI_AGENT.md](./MULTI_AGENT.md) для детальной архитектуры Orchestrator
 
 ### Компоненты
 

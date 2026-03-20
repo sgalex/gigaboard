@@ -543,7 +543,7 @@ flowchart LR
 
 - [DATA_NODE_SYSTEM.md](./DATA_NODE_SYSTEM.md) — детали pipeline и трансформаций
 - [CONNECTION_TYPES.md](./CONNECTION_TYPES.md) — полная спецификация типов связей
-- [SOURCE_NODE_CONCEPT_V2.md](./SOURCE_NODE_CONCEPT_V2.md) — диалоги настройки источников
+- [SOURCE_NODE_CONCEPT.md](./SOURCE_NODE_CONCEPT.md) — диалоги настройки источников
 - [SMART_NODE_PLACEMENT.md](./SMART_NODE_PLACEMENT.md) — детали алгоритма размещения
 - [WIDGET_GENERATION_SYSTEM.md](./WIDGET_GENERATION_SYSTEM.md) — создание виджетов
 - [TRANSFORM_SYSTEM.md](./TRANSFORM_SYSTEM.md) — система трансформаций

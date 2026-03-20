@@ -22,9 +22,9 @@
 - [x] Frontend: канвас на React Flow (@xyflow/react), Zustand state, Socket.IO клиент
 - [x] Backend: FastAPI + Socket.IO сервер, CRUD бордов/узлов
 - [x] Настроить PostgreSQL + SQLAlchemy, Redis для pub/sub
-- [x] **Multi-Agent V2 System** (9 core agents + 5 controllers):
+- [x] **Multi-Agent System** (9 core agents + 5 controllers):
   - [x] AgentPayload — универсальный формат данных
-  - [x] Orchestrator V2 — Single Path (Planner → Steps → Validator)
+  - [x] Orchestrator — Single Path (Planner → Steps → Validator)
   - [x] 9 Core Agents: Planner, Structurizer, Analyst, TransformCodex, WidgetCodex, Reporter, Discovery, Research, Validator
   - [x] Satellite Controllers: Transformation, Widget, AIAssistant, TransformSuggestions, WidgetSuggestions, **ResearchController** (источник AI Research + `research/chat`)
   - [x] Zero-mapping agent_results (хронологический list), adaptive replanning
@@ -49,7 +49,7 @@
 
 **Ключевые фичи MVP**:
 - ✅ FR-1 до FR-6: Базовая доска + AI Assistant Panel
-- ✅ FR-7: Multi-Agent V2 System (9 agents, Single Path Orchestrator, 5 controllers)
+- ✅ FR-7: Multi-Agent System (9 agents, Single Path Orchestrator, 5 controllers)
 - ✅ FR-9: WidgetNode Generation (WidgetCodexAgent + WidgetController)
 - ✅ FR-11: Connection Types (TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN)
 - 🔄 FR-8: Dynamic Tool Development (частично — TransformCodexAgent/WidgetCodexAgent покрывает code generation)

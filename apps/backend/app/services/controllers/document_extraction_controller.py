@@ -10,7 +10,7 @@ Workflow:
 
 Используется в DocumentSourceDialog — итеративный чат для извлечения данных из PDF/DOCX/TXT.
 
-См. docs/SOURCE_NODE_CONCEPT_V2.md → раздел "📄 4. Document Dialog"
+См. docs/SOURCE_NODE_CONCEPT.md → раздел "📄 4. Document Dialog"
 """
 
 import logging

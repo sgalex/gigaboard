@@ -8,7 +8,7 @@
 - 🎨 **Data-Centric Canvas** — бесконечное полотно с 4 типами узлов (React Flow)
 - 🤖 **AI Assistant Panel** — диалог в контексте доски, создание узлов одной кнопкой
 - 🔗 **5 типов связей**: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
-- 🧠 **Multi-Agent V2** — 9 core агентов + satellite-контроллеры, Orchestrator V2
+- 🧠 **Multi-Agent System** — 9 core агентов + satellite-контроллеры, Orchestrator
 - 👥 **Real-time совместная работа** — Socket.IO + Redis pub/sub
 - 🎨 **AI-генерация визуализаций** — Reporter Agent создаёт WidgetNode из данных
 - 🔄 **Автоматический replay** — обновление source запускает перепросчёт всего pipeline
@@ -34,7 +34,7 @@ Package:   uv (Python), npm (Frontend)
 | Документ                                 | Описание                                                       |
 | ---------------------------------------- | -------------------------------------------------------------- |
 | [SPECIFICATIONS.md](./SPECIFICATIONS.md) | Функциональные и нефункциональные требования (FR-1..FR-23)     |
-| [ARCHITECTURE.md](./ARCHITECTURE.md)     | Архитектура: 4 типа узлов, Multi-Agent V2, Data-Centric Canvas |
+| [ARCHITECTURE.md](./ARCHITECTURE.md)     | Архитектура: 4 типа узлов, Multi-Agent System, Data-Centric Canvas |
 | [API.md](./API.md)                       | REST и WebSocket endpoints                                     |
 
 ### Архитектура узлов и связей
@@ -44,18 +44,18 @@ Package:   uv (Python), npm (Frontend)
 | [BOARD_SYSTEM.md](./BOARD_SYSTEM.md)                     | **⭐ Документ доски:** 4 типа узлов, 5 типов связей, 9 источников, правила размещения — всё в одном месте** |
 | [DASHBOARD_SYSTEM.md](./DASHBOARD_SYSTEM.md)             | **⭐ Dashboard System:** редактор дашбордов — виджеты, текст, изображения, линии, snap, z-order, rotation** |
 | [DATA_NODE_SYSTEM.md](./DATA_NODE_SYSTEM.md)             | Pipeline и трансформации: процесс, replay, sandbox                                                         |
-| [SOURCE_NODE_CONCEPT_V2.md](./SOURCE_NODE_CONCEPT_V2.md) | Диалоги настройки источников: CSV, API, DB, Research — полные UX-сценарии                                  |
+| [SOURCE_NODE_CONCEPT.md](./SOURCE_NODE_CONCEPT.md) | Диалоги настройки источников: CSV, API, DB, Research — полные UX-сценарии                                  |
 | [CONNECTION_TYPES.md](./CONNECTION_TYPES.md)             | Полная спецификация 5 типов связей с метаданными                                                           |
 | [SMART_NODE_PLACEMENT.md](./SMART_NODE_PLACEMENT.md)     | Алгоритм AABB, спиральный поиск, листинг кода                                                              |
 | [DRILL_DOWN_SYSTEM.md](./DRILL_DOWN_SYSTEM.md)           | Interactive drill-down по DRILL_DOWN edges (Phase 2)                                                       |
 | [CROSS_FILTER_SYSTEM.md](./CROSS_FILTER_SYSTEM.md)       | **⭐ Cross-Filter:** глобальные фильтры, измерения, click-to-filter, пресеты для ЛПР                        |
 | [COLLABORATIVE_FEATURES.md](./COLLABORATIVE_FEATURES.md) | CommentNode, COMMENT edges, real-time совместная работа (Phase 2)                                          |
 
-### Multi-Agent System V2
+### Multi-Agent System
 
 | Документ                                                 | Описание                                                    |
 | -------------------------------------------------------- | ----------------------------------------------------------- |
-| [MULTI_AGENT.md](./MULTI_AGENT.md)                       | Orchestrator V2, AgentPayload, 9 агентов, satellite-контроллеры (в т.ч. ResearchController); см. также history/2026-03-18 — Analyst/JSON, Quality Gate, Research HTTP |
+| [MULTI_AGENT.md](./MULTI_AGENT.md)                       | Orchestrator, AgentPayload, 9 агентов, satellite-контроллеры (в т.ч. ResearchController); см. также history/2026-03-18 — Analyst/JSON, Quality Gate, Research HTTP |
 | [TASK_TYPES_REFERENCE.md](./TASK_TYPES_REFERENCE.md)     | Типы задач для каждого агента (task types)                  |
 | [ADAPTIVE_PLANNING.md](./ADAPTIVE_PLANNING.md)           | Full Replan — адаптивное планирование на основе результатов |
 | [AI_RESOLVER_SYSTEM.md](./AI_RESOLVER_SYSTEM.md)         | Batch AI resolution (пол, sentiment, категоризация)         |
@@ -96,7 +96,14 @@ Package:   uv (Python), npm (Frontend)
 | Документ                                               | Описание                                        |
 | ------------------------------------------------------ | ----------------------------------------------- |
 | [DATA_FORMATS.md](./DATA_FORMATS.md)                   | Форматы данных: CSV, JSON, Excel, Parquet и др. |
+| [JSON_SOURCE_PARSING.md](./JSON_SOURCE_PARSING.md) | JSON Source: автоизвлечение схемы, нормализация в таблицы, редактор мэппинга |
 | [FILE_STORAGE_STRATEGY.md](./FILE_STORAGE_STRATEGY.md) | Стратегия хранения файлов                       |
+
+**JSON Source (актуализация 2026-03-20):**
+- Единый полноэкранный диалог для `create/edit`.
+- Левая секция: upload JSON + collapsible preview исходного JSON.
+- Правая секция: табы таблиц мэппинга (rename/delete/add), редактор столбцов и встроенный preview.
+- Контракт хранения: `schema_snapshot`, `mapping_spec`, `generation_meta` в `SourceNode.config`.
 
 ### Планирование и развитие
 
@@ -136,9 +143,9 @@ GigaBoard/
 │   ├── ARCHITECTURE.md            # Архитектура системы
 │   ├── API.md                     # REST/WebSocket endpoints
 │   ├── DATA_NODE_SYSTEM.md        # SourceNode/ContentNode архитектура
-│   ├── SOURCE_NODE_CONCEPT_V2.md  # 9 типов источников, витрина, диалоги
+│   ├── SOURCE_NODE_CONCEPT.md  # 9 типов источников, витрина, диалоги
 │   ├── CONNECTION_TYPES.md        # 5 типов связей
-│   ├── MULTI_AGENT.md  # Multi-Agent V2 архитектура
+│   ├── MULTI_AGENT.md  # Multi-Agent архитектура
 │   ├── WIDGET_GENERATION_SYSTEM.md # AI-генерация визуализаций
 │   ├── TRANSFORM_SYSTEM.md        # Система трансформаций
 │   ├── TRANSFORM_DIALOG_CHAT_SYSTEM.md  # TransformDialog с чатом
@@ -156,7 +163,7 @@ GigaBoard/
 │   │       ├── schemas/           # Pydantic schemas
 │   │       ├── routes/            # API endpoints (auth, health, projects, boards, edges, source_nodes, content_nodes, widget_nodes, comment_nodes, extraction, ai_assistant, ai_resolver, database, files, dashboards, library, public, dimensions, filters)
 │   │       ├── services/          # Business logic
-│   │       │   ├── multi_agent/   # Multi-Agent V2
+│   │       │   ├── multi_agent/   # Multi-Agent
 │   │       │   │   ├── agents/    # 9 core агентов + QualityGate
 │   │       │   │   └── ...
 │   │       │   ├── controllers/   # satellite-контроллеры (AI Assistant, Transform, Widget, Research, …)

@@ -3,7 +3,7 @@
 SourceNode наследует ContentNode и добавляет конфигурацию источника.
 Это позволяет хранить и конфиг источника, и извлечённые данные в одной ноде.
 
-См. docs/SOURCE_NODE_CONCEPT_V2.md для деталей архитектуры.
+См. docs/SOURCE_NODE_CONCEPT.md для деталей архитектуры.
 """
 from enum import Enum
 from typing import TYPE_CHECKING, Any

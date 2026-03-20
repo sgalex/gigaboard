@@ -54,7 +54,7 @@ class ExcelSource(BaseSource):
              Каждый регион: sheet_name, start_row, start_col, end_row, end_col,
              header_row, table_name, selected_columns
         
-        См. docs/SOURCE_NODE_CONCEPT_V2.md - "Excel Dialog".
+        См. docs/SOURCE_NODE_CONCEPT.md - "Excel Dialog".
         """
         start_time = time.time()
         

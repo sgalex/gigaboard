@@ -2,9 +2,9 @@
 
 ## Executive Summary
 
-**SearchAgent** (часть DiscoveryAgent в V2) — агент для поиска информации в интернете через DuckDuckGo. Поддерживает веб-поиск, поиск новостей и быстрые ответы. Результаты автоматически суммаризируются GigaChat.
+**SearchAgent** (часть DiscoveryAgent в текущей архитектуре) — агент для поиска информации в интернете через DuckDuckGo. Поддерживает веб-поиск, поиск новостей и быстрые ответы. Результаты автоматически суммаризируются GigaChat.
 
-> **Примечание**: В Multi-Agent V2 поисковая функциональность входит в состав **DiscoveryAgent**.
+> **Примечание**: В Multi-Agent System поисковая функциональность входит в состав **DiscoveryAgent**.
 
 ---
 
@@ -134,5 +134,5 @@ Planner Agent автоматически использует SearchAgent для
 
 ## См. также
 
-- [MULTI_AGENT.md](./MULTI_AGENT.md) — DiscoveryAgent в V2 архитектуре
+- [MULTI_AGENT.md](./MULTI_AGENT.md) — DiscoveryAgent в текущей архитектуре
 - [API.md](./API.md) — API endpoints

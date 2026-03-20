@@ -1,7 +1,7 @@
 """SourceNode API routes.
 
-v2: SourceNode наследует ContentNode, хранит и конфигурацию и данные.
-См. docs/SOURCE_NODE_CONCEPT_V2.md для архитектуры.
+SourceNode наследует ContentNode, хранит и конфигурацию, и данные.
+См. docs/SOURCE_NODE_CONCEPT.md для архитектуры.
 """
 from typing import Any
 from uuid import UUID

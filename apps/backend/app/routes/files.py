@@ -478,7 +478,7 @@ async def analyze_excel_file(
     """Analyze Excel file: detect sheets, columns, types, preview data.
     
     Returns sheet-by-sheet analysis with column types and preview rows.
-    See docs/SOURCE_NODE_CONCEPT_V2.md - section "Excel Dialog".
+    See docs/SOURCE_NODE_CONCEPT.md - section "Excel Dialog".
     """
     try:
         import pandas as pd
@@ -740,7 +740,7 @@ async def analyze_excel_smart(
         file_id: Uploaded file ID
         use_ai: Whether to use AI (GigaChat) for refinement (default: True)
     
-    See docs/SOURCE_NODE_CONCEPT_V2.md — Excel Dialog.
+    See docs/SOURCE_NODE_CONCEPT.md — Excel Dialog.
     """
     try:
         storage = get_storage()
@@ -808,7 +808,7 @@ async def analyze_document_file(
     - Tables found in the document
     - Document metadata (page count, type, etc.)
     
-    See docs/SOURCE_NODE_CONCEPT_V2.md — раздел "📄 4. Document Dialog".
+    See docs/SOURCE_NODE_CONCEPT.md — раздел "📄 4. Document Dialog".
     """
     try:
         storage = get_storage()
@@ -927,7 +927,7 @@ async def extract_document_chat(
     Uses DocumentExtractionController → Orchestrator V2.
     Each message refines extraction — tables update in real-time.
     
-    See docs/SOURCE_NODE_CONCEPT_V2.md — "📄 4. Document Dialog"
+    See docs/SOURCE_NODE_CONCEPT.md — "📄 4. Document Dialog"
     """
     if not request.user_prompt:
         raise HTTPException(

@@ -9,7 +9,7 @@
 - **SourceNode наследует ContentNode** — хранит и конфигурацию источника, и извлечённые данные
 - **4 типа узлов**: SourceNode, ContentNode, WidgetNode, CommentNode
 - **5 типов связей**: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
-- **Multi-Agent System V2**: Orchestrator → PlannerAgent, StructurizerAgent, AnalystAgent, TransformCodexAgent, WidgetCodexAgent, ReporterAgent, DiscoveryAgent, ResearchAgent, ValidatorAgent + 5 Controllers
+- **Multi-Agent System**: Orchestrator → PlannerAgent, StructurizerAgent, AnalystAgent, TransformCodexAgent, WidgetCodexAgent, ReporterAgent, DiscoveryAgent, ResearchAgent, ValidatorAgent + 5 Controllers
 - **Real-time**: Socket.IO для коллаборативных обновлений
 
 **Версионирование**: Все endpoints под `/api/v1` (кроме `/health` и `/ai/resolve`)
@@ -171,7 +171,28 @@ SourceVitrinaItem { source_type, display_name, icon, description }
 
 ```
 CSVSourceConfig      { file_id, delimiter?, encoding?, has_header=true, skip_rows=0, max_rows? }
-JSONSourceConfig     { file_id, max_rows?, json_path="$", extraction_code? }
+JSONSourceConfig     {
+    file_id,
+    filename?,
+    mime_type?,
+    size_bytes?,
+    json_path="$",
+    schema_snapshot?: {
+        version: "1.0",
+        root_type?: "object"|"array"|"scalar",
+        nodes: [{ path, node_kind, value_types, cardinality? }]
+    },
+    mapping_spec?: {
+        version: "1.0",
+        tables: [{
+            id, name, base_path,
+            pk?: { column, strategy? },
+            fk?: [{ column, ref_table, ref_column }],
+            columns: [{ name, type, path, nullable? }]
+        }]
+    },
+    generation_meta?: { generated_by?, confidence?, warnings? }
+}
 ExcelSourceConfig    { file_id, filename, has_header, analysis_mode="smart", max_rows?, detected_regions: [{sheet_name, start_row, start_col, end_row, end_col, header_row, table_name, column_overrides, selected_columns}] }
 DocumentSourceConfig { file_id, extraction_prompt?, extraction_code? }
 APISourceConfig      { url, method="GET", headers={}, params={}, body?, timeout_seconds=30, pagination? }
@@ -182,6 +203,14 @@ StreamSourceConfig   { stream_type: "websocket"|"sse"|"kafka", url, buffer_strat
 ```
 
 </details>
+
+#### JSON Source: контракт и поведение
+
+- При создании/обновлении JSON-источника backend извлекает `schema_snapshot` и использует `mapping_spec` для построения таблиц.
+- Если `mapping_spec` отсутствует, backend выполняет авто-нормализацию и сохраняет результат в `config.mapping_spec`.
+- `PUT /api/v1/source-nodes/{source_id}` для `source_type=json` с изменённым `config.mapping_spec` инициирует повторное извлечение данных.
+- `POST /api/v1/source-nodes/{source_id}/refresh` повторно использует сохранённый `mapping_spec` (воспроизводимый refresh).
+- Результат извлечения возвращается в `SourceNodeResponse.content.tables` в unified формате (см. `docs/DATA_FORMATS.md`).
 
 ### Research Chat (`/api/v1/research`)
 
@@ -240,17 +269,17 @@ ResearchChatResponse {
 | POST   | `/{content_id}/transform/test`       | `{code, transformation_id, selected_node_ids?}`                                         | `dict`                       | Тестирование кода, возврат результатов без создания ноды  |
 | POST   | `/{content_id}/transform/iterative`  | `TransformIterativeRequest`                                                             | `TransformIterativeResponse` | Итеративная трансформация через AI-чат                    |
 | POST   | `/{content_id}/transform/execute`    | `{code, transformation_id?, description?, prompt?, selected_node_ids, target_node_id?}` | `dict`                       | Выполнение кода и создание/обновление ContentNode + edge  |
-| POST   | `/{content_id}/transform`            | `{prompt}`                                                                              | `dict`                       | Трансформация через TransformationController (V2)         |
+| POST   | `/{content_id}/transform`            | `{prompt}`                                                                              | `dict`                       | Трансформация через TransformationController               |
 | POST   | `/content-nodes/transform`           | `TransformRequest`                                                                      | `TransformResponse`          | Трансформация через прямой Python код                     |
-| POST   | `/{content_id}/transform-multiagent` | `{user_prompt, existing_code?, ...}`                                                    | `dict`                       | Трансформация через Orchestrator V2 (TransformCodexAgent) |
+| POST   | `/{content_id}/transform-multiagent` | `{user_prompt, existing_code?, ...}`                                                    | `dict`                       | Трансформация через Orchestrator (TransformCodexAgent) |
 
 ### Визуализации
 
 | Method | Path                                 | Request Body                | Response                     | Описание                                                |
 | ------ | ------------------------------------ | --------------------------- | ---------------------------- | ------------------------------------------------------- |
-| POST   | `/{content_id}/visualize`            | `VisualizeRequest`          | `VisualizeResponse`          | Создать WidgetNode из ContentNode (WidgetController V2) |
+| POST   | `/{content_id}/visualize`            | `VisualizeRequest`          | `VisualizeResponse`          | Создать WidgetNode из ContentNode (WidgetController) |
 | POST   | `/{content_id}/visualize-iterative`  | `VisualizeIterativeRequest` | `VisualizeIterativeResponse` | Итеративная генерация виджета (чат)                     |
-| POST   | `/{content_id}/visualize-multiagent` | `VisualizeIterativeRequest` | `VisualizeIterativeResponse` | Визуализация через Orchestrator V2 (WidgetCodexAgent)   |
+| POST   | `/{content_id}/visualize-multiagent` | `VisualizeIterativeRequest` | `VisualizeIterativeResponse` | Визуализация через Orchestrator (WidgetCodexAgent)   |
 
 ### Data Lineage и утилиты
 

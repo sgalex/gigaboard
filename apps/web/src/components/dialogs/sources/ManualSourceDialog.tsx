@@ -9,7 +9,7 @@
  * - Редактируемое имя ноды
  * - Удаление строк и столбцов
  *
- * См. docs/SOURCE_NODE_CONCEPT_V2.md — раздел "✏️ 8. Manual Input Dialog"
+ * См. docs/SOURCE_NODE_CONCEPT.md — раздел "✏️ 8. Manual Input Dialog"
  */
 import { useState, useCallback, useRef, useEffect, KeyboardEvent, ClipboardEvent } from 'react'
 import { Edit3, Plus, Trash2, Clipboard, X } from 'lucide-react'

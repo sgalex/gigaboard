@@ -7,7 +7,7 @@
  * - *SourceDialog - специфичные диалоги
  * - SourceDialogRouter - выбор диалога по типу
  * 
- * См. docs/SOURCE_NODE_CONCEPT_V2.md
+ * См. docs/SOURCE_NODE_CONCEPT.md
  */
 
 // Types

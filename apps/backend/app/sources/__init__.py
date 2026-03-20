@@ -1,7 +1,7 @@
 """Sources module - pluggable data source extractors.
 
 Каждый тип источника имеет свою логику извлечения данных.
-См. docs/SOURCE_NODE_CONCEPT_V2.md для деталей архитектуры.
+См. docs/SOURCE_NODE_CONCEPT.md для деталей архитектуры.
 """
 from app.sources.base import BaseSource, ExtractionResult, ValidationResult, TableData
 from app.sources.registry import SourceRegistry, get_source_handler

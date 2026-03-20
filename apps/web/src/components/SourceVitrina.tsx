@@ -2,7 +2,7 @@
  * SourceVitrina - витрина типов источников для drag & drop на canvas.
  * 
  * Отображает все доступные типы источников, которые можно перетащить на доску.
- * См. docs/SOURCE_NODE_CONCEPT_V2.md
+ * См. docs/SOURCE_NODE_CONCEPT.md
  */
 import { useState, useEffect } from 'react'
 import {

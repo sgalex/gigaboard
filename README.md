@@ -50,9 +50,9 @@
 
 ## 🚀 Уникальные возможности
 
-### 1. 🤖 Multi-Agent System V2 — Команда AI-специалистов
+### 1. 🤖 Multi-Agent System — Команда AI-специалистов
 
-Не один AI, а **9 core-агентов** в контуре **Orchestrator V2** (единый путь выполнения) и обмен через **Redis Message Bus**, плюс **QualityGateAgent** для проверки данных pipeline (`execution_context`, полные DataFrame). См. [MULTI_AGENT.md](docs/MULTI_AGENT.md).
+Не один AI, а **9 core-агентов** в контуре **Orchestrator** (единый путь выполнения) и обмен через **Redis Message Bus**, плюс **QualityGateAgent** для проверки данных pipeline (`execution_context`, полные DataFrame). См. [MULTI_AGENT.md](docs/MULTI_AGENT.md).
 
 | Агент                 | Роль              | Суперсила                                                       |
 | --------------------- | ----------------- | --------------------------------------------------------------- |
@@ -276,9 +276,9 @@ flowchart LR
 
 ---
 
-## 🤖 Multi-Agent System V2 — технические детали
+## 🤖 Multi-Agent System — технические детали
 
-Краткий обзор агентов и контроллеров — в **разделе 1** («Multi-Agent System V2») в блоке «Уникальные возможности» выше.
+Краткий обзор агентов и контроллеров — в **разделе 1** («Multi-Agent System») в блоке «Уникальные возможности» выше.
 
 - **AgentPayload** — единый формат обмена (narrative, tables, code_blocks, plan, validation, suggestions).
 - **pipeline_context** + **agent_results** — контекст и хронология результатов; **execution_context** — канал для полных DataFrame (QualityGate).
@@ -377,7 +377,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile tools u
 - [🔌 API Reference](docs/API.md) — REST и Socket.IO
 
 ### Системы
-- [🤖 Multi-Agent V2](docs/MULTI_AGENT.md) — core-агенты, QualityGate, satellite-контроллеры (в т.ч. Research), Orchestrator
+- [🤖 Multi-Agent System](docs/MULTI_AGENT.md) — core-агенты, QualityGate, satellite-контроллеры (в т.ч. Research), Orchestrator
 - [🔐 Админ и системный LLM](docs/ADMIN_AND_SYSTEM_LLM.md) — роли, пресеты, Playground
 - [📐 Система доски](docs/BOARD_SYSTEM.md) — 4 типа узлов, 5 типов связей, 9 источников
 - [📦 Data Node System](docs/DATA_NODE_SYSTEM.md) — pipeline, трансформации, replay
@@ -506,7 +506,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile tools u
 ## 🗺️ Roadmap
 
 ### ✅ Завершено
-- [x] Multi-Agent V2 (core-агенты + QualityGate + satellite-контроллеры, в т.ч. ResearchController, Orchestrator Single Path)
+- [x] Multi-Agent System (core-агенты + QualityGate + satellite-контроллеры, в т.ч. ResearchController, Orchestrator Single Path)
 - [x] Source-Content Node Architecture (9 типов источников, AI Research через ResearchController)
 - [x] WidgetCodexAgent + TransformCodexAgent
 - [x] Transform Dialog с итеративным чатом

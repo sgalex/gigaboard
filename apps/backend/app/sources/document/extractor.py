@@ -5,7 +5,7 @@
 - DOCX (текст + таблицы через python-docx)
 - TXT (plain text с auto-detect encoding)
 
-См. docs/SOURCE_NODE_CONCEPT_V2.md — раздел "📄 4. Document Dialog".
+См. docs/SOURCE_NODE_CONCEPT.md — раздел "📄 4. Document Dialog".
 """
 import io
 import logging

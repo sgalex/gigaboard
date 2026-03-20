@@ -2,7 +2,7 @@
 
 **Статус**: ✅ Реализовано (март 2026)  
 **Дата обновления**: 11 марта 2026  
-**Связь**: [SOURCE_NODE_CONCEPT_V2.md](./SOURCE_NODE_CONCEPT_V2.md) (раздел 7), [MULTI_AGENT.md](./MULTI_AGENT.md), [API.md](./API.md) (Research Chat), [ADMIN_AND_SYSTEM_LLM.md](./ADMIN_AND_SYSTEM_LLM.md) (Playground)
+**Связь**: [SOURCE_NODE_CONCEPT.md](./SOURCE_NODE_CONCEPT.md) (раздел 7), [MULTI_AGENT.md](./MULTI_AGENT.md), [API.md](./API.md) (Research Chat), [ADMIN_AND_SYSTEM_LLM.md](./ADMIN_AND_SYSTEM_LLM.md) (Playground)
 
 ---
 
@@ -300,7 +300,7 @@
 
 ## 5. Связанные документы
 
-- [SOURCE_NODE_CONCEPT_V2.md](./SOURCE_NODE_CONCEPT_V2.md) — раздел 7 (AI Research Dialog)
+- [SOURCE_NODE_CONCEPT.md](./SOURCE_NODE_CONCEPT.md) — раздел 7 (AI Research Dialog)
 - [MULTI_AGENT.md](./MULTI_AGENT.md) — Research pipeline, форматы AgentPayload
 - [API.md](./API.md) — актуализация после добавления `POST /api/v1/research/chat`
 - [BOARD_SYSTEM.md](./BOARD_SYSTEM.md) — тип источника research, refresh
