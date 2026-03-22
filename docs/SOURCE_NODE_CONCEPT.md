@@ -923,7 +923,7 @@ ALTER TYPE edge_type DROP VALUE 'EXTRACT';
 
 ### Phase 4: AI Integration
 - [ ] CSV Schema Analyzer Agent
-- [ ] JSON/Excel Code Generator (Transformation Agent)
+- [ ] JSON/Excel Code Generator (TransformCodex / pipeline)
 - [ ] Document Extraction (Multi-Agent)
 - [ ] Deep Research flow
 

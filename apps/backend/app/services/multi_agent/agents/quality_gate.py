@@ -11,9 +11,11 @@ Note: Файл назван quality_gate.py чтобы не конфликтов
       Agent name = "validator" (V2).
 """
 
+import copy
 import json
 import logging
 import re
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from .base import BaseAgent
@@ -43,6 +45,38 @@ _CONFIDENCE_PASS_THRESHOLD = 0.8
 # Guardrail against replan loops:
 # allow at most one validator-driven replan for "analyst returned no findings".
 _MAX_ANALYST_NO_FINDINGS_REPLANS = 1
+
+
+def aggregate_agent_results_for_validation(
+    current_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Строит словарь agent -> payload для эвристик Quality Gate.
+
+    Простое сопоставление «последний ключ agent перезаписывает предыдущий» ломается
+    при нескольких шагах с одним agent. Для ``analyst`` выбираем запись с
+    максимальным ``len(findings)``, при равенстве — более позднюю в списке.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in current_results:
+        if not isinstance(r, dict) or "agent" not in r:
+            continue
+        name = r.get("agent")
+        if not name:
+            continue
+        groups[str(name)].append(r)
+
+    out: Dict[str, Any] = {}
+    for name, group in groups.items():
+        if name == "analyst" and len(group) > 1:
+            best = max(
+                enumerate(group),
+                key=lambda iv: (len(iv[1].get("findings") or []), iv[0]),
+            )[1]
+            out[name] = copy.deepcopy(best)
+        else:
+            out[name] = copy.deepcopy(group[-1])
+    return out
 
 
 QUALITY_GATE_SYSTEM_PROMPT = """
@@ -77,9 +111,18 @@ QUALITY_GATE_SYSTEM_PROMPT = """
 
 ПРАВИЛА:
 - Будь СТРОГ к code_generation / transformation: код ОБЯЗАН быть.
-- Будь гибок к research: текстовый ответ приемлем.
+- Research (открытый веб, факты, обзоры): текстовый ответ приемлем. Не требуй, чтобы structurizer-таблицы отражали каждый аспект запроса или полный охват по строкам/дням/пунктам.
+  Смотри narrative reporter и наличие смыслового ответа; если в данных пайплайна по сути есть ответ пользователю (в т.ч. частично в тексте источников), valid=true, если нет явной пустоты и противоречия запросу.
+  Не отклоняй только из‑за «неполной структуры» или урезанной таблицы, если итоговый текст по запросу удовлетворителен.
 - Если пользователь запросил КОНКРЕТНЫЙ ФАКТ (курс валюты, цену, число) — в ответе должен быть этот факт (число), а не только ссылки на источники. valid=false, если ответ содержит только ссылки без указания самого курса/цены.
-- Если итерация >= max, НЕ давай suggested_replan.
+
+ОБЯЗАТЕЛЬНЫЙ suggested_replan при нехватке данных (вариант восстановления пайплайна):
+- Если valid=false потому, что для отчёта/ответа не хватает фактических данных, строк таблиц, структурированного контекста с доски или reporter явно пишет, что отчёт нельзя сформировать без данных — ты ОБЯЗАН вернуть suggested_replan с непустым additional_steps (пока в сообщении пользователя валидации указано, что итерация не последняя; если в блоке «Итерация: N/M» N>=M — НЕ давай suggested_replan, см. ниже).
+- Недостаточно одного message/issue без suggested_replan: оркестратор запускает replan только при наличии suggested_replan.
+- В additional_steps указывай реальных агентов пайплайна: analyst, research, structurizer, transform_codex, widget_codex, reporter и т.д. Чаще всего нужен шаг agent="analyst" с description, где явно сказано: получить недостающие данные через инструменты аналитика (listTables, при необходимости readTableData с table_id из ответа/контекста, выборки по таблицам), затем при необходимости ещё один шаг reporter для финального отчёта.
+- reason в suggested_replan — кратко: «не загружены / не прочитаны данные таблиц для отчёта» или аналог.
+
+- Если итерация >= max (в user-сообщении «Итерация: N/M» при N>=M или явный запрет suggested_replan), НЕ давай suggested_replan.
 - Рекомендации должны быть actionable.
 """
 
@@ -130,7 +173,8 @@ class QualityGateAgent(BaseAgent):
 
         Task fields:
           original_request — запрос пользователя
-          aggregated_result | (context.agent_results) — данные для проверки
+          validation_agent_results_slice — предпочтительно: срез agent_results текущего плана
+          aggregated_result | aggregated_payload — устаревший плоский dict (без merge по analyst)
           expected_outcome  — (опционально) тип ожидаемого результата
           iteration         — текущая итерация (default 1)
           max_iterations    — лимит (default 3)
@@ -145,21 +189,23 @@ class QualityGateAgent(BaseAgent):
             iteration = task.get("iteration", 1)
             max_iterations = task.get("max_iterations", 3)
 
-            # Данные для проверки (поддерживаем оба варианта имени поля)
-            aggregated: Dict[str, Any] = (
-                task.get("aggregated_result")
-                or task.get("aggregated_payload")
-                or {}
-            )
-            if not aggregated:
-                # Изменение #2: agent_results — list, конвертируем в dict для heuristic
-                agent_results = (context or {}).get("agent_results", [])
-                if agent_results:
-                    aggregated = {
-                        r.get("agent", f"agent_{i}"): r
-                        for i, r in enumerate(agent_results)
-                        if isinstance(r, dict)
-                    }
+            # Данные для проверки: не используем ``a or b`` — пустой dict {} falsy и ломает ветку.
+            raw_slice = task.get("validation_agent_results_slice")
+            if isinstance(raw_slice, list) and raw_slice:
+                aggregated = aggregate_agent_results_for_validation(raw_slice)
+            else:
+                ar = task.get("aggregated_result")
+                ap = task.get("aggregated_payload")
+                if ar is not None:
+                    aggregated = ar
+                elif ap is not None:
+                    aggregated = ap
+                else:
+                    aggregated = {}
+                if not aggregated:
+                    agent_results = (context or {}).get("agent_results", [])
+                    if isinstance(agent_results, list) and agent_results:
+                        aggregated = aggregate_agent_results_for_validation(agent_results)
 
             expected = (
                 task.get("expected_outcome")
@@ -219,6 +265,11 @@ class QualityGateAgent(BaseAgent):
                     max_iterations,
                     context=context,
                 )
+                if (
+                    isinstance(llm_raw, dict)
+                    and llm_raw.get("message") == "Parse error — default fail"
+                ):
+                    raise ValueError("validator_llm_parse_error")
                 vr = self._to_validation_result(
                     llm_raw, iteration, max_iterations
                 )
@@ -732,16 +783,77 @@ class QualityGateAgent(BaseAgent):
 
     @staticmethod
     def _parse_json(response: str) -> Dict[str, Any]:
-        m = re.search(r'\{[\s\S]*\}', response)
-        if m:
+        if not isinstance(response, str):
+            return {
+                "valid": False,
+                "confidence": 0.0,
+                "message": "Parse error — default fail",
+                "issues": [
+                    {
+                        "severity": "critical",
+                        "message": "Validator returned non-string response",
+                    }
+                ],
+            }
+
+        raw = response.strip()
+        if not raw:
+            return {
+                "valid": False,
+                "confidence": 0.0,
+                "message": "Parse error — default fail",
+                "issues": [
+                    {
+                        "severity": "critical",
+                        "message": "Validator returned empty response",
+                    }
+                ],
+            }
+
+        # 1) Пробуем распарсить как есть.
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+
+        # 2) Пробуем извлечь JSON из markdown-блока ```json ...```.
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, re.IGNORECASE)
+        if fence_match:
+            fenced = fence_match.group(1).strip()
             try:
-                return json.loads(m.group())
+                return json.loads(fenced)
             except json.JSONDecodeError:
-                pass
+                # Попробуем мягкую санитизацию (частая проблема — хвостовые запятые).
+                sanitized = re.sub(r",\s*([}\]])", r"\1", fenced)
+                try:
+                    return json.loads(sanitized)
+                except json.JSONDecodeError:
+                    pass
+
+        # 3) Fallback: берём самый большой объект {...}, затем мягко санитизируем.
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            candidate = m.group(0).strip()
+            for payload in (
+                candidate,
+                re.sub(r",\s*([}\]])", r"\1", candidate),
+            ):
+                try:
+                    return json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
         return {
-            "valid": True,
-            "confidence": 0.5,
-            "message": "Parse error — default pass",
+            # Fail-closed: если LLM-ответ валидатора не распарсился,
+            # считаем валидацию неуспешной, а не "условно успешной".
+            "valid": False,
+            "confidence": 0.0,
+            "message": "Parse error — default fail",
+            "issues": [
+                {
+                    "severity": "critical",
+                    "message": "Validator returned malformed JSON",
+                }
+            ],
         }
 
     def _to_validation_result(

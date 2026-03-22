@@ -101,7 +101,11 @@ class TransformationController(BaseController):
             ctx=ctx,  # Передаём полный контекст
         )
 
-        orchestrator_context = self._build_orchestrator_context(ctx, input_data)
+        orchestrator_context = self._build_orchestrator_context(
+            ctx,
+            input_data,
+            user_message=user_message,
+        )
 
         # Изменение #6: input_data передаётся отдельно через execution_context
         execution_context = {"input_data": input_data} if input_data else None
@@ -115,6 +119,12 @@ class TransformationController(BaseController):
             context=orchestrator_context,
             execution_context=execution_context,
         )
+        multi_agent_error = self._validate_multi_agent_result(orch_result)
+        if multi_agent_error:
+            return self._error_result(
+                message=multi_agent_error,
+                execution_time_ms=self._elapsed_ms(start_time),
+            )
 
         if orch_result.get("status") == "error":
             return self._error_result(
@@ -283,6 +293,24 @@ class TransformationController(BaseController):
             )
 
         # Формируем обогащённый запрос
+        content_node_id = str((ctx or {}).get("content_node_id") or "").strip()
+        selected_ids = [
+            str(item).strip() for item in (selected_node_ids or []) if str(item).strip()
+        ]
+        if content_node_id and content_node_id not in selected_ids:
+            selected_ids.insert(0, content_node_id)
+        if not content_node_id and selected_ids:
+            content_node_id = selected_ids[0]
+        scope_header = (
+            "\nКОНТРАКТ TRANSFORMATIONCONTROLLER:\n"
+            "- Цель: сгенерировать Python/pandas-код трансформации по существующим таблицам ContentNode.\n"
+            f"- Primary ContentNode ID: {content_node_id or 'unknown'}\n"
+            f"- Allowed ContentNode IDs: {', '.join(selected_ids) if selected_ids else (content_node_id or 'unknown')}\n"
+            "- Используй ТОЛЬКО данные этих ContentNode.\n"
+            "- Не используй внешние источники, если это не запрошено явно пользователем.\n"
+            "- Если не хватает данных таблиц — запрашивай через readTableListFromContentNodes (список и table_id), "
+            "при необходимости строк — readTableData с jsonDecl.table_id из ответа первого тула.\n"
+        )
         # Определяем, является ли запрос дискуссионным (анализ без кода)
         discussion_keywords = [
             "объясни", "расскажи", "опиши", "проанализируй", "какие тренды",
@@ -320,6 +348,7 @@ class TransformationController(BaseController):
                 f"  • Добавь краткие комментарии к ключевым операциям\n\n"
                 f"Доступные данные:\n"
             )
+        enriched += scope_header
         enriched += "\n".join(data_description_parts) if data_description_parts else "  (нет данных)"
 
         # Для chain transformations добавляем историю и existing_code как референс
@@ -342,20 +371,49 @@ class TransformationController(BaseController):
         self,
         ctx: Dict[str, Any],
         input_data: Dict[str, Any],
+        *,
+        user_message: str,
     ) -> Dict[str, Any]:
         """Строит context для Orchestrator.process_request()."""
         orch_ctx: Dict[str, Any] = {
             "controller": self.controller_name,
             "mode": "transformation",
+            "controller_user_request": str(user_message or "").strip(),
         }
+        primary_content_node_id = str(ctx.get("content_node_id") or "").strip()
+        selected_ids = [
+            str(item).strip()
+            for item in (ctx.get("selected_node_ids", []) or [])
+            if str(item).strip()
+        ]
+        if primary_content_node_id and primary_content_node_id not in selected_ids:
+            selected_ids.insert(0, primary_content_node_id)
+        if not primary_content_node_id and selected_ids:
+            primary_content_node_id = selected_ids[0]
+        orch_ctx["transformation_scope"] = {
+            "primary_content_node_id": primary_content_node_id,
+            "selected_node_ids": selected_ids,
+            "local_content_only": True,
+            "prefer_tools_for_tables": True,
+            "disallow_external_sources_unless_explicit": True,
+        }
+        # Не удалять input_data_preview при MULTI_AGENT_FORCE_TOOL_DATA_ACCESS (см. context_selection).
+        orch_ctx["keep_tabular_context_in_prompt"] = True
+        if selected_ids:
+            # Unified array contract for tool-aware agents.
+            orch_ctx["content_node_ids"] = selected_ids
+            orch_ctx["contentNodeIds"] = selected_ids
 
         # Pass through relevant context keys
         for key in (
+            "content_node_id",
             "selected_node_ids",
             "content_nodes_data",
             "existing_code",
             "chat_history",
             "transformation_id",
+            "_progress_callback",
+            "_enable_plan_progress",
         ):
             if key in ctx:
                 orch_ctx[key] = ctx[key]
@@ -513,6 +571,8 @@ class TransformationController(BaseController):
                 context=error_ctx,
                 skip_validation=True,  # Быстрый retry без QualityGate
             )
+            if self._validate_multi_agent_result(orch_result):
+                continue
 
             if orch_result.get("status") == "error":
                 continue
@@ -599,6 +659,27 @@ class TransformationController(BaseController):
     def _elapsed_ms(start_time: float) -> int:
         """Вычисляет elapsed time в миллисекундах."""
         return int((time.time() - start_time) * 1000)
+
+    @staticmethod
+    def _validate_multi_agent_result(orch_result: Any) -> Optional[str]:
+        """
+        Ensure TransformationController works strictly through Multi-Agent Orchestrator.
+        """
+        if not isinstance(orch_result, dict):
+            return "TransformationController expects multi-agent orchestrator response (dict)"
+        if orch_result.get("status") == "error":
+            return None
+        if "plan" not in orch_result or "results" not in orch_result:
+            return (
+                "TransformationController requires multi-agent pipeline result "
+                "(missing 'plan' or 'results')."
+            )
+        if not isinstance(orch_result.get("results"), dict):
+            return (
+                "TransformationController requires multi-agent pipeline result "
+                "with dict 'results'."
+            )
+        return None
 
     @staticmethod
     def _extract_output_variables(code: str) -> set:

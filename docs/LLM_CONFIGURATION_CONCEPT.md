@@ -19,6 +19,7 @@
 | **LLM-пресет** | Одна сконфигурированная «модель»: имя, провайдер (GigaChat / external OpenAI-compatible), все реквизиты (ключ, base URL, модель, temperature, max_tokens). Хранится в таблице `llm_config`. |
 | **Модель по умолчанию** | Один из пресетов, выбранный как системный default. Используется для всех агентов, у которых нет персональной привязки. |
 | **Привязка агента к LLM** | Опциональная связь «агент → пресет». Ключ агента — строка из реестра (например `planner`, `discovery`, `analyst`, `transform_codex`, `widget_codex`, `reporter`, `validator`, `structurizer`, `research`). |
+| **Runtime policy агента** | Дополнительные runtime-параметры в `agent_llm_override.runtime_options`: `timeout_sec`, `max_retries`, `context_ladder`, `max_items`, `max_total_chars`, `task_overrides`. |
 
 ---
 
@@ -68,6 +69,7 @@
 |------|-----|----------|
 | `agent_key` | string | PK, ключ агента из реестра (planner, discovery, …) |
 | `llm_config_id` | UUID, FK → llm_config.id | Пресет для этого агента |
+| `runtime_options` | JSON, nullable | Runtime-политика выполнения для агента: timeout/retries/context budgets и task-specific overrides |
 | `created_at`, `updated_at` | datetime | |
 
 Уникальность по `agent_key`: у каждого агента не более одной привязки. При удалении пресета нужно проверять, что он не используется как default и не указан в `agent_llm_override`.
@@ -94,6 +96,11 @@
 4. Загрузить запись `llm_config` по `llm_config_id`.
 5. По `provider` построить клиент (GigaChat или OpenAI-compatible) и выполнить запрос. Параметры `temperature`/`max_tokens` из запроса могут переопределять значения из пресета (или брать из пресета, если не переданы).
 
+Дополнительно для исполнения шага в Orchestrator:
+
+- из `agent_llm_override.runtime_options` читаются runtime-параметры для `ExecutionPolicy` и `context_selection`;
+- поддерживаются task-specific overrides в `runtime_options.task_overrides[task_type]`.
+
 Если `default_llm_config_id` не задан или пресет удалён — fallback на текущее поведение (например GigaChat из env), с логированием предупреждения.
 
 ---
@@ -105,10 +112,40 @@
 - `GET /api/v1/admin/llm-configs/{id}` — один пресет.
 - `PATCH /api/v1/admin/llm-configs/{id}` — обновление пресета (в т.ч. реквизиты).
 - `DELETE /api/v1/admin/llm-configs/{id}` — удаление пресета (проверка: не используется ли как default или в `agent_llm_override`).
-- `GET /api/v1/admin/system-llm-settings` — текущие системные настройки: default_llm_config_id, список привязок из `agent_llm_override`, плюс для удобства список пресетов и реестр агентов.
-- `PATCH /api/v1/admin/system-llm-settings` — установить default_llm_config_id.
+- `GET /api/v1/admin/llm-settings` — текущие системные настройки: default_llm_config_id, список привязок из `agent_llm_override`, плюс для удобства список пресетов и реестр агентов.
+- `PATCH /api/v1/admin/llm-settings` — установить default_llm_config_id.
 - `GET /api/v1/admin/agent-llm-overrides` — список привязок агент → пресет.
-- `PUT /api/v1/admin/agent-llm-overrides` — установить привязки (тело: список { agent_key, llm_config_id } или один override; при пустом llm_config_id — снять привязку).
+- `PUT /api/v1/admin/agent-llm-overrides` — установить привязки (полная замена): список `{ agent_key, llm_config_id, runtime_options? }`.
+
+### `runtime_options` (контракт)
+
+Поддерживаемая структура:
+
+```json
+{
+  "timeout_sec": 45,
+  "max_retries": 1,
+  "context_ladder": ["full", "compact", "minimal"],
+  "max_items": 30,
+  "max_total_chars": 100000,
+  "task_overrides": {
+    "create_plan": {
+      "timeout_sec": 35,
+      "max_retries": 1,
+      "max_items": 20,
+      "max_total_chars": 70000
+    }
+  }
+}
+```
+
+Ограничения валидации:
+
+- `context_ladder`: только `full`, `compact`, `minimal` (регистр не важен, нормализуется к lower-case);
+- `timeout_sec`: `1..1800`;
+- `max_retries`: `0..10`;
+- `max_items`: `1..200`;
+- `max_total_chars`: `1000..500000`.
 
 Тест подключения и Playground мультиагента остаются; тест привязать к выбранному пресету или к default.
 
@@ -128,7 +165,8 @@
 | `transform_codex` | Генерация Python-трансформаций |
 | `widget_codex` | Генерация виджетов |
 | `reporter` | Формирование ответа |
-| `validator` | Валидация ответа |
+| `context_filter` | Подготовка контекста / фильтрация для пайплайна |
+| `validator` | Финальная проверка (Quality Gate; ключ плана) |
 
 В UI: выпадающий список «Модель по умолчанию» (пресеты) + таблица/форма «Для агента X использовать пресет Y» (опционально, по умолчанию — «по умолчанию»).
 

@@ -87,6 +87,9 @@ class UserAISettings(Base):
     # Произвольные пользовательские предпочтения (язык, стиль и т.п.)
     preferred_style = Column(JSON, nullable=True)
 
+    # Переопределения параметров multi-agent (те же ключи, что MULTI_AGENT_* в env).
+    multi_agent_settings = Column(JSON, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
@@ -151,6 +154,9 @@ class AgentLLMOverride(Base):
         ForeignKey("llm_config.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Дополнительные runtime-настройки агента:
+    # timeout/retries/context policy (JSON), задаются из админки.
+    runtime_options = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
@@ -159,7 +165,11 @@ class AgentLLMOverride(Base):
     llm_config = relationship("LLMConfig", backref="agent_overrides")
 
     def __repr__(self) -> str:
-        return f"<AgentLLMOverride(agent_key={self.agent_key!r}, llm_config_id={self.llm_config_id})>"
+        return (
+            f"<AgentLLMOverride(agent_key={self.agent_key!r}, "
+            f"llm_config_id={self.llm_config_id}, "
+            f"runtime_options={'set' if self.runtime_options else 'none'})>"
+        )
 
 
 class SystemLLMSettings(Base):

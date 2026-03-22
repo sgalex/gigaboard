@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from .base import BaseAgent
 from ..message_bus import AgentMessageBus
-from ..schemas.agent_payload import CodeBlock, Narrative
+from ..schemas.agent_payload import CodeBlock, Narrative, ToolRequest, AgentPayload
 from app.services.gigachat_service import GigaChatService
 
 logger = logging.getLogger(__name__)
@@ -65,10 +65,15 @@ class TransformCodexAgent(BaseAgent):
 
     # ── default prompt ───────────────────────────────────────────────
     def _get_default_system_prompt(self) -> str:
+        from app.services.multi_agent.tabular_tool_contract import (
+            TOOL_MODE_AGENT_SYSTEM_APPENDIX_RU,
+        )
+
         return (
             "You are TransformCodexAgent — a Python/pandas transformation specialist in GigaBoard.\n"
             "You generate Python code for data transformations.\n"
-            "Always return valid JSON."
+            "Always return valid JSON.\n"
+            + TOOL_MODE_AGENT_SYSTEM_APPENDIX_RU
         )
 
     # ── main entry ───────────────────────────────────────────────────
@@ -127,6 +132,9 @@ class TransformCodexAgent(BaseAgent):
                         "sample_rows": info.get("sample_rows", [])[:10],  # Увеличено с 3 до 10 строк для лучшего понимания данных
                     })
                 self.logger.info(f"📊 Codex: loaded {len(input_schemas)} schema(s) from context")
+        # input_data_preview часто передаёт columns как list[{name,type}].
+        # Приводим к list[str], иначе dtypes.get(col) падает на dict (unhashable).
+        input_schemas = self._normalize_input_schemas(input_schemas)
         
         previous_errors = task.get("previous_errors", [])
         # FIX GAP 1: При error retry контроллер кладёт previous_error в context,
@@ -193,6 +201,63 @@ class TransformCodexAgent(BaseAgent):
             self.logger.info(f"📝 Codex: user_request='{user_request[:120]}…'")
 
         is_error_retry = bool(error_details or previous_errors)
+        tool_results = (context or {}).get("tool_results", []) if context else []
+        tools_enabled = bool((context or {}).get("tools_enabled")) if context else False
+        force_tool_data_access = bool(
+            (context or {}).get("force_tool_data_access")
+        ) if context else False
+        content_node_id = str((context or {}).get("content_node_id") or "").strip()
+        selected_node_ids = []
+        if context and isinstance(context.get("selected_node_ids"), list):
+            selected_node_ids = [
+                str(item).strip()
+                for item in context.get("selected_node_ids", [])
+                if str(item).strip()
+            ]
+        if not selected_node_ids and context and isinstance(context.get("content_node_ids"), list):
+            selected_node_ids = [
+                str(item).strip()
+                for item in context.get("content_node_ids", [])
+                if str(item).strip()
+            ]
+        if not selected_node_ids and context and isinstance(context.get("contentNodeIds"), list):
+            selected_node_ids = [
+                str(item).strip()
+                for item in context.get("contentNodeIds", [])
+                if str(item).strip()
+            ]
+        if not content_node_id and selected_node_ids:
+            content_node_id = selected_node_ids[0]
+        node_ids_for_tools: List[str] = []
+        for _id in [content_node_id, *selected_node_ids]:
+            _text = str(_id or "").strip()
+            if _text and _text not in node_ids_for_tools:
+                node_ids_for_tools.append(_text)
+        keep_tabular = bool((context or {}).get("keep_tabular_context_in_prompt"))
+        tool_request_cache_digest_lines: Optional[List[str]] = None
+        if context and isinstance(context.get("tool_request_cache_digest_lines"), list):
+            tool_request_cache_digest_lines = context["tool_request_cache_digest_lines"]
+        if (
+            tools_enabled
+            and force_tool_data_access
+            and not keep_tabular
+            and not tool_results
+            and node_ids_for_tools
+        ):
+            return AgentPayload.partial(
+                agent=self.agent_name,
+                tool_requests=[
+                    ToolRequest(
+                        tool_name="readTableListFromContentNodes",
+                        arguments={"nodeIds": node_ids_for_tools},
+                        reason="force_tool_data_access: table context is removed from prompt",
+                    )
+                ],
+                narrative=Narrative(
+                    text="Запрашиваю список таблиц через инструмент перед генерацией кода."
+                ),
+                metadata={"tool_mode": "forced_bootstrap"},
+            )
 
         messages = self._build_messages(
             description=description,
@@ -204,6 +269,11 @@ class TransformCodexAgent(BaseAgent):
             chat_history=chat_history,
             error_details=error_details,
             is_error_retry=is_error_retry,
+            tool_results=tool_results,
+            tools_enabled=tools_enabled,
+            content_node_id=content_node_id,
+            selected_node_ids=selected_node_ids,
+            tool_request_cache_digest_lines=tool_request_cache_digest_lines,
         )
 
         total_chars = sum(len(m.get("content", "")) for m in messages)
@@ -216,6 +286,21 @@ class TransformCodexAgent(BaseAgent):
         )
 
         parsed = self._parse_json_from_llm(response)
+        tool_requests = self._extract_tool_requests(parsed)
+        if tool_requests:
+            self.logger.info(
+                "🧰 Codex requested %d tool call(s): %s",
+                len(tool_requests),
+                [r.tool_name for r in tool_requests],
+            )
+            return AgentPayload.partial(
+                agent=self.agent_name,
+                tool_requests=tool_requests,
+                narrative=Narrative(
+                    text="Нужны дополнительные данные таблиц для генерации корректного кода."
+                ),
+                metadata={"tool_mode": "request"},
+            )
         raw_code = parsed.get("transformation_code", "")
         # Fallback: GigaChat иногда использует другое имя ключа
         if not raw_code:
@@ -526,6 +611,11 @@ class TransformCodexAgent(BaseAgent):
         chat_history: Optional[List[Dict[str, Any]]] = None,
         error_details: Optional[Dict[str, Any]] = None,
         is_error_retry: bool = False,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        tools_enabled: bool = False,
+        content_node_id: str = "",
+        selected_node_ids: Optional[List[str]] = None,
+        tool_request_cache_digest_lines: Optional[List[str]] = None,
     ) -> List[Dict[str, str]]:
         """Build LLM messages array.
 
@@ -546,6 +636,8 @@ class TransformCodexAgent(BaseAgent):
                     analyst_context=analyst_context,
                     existing_code=existing_code,
                     chat_history=chat_history,
+                    tool_request_cache_digest_lines=tool_request_cache_digest_lines,
+                    tool_results=tool_results,
                 )
             )
         else:
@@ -554,6 +646,10 @@ class TransformCodexAgent(BaseAgent):
                 description, input_schemas, previous_errors, existing_code,
                 user_request=user_request, analyst_context=analyst_context,
                 chat_history=chat_history, error_details=error_details,
+                tool_results=tool_results, tools_enabled=tools_enabled,
+                content_node_id=content_node_id,
+                selected_node_ids=selected_node_ids,
+                tool_request_cache_digest_lines=tool_request_cache_digest_lines,
             )
             messages.append({"role": "user", "content": prompt})
 
@@ -567,6 +663,9 @@ class TransformCodexAgent(BaseAgent):
         analyst_context: str,
         existing_code: str,
         chat_history: List[Dict[str, Any]],
+        *,
+        tool_request_cache_digest_lines: Optional[List[str]] = None,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, str]]:
         """Build multi-turn messages for iterative code refinement.
 
@@ -594,6 +693,11 @@ class TransformCodexAgent(BaseAgent):
 
         # 2. Data context preamble (schemas, analyst context)
         data_preamble = self._build_data_context(input_schemas, analyst_context)
+        digest_block = self._format_tool_digest_and_results_section(
+            tool_request_cache_digest_lines, tool_results
+        )
+        if digest_block:
+            data_preamble = digest_block + data_preamble
 
         # 3. Existing code → JSON block for assistant message
         code_block = (
@@ -721,6 +825,39 @@ class TransformCodexAgent(BaseAgent):
             return "\n".join(parts) + "\n\n"
         return ""
 
+    def _format_tool_digest_and_results_section(
+        self,
+        tool_request_cache_digest_lines: Optional[List[str]],
+        tool_results: Optional[List[Dict[str, Any]]],
+    ) -> str:
+        """Блок «уже выполненные запросы» + результаты тулов (как в single-turn промпте)."""
+        parts: List[str] = []
+        digest_lines = tool_request_cache_digest_lines or []
+        if digest_lines:
+            parts.append(
+                "УЖЕ ВЫПОЛНЕННЫЕ ЗАПРОСЫ К ДАННЫМ (не дублируй идентичные tool_requests; "
+                "данные уже получены — см. результаты ниже):"
+            )
+            for line in digest_lines[-25:]:
+                parts.append(f"  • {line}")
+            parts.append("")
+        if tool_results:
+            parts.append("РЕЗУЛЬТАТЫ ИНСТРУМЕНТОВ (актуальные данные таблиц):")
+            for i, tool_result in enumerate(tool_results[-4:], 1):
+                if not isinstance(tool_result, dict):
+                    continue
+                tname = tool_result.get("tool_name", "tool")
+                ok = bool(tool_result.get("success", False))
+                data = tool_result.get("data")
+                if ok and isinstance(data, dict):
+                    parts.append(f"  {i}. {tname}: {json.dumps(data, ensure_ascii=False)[:2500]}")
+                else:
+                    parts.append(f"  {i}. {tname}: ERROR={tool_result.get('error', 'unknown')}")
+            parts.append("")
+        if not parts:
+            return ""
+        return "\n".join(parts).rstrip() + "\n\n"
+
     @staticmethod
     def _fix_message_alternation(
         messages: List[Dict[str, str]],
@@ -750,6 +887,11 @@ class TransformCodexAgent(BaseAgent):
         analyst_context: str = "",
         chat_history: List[Dict[str, Any]] = None,
         error_details: Optional[Dict[str, Any]] = None,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        tools_enabled: bool = False,
+        content_node_id: str = "",
+        selected_node_ids: Optional[List[str]] = None,
+        tool_request_cache_digest_lines: Optional[List[str]] = None,
     ) -> str:
         parts: List[str] = []
 
@@ -909,6 +1051,11 @@ class TransformCodexAgent(BaseAgent):
             parts.append("АНАЛИЗ ДАННЫХ (от аналитика):")
             parts.append(analyst_context)
             parts.append("")
+        digest_block = self._format_tool_digest_and_results_section(
+            tool_request_cache_digest_lines, tool_results
+        )
+        if digest_block:
+            parts.append(digest_block.rstrip())
 
         # ── 5. Режим: ERROR RETRY, ITERATIVE или NEW ──
         is_error_retry = bool(error_details or previous_errors)
@@ -961,10 +1108,75 @@ class TransformCodexAgent(BaseAgent):
             parts.append(f"\n⚠️ ДОСТУПНЫЕ КОЛОНКИ: {all_columns}")
             parts.append("   Используй ТОЛЬКО эти имена колонок. НЕ придумывай новые!")
 
-        parts.append(
-            "\nОТВЕТ: верни JSON {transformation_code, description, output_schema}"
-        )
+        if tools_enabled:
+            node_ids = [str(item).strip() for item in (selected_node_ids or []) if str(item).strip()]
+            if content_node_id and content_node_id not in node_ids:
+                node_ids.insert(0, content_node_id)
+            if node_ids:
+                parts.append("\nДОСТУПНЫЕ nodeIds (используй их в tool arguments.nodeIds):")
+                for idx, nid in enumerate(node_ids, 1):
+                    marker = " (primary)" if content_node_id and nid == content_node_id else ""
+                    parts.append(f"  {idx}. {nid}{marker}")
+                parts.append("")
+            parts.append(
+                "\nРЕЖИМ ИНСТРУМЕНТОВ ВКЛЮЧЕН.\n"
+                "Доступ к данным: readTableListFromContentNodes даёт перечень таблиц и поле table_id; "
+                "для постраничного чтения строк — readTableData. Если задача требует фактических значений из строк, "
+                "вызови readTableData с table_id из ответа первого тула.\n"
+                "Если данных недостаточно — верни JSON:\n"
+                "{\n"
+                '  "tool_requests": [\n'
+                "    {\n"
+                '      "tool_name": "readTableListFromContentNodes",\n'
+                '      "arguments": {"nodeIds": ["<uuid1>", "<uuid2>"]},\n'
+                '      "reason": "optional"\n'
+                "    },\n"
+                "    {\n"
+                '      "tool_name": "readTableData",\n'
+                '      "arguments": {\n'
+                '        "jsonDecl": {"contentNodeId": "<uuid>", "table_id": "<id_or_name>", "offset": 0, "limit": 50}\n'
+                "      },\n"
+                '      "reason": "optional"\n'
+                "    }\n"
+                "  ]\n"
+                "}\n"
+                "Если данных достаточно — верни JSON {transformation_code, description, output_schema}."
+            )
+        else:
+            parts.append(
+                "\nОТВЕТ: верни JSON {transformation_code, description, output_schema}"
+            )
         return "\n".join(parts)
+
+    @staticmethod
+    def _extract_tool_requests(parsed: Dict[str, Any]) -> List[ToolRequest]:
+        """Extract tool requests from model JSON."""
+        if not isinstance(parsed, dict):
+            return []
+        raw_items = parsed.get("tool_requests")
+        if not isinstance(raw_items, list):
+            return []
+        requests: List[ToolRequest] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool_name") or item.get("name") or "").strip()
+            if not tool_name:
+                continue
+            arguments = item.get("arguments") or item.get("args") or {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            try:
+                requests.append(
+                    ToolRequest(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        reason=item.get("reason"),
+                    )
+                )
+            except Exception:
+                continue
+        return requests
 
     def _build_widget_prompt(
         self, description: str, data_summary: str
@@ -1033,6 +1245,51 @@ class TransformCodexAgent(BaseAgent):
                     )
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _normalize_input_schemas(
+        schemas: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Normalize schema columns to list[str] and sync dtypes map."""
+        normalized: List[Dict[str, Any]] = []
+        for schema in schemas or []:
+            if not isinstance(schema, dict):
+                continue
+            out = dict(schema)
+            raw_columns = out.get("columns", [])
+            raw_dtypes = out.get("dtypes", {})
+            dtypes: Dict[str, str] = {}
+
+            if isinstance(raw_dtypes, dict):
+                for k, v in raw_dtypes.items():
+                    if k is None:
+                        continue
+                    dtypes[str(k)] = str(v) if v is not None else ""
+
+            columns: List[str] = []
+            seen = set()
+            if isinstance(raw_columns, list):
+                for col in raw_columns:
+                    if isinstance(col, dict):
+                        col_name_raw = col.get("name")
+                        if not col_name_raw:
+                            continue
+                        col_name = str(col_name_raw)
+                        col_type = col.get("type")
+                        if col_type and col_name not in dtypes:
+                            dtypes[col_name] = str(col_type)
+                    else:
+                        col_name = str(col)
+
+                    if col_name not in seen:
+                        seen.add(col_name)
+                        columns.append(col_name)
+
+            out["columns"] = columns
+            out["dtypes"] = dtypes
+            normalized.append(out)
+
+        return normalized
 
     def _extract_analyst_context(
         self, agent_results: List[Dict[str, Any]]
@@ -1856,6 +2113,7 @@ WIDGET_SYSTEM_PROMPT = '''
 - Plotly v2.35+: https://cdn.plot.ly/plotly-2.35.2.min.js
 - D3 v7: https://cdn.jsdelivr.net/npm/d3@7
 - ECharts v6 (local): /libs/echarts.min.js
+- Leaflet v1.9 (local): /libs/leaflet.css + /libs/leaflet.js (marker assets under /libs/images/)
 
 **RULES**:
 1. Full HTML doc with <!DOCTYPE html>.

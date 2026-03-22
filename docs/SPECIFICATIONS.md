@@ -1,5 +1,14 @@
 # Требования и спецификации
 
+> **Актуализация терминов (2026-03-22)**  
+> - Генерация **HTML/CSS/JS виджетов** — **WidgetCodexAgent** и **WidgetController**; **Reporter** — итоговый текст/сводка, не генерация кода виджета.  
+> - **QualityGateAgent** в оркестраторе зарегистрирован под ключом плана **`validator`**; **`ValidatorAgent`** (`validator.py`) — отдельная проверка Python-кода трансформаций.  
+> - Упоминания **Developer Agent** в FR-8 / FR-12 — целевая концепция динамических инструментов/UI; в коде ближе всего **TransformCodexAgent**, оркестраторные тулы и sandbox. Подробно: [`MULTI_AGENT.md`](./MULTI_AGENT.md).
+
+## Видение и нарратив
+
+**GigaBoard** — **инструмент** для **аналитики и обработки данных с помощью ИИ** на **доске-пайплайне**: узлы и связи фиксируют путь от источников к результатам; **ассистент и мультиагент** опираются на LLM и оркестратор. Продукт позиционируется как **рабочее приложение**, а не как «платформа» в смысле **универсальной инфраструктуры или экосистемы под сторонние продукты**. В составе возможностей — **дашборды**, **глобальные фильтры**, **совместная работа** в реальном времени, **lineage** и **replay**. Ниже функциональные требования (FR) детализуют эту модель.
+
 ## Функциональные требования (MVP)
 
 ### FR-1: Бесконечное полотно с узлами (SourceNode/ContentNode/WidgetNode/CommentNode)
@@ -53,8 +62,8 @@
 1. Отправить вопрос /ai/query
 2. Planner анализирует запрос, определяет нужны ли новые источники данных
 3. По плану создаются/обновляются узлы: при необходимости новый **SourceNode** (в т.ч. тип `research` через диалог и `ResearchController`), извлечение данных → **ContentNode**
-4. Transformation Agent выполняет трансформации → новые ContentNode
-5. WidgetCodexAgent анализирует ContentNode, генерирует визуализацию → WidgetNode
+4. **TransformCodexAgent** (через контроллер трансформаций) выполняет трансформации → новые ContentNode
+5. **WidgetCodexAgent** анализирует ContentNode, генерирует визуализацию → WidgetNode
 6. Узлы размещаются на борде со связями (TRANSFORMATION, VISUALIZATION)
 **Ожидаемый результат**: Пользователь видит полный pipeline от источника до визуализации на доске с явным data lineage; события приходят всем участникам борда.
 
@@ -88,9 +97,10 @@
 - Planner: Разбивает запросы на подзадачи, маршрутизирует, адаптивный replan
 - ResearchAgent (core): загрузка текста по URL из результатов Discovery; не путать с типом источника **research** на доске
 - Analyst: Анализирует структурированные данные → insights; при ошибке парсинга JSON-ответа LLM — повтор с требованием валидного JSON и резервное извлечение findings из сырого текста (см. `docs/MULTI_AGENT.md`)
-- Reporter: Генерирует WidgetNode визуализации (HTML/CSS/JS)
-- Validator (`validator.py`): валидация сгенерированного Python-кода (безопасность, синтаксис)
-- Quality Gate (`quality_gate.py`, в шине: `validator`): валидация результатов пайплайна на соответствие запросу; итог `valid` от confidence (порог 0,8) и severity issues; не более одного replan по эвристике «analyst без findings», затем завершение без повторного `suggested_replan` (см. `docs/MULTI_AGENT.md`)
+- Reporter: итоговый narrative / ответ пользователю (markdown); не путать с генерацией кода виджета
+- WidgetCodex: генерация HTML/CSS/JS для WidgetNode (см. satellite **Widget**)
+- Validator (`validator.py`): валидация сгенерированного Python-кода трансформаций (безопасность, синтаксис)
+- Quality Gate (`quality_gate.py`, ключ плана `validator`): валидация результатов пайплайна на соответствие запросу; итог `valid` от confidence (порог 0,8) и severity issues; не более одного replan по эвристике «analyst без findings», затем завершение без повторного `suggested_replan` (см. `docs/MULTI_AGENT.md`)
 - Discovery: Поиск и обнаружение данных
 - Resolver: Batch AI resolution (пол по имени, sentiment, категоризация)
 - Structurizer: Извлечение структуры из текста → таблицы, сущности
@@ -108,7 +118,7 @@
 - Пользователь видит прогресс выполнения
 
 ### FR-8: Dynamic Tool Development
-**Описание**: Developer Agent может динамически писать и выполнять инструменты (tools) для решения специфических задач. Инструменты выполняются в изолированной песочнице (sandbox) с ограничениями по ресурсам и безопасности.
+**Описание** (целевое требование): динамически писать и выполнять инструменты (tools) для решения специфических задач. Инструменты выполняются в изолированной песочнице (sandbox) с ограничениями по ресурсам и безопасности. **В текущей реализации** отдельного «Developer Agent» в коде нет: трансформации и тул-луп оркестратора закрывают **TransformCodexAgent**, `readTableData` / `readTableListFromContentNodes`, **PythonExecutor** — см. [`MULTI_AGENT.md`](./MULTI_AGENT.md).
 **Примеры инструментов**:
 - Web scraping tools: сборка данных с веб-сайтов
 - Database query tools: выполнение SQL запросов к различным БД
@@ -126,15 +136,15 @@
 - Переиспользование созданных инструментов
 
 ### FR-9: WidgetNode Generation (Генерация визуализаций)
-**Описание**: Reporter Agent анализирует **ContentNode** и генерирует HTML/CSS/JavaScript код для создания WidgetNode. Агент может создавать 6 типов визуализаций с поддержкой адаптивного дизайна и темного режима.
+**Описание**: **WidgetCodexAgent** (и **WidgetController** в UI-сценариях) анализирует **ContentNode** и генерирует HTML/CSS/JavaScript код для создания WidgetNode. **Reporter** формирует текстовые итоги пайплайна, но не является основным генератором кода виджета.
 
 **Процесс**:
-1. Reporter Agent получает **ContentNode** с данными (текст + N таблиц)
+1. WidgetCodexAgent получает контекст **ContentNode** с данными (текст + N таблиц)
 2. Анализирует схему таблиц, типы полей, размер датасета
 3. Определяет оптимальный тип визуализации
 4. Генерирует HTML/CSS/JS код для WidgetNode
-5. Создает WidgetNode на канвасе
-6. Создает edge **VISUALIZATION**: ContentNode → WidgetNode
+5. Создаётся WidgetNode на канвасе (через API / контроллер)
+6. Создаётся edge **VISUALIZATION**: ContentNode → WidgetNode
 
 **Типы WidgetNode**:
 - **Metric**: KPI с трендом (из числовых ContentNode)
@@ -159,7 +169,7 @@
 - **Автообновление**: при изменении ContentNode, связанные WidgetNode автоматически обновляются
 
 **Ожидаемый результат**:
-- Reporter Agent создает визуализации из ContentNode
+- WidgetCodexAgent / виджет-контроллер создают визуализации из ContentNode
 - Пользователь видит превью WidgetNode в чате перед размещением
 - WidgetNode связан с родительским ContentNode через edge VISUALIZATION
 - При обновлении ContentNode (например, refresh из SourceNode), все WidgetNode автоматически обновляются
@@ -303,7 +313,7 @@
 **Возможности**:
 - Автоматическое сканирование источников данных (БД, файлы, API, Cloud storage)
 - Генерация JSON schema для форм на основе контекста
-- Developer Agent создаёт React компоненты форм из schema
+- UI/концепция Form Generator: динамические React-компоненты из schema (целевое состояние; см. [`DYNAMIC_FORM_GENERATION.md`](./DYNAMIC_FORM_GENERATION.md))
 - Умные подсказки (smart suggestions) на основе анализа данных
 - Conditional logic (поля появляются/скрываются в зависимости от выбора)
 - Ранжирование опций по релевантности
@@ -323,7 +333,7 @@
 2. Intent Analyzer определяет: автопоиск нужен (источник не указан)
 3. Data Source Scanner сканирует доступные источники
 4. Генерируется JSON schema с найденными источниками
-5. Developer Agent создаёт React компонент (список с опциями)
+5. Генерируется/рендерится UI формы (список с опциями) — по текущей реализации продукта
 6. Форма отображается в AI Panel с spinner для загрузки
 7. Пользователь выбирает источник
 8. Данные загружаются, Smart Suggestion Engine анализирует превью
@@ -642,23 +652,12 @@ AI: "Загружаю через ЦИАН API...
 - Возможность откатиться к любому этапу трансформации
 - Просмотр кода трансформации для каждой связи
 
-**4. Transformation Agent** (9-й агент в системе):
+**4. Трансформации и виджеты** (в продукте — **TransformCodexAgent**, **WidgetCodexAgent**, контроллеры; не отдельный класс «Transformation Agent»):
+> Иллюстративный псевдокод для требований UX; реализация — в `TransformationController`, `WidgetController`, `apps/backend/app/services/multi_agent/`.
 ```python
-class TransformationAgent:
-    """
-    Анализирует выделенные виджеты и выполняет трансформации.
-    """
-    
-    def analyze_selection(self, widgets: List[Widget]) -> List[TransformOperation]:
-        """Определяет типы данных, схемы, контекст и генерирует список операций"""
-        
-    def suggest_operations(self, context: SelectionContext) -> List[Suggestion]:
-        """Умные предложения на основе типов виджетов, структуры данных, 
-           истории действий пользователя и типовых паттернов"""
-        
-    def execute_transform(self, operation: str, inputs: List[Widget]) -> Widget:
-        """Генерирует код → выполняет в Executor → создаёт виджет → 
-           сохраняет lineage"""
+# Концептуально: анализ выбора → предложения → исполнение кода в sandbox → новые узлы
+def analyze_selection(widgets) -> List[TransformOperation]: ...
+def execute_transform(operation, inputs) -> ContentNode | WidgetNode: ...
 ```
 
 **Сценарий использования (финансовый аналитик)**:
@@ -729,12 +728,12 @@ AI: "Готово! ✅
 }
 ```
 
-**Интеграция с агентами**:
-- **Transformation Agent** → генерирует операции
-- **Developer Agent** → пишет код трансформации
-- **Validator Agent** → проверяет корректность кода
-- **Analyst Agent** → валидирует результаты
-- **Reporter Agent** → создаёт виджет с результатом
+**Интеграция с агентами** (терминология по коду):
+- **TransformCodexAgent** / контроллер трансформаций → генерирует код и операции
+- **ValidatorAgent** (`validator.py`) → проверка Python-кода (где применимо)
+- **Analyst** → анализ и выводы
+- **WidgetCodexAgent** → при сценарии нового виджета с результатом
+- **Reporter** → текстовый итог при необходимости
 
 **Предусловия**: FR-6 (AI Assistant), FR-7 (Multi-Agent), FR-8 (Dynamic Tools), FR-11 (Board Construction)
 **Ожидаемый результат**: 

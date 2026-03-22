@@ -5,11 +5,14 @@
 import { useState, useRef, useEffect } from 'react'
 import { Send, Trash2, Sparkles, Loader2 } from 'lucide-react'
 import { useAIAssistantStore } from '@/store/aiAssistantStore'
+import { useAuthStore } from '@/store/authStore'
+import { socketService } from '@/services/socket'
 import { useBoardStore } from '@/store/boardStore'
 import { useFilterStore } from '@/store/filterStore'
 import { useAIStreaming } from '@/hooks/useAIStreaming'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
+import { MultiAgentProgressBlock } from '@/components/shared/MultiAgentProgressBlock'
 import { cn } from '@/lib/utils'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -28,9 +31,12 @@ export function AIAssistantPanel({ contextId, scope = 'board', showHeader = true
         isLoading,
         isStreaming,
         currentStreamMessage,
+        progressSteps,
+        progressMeta,
         selectedNodeIds,
         sendMessageStream,  // Используем streaming версию
         clearSession,
+        setSocket,
     } = useAIAssistantStore()
 
     const { sourceNodes, contentNodes, widgetNodes, commentNodes } = useBoardStore()
@@ -44,6 +50,19 @@ export function AIAssistantPanel({ contextId, scope = 'board', showHeader = true
     // Setup AI streaming handlers
     useAIStreaming(contextId, scope)
 
+    // На доске сокет задаётся в BoardCanvas. На дашборде отдельного board-сокета нет — подключаем Socket.IO с JWT для стрима прогресса.
+    const token = useAuthStore((s) => s.token)
+    useEffect(() => {
+        if (scope !== 'dashboard') return
+        if (!token) return
+        const socket = socketService.connect(token)
+        setSocket(socket)
+        return () => {
+            setSocket(null)
+            socketService.disconnect()
+        }
+    }, [scope, token, setSocket])
+
     const updateAutoScrollState = () => {
         const container = messagesContainerRef.current
         if (!container) return
@@ -53,13 +72,15 @@ export function AIAssistantPanel({ contextId, scope = 'board', showHeader = true
         shouldAutoScrollRef.current = distanceFromBottom < 120
     }
 
-    // Auto-scroll to bottom on new messages/loading state when user stays near bottom.
+    // Auto-scroll to bottom on new messages/progress updates.
+    // During active streaming we force-follow the last message.
     useEffect(() => {
         const container = messagesContainerRef.current
-        if (!container || !shouldAutoScrollRef.current) return
+        if (!container) return
+        if (!isStreaming && !shouldAutoScrollRef.current) return
         container.scrollTop = container.scrollHeight
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, [messages.length, currentStreamMessage, isLoading, isStreaming])
+    }, [messages.length, currentStreamMessage, isLoading, isStreaming, progressSteps.length, progressMeta.current])
 
     const handleSend = async () => {
         if (!inputValue.trim() || isLoading || isStreaming) return
@@ -156,7 +177,19 @@ export function AIAssistantPanel({ contextId, scope = 'board', showHeader = true
                     ))
                 )}
 
-                {/* Streaming message - показываем по мере получения chunks */}
+                {/* Streaming progress / message */}
+                {isStreaming && !currentStreamMessage && progressSteps.length > 0 && (
+                    <div className="flex justify-start">
+                        <div className="max-w-[95%]">
+                            <MultiAgentProgressBlock
+                                runningText="Мультиагент выполняется..."
+                                progressMeta={progressMeta}
+                                progressSteps={progressSteps}
+                                variant="primary"
+                            />
+                        </div>
+                    </div>
+                )}
                 {isStreaming && currentStreamMessage && (
                     <div className="flex justify-start">
                         <div className="max-w-[95%] bg-muted rounded-lg px-3 py-1.5">

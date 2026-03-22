@@ -63,6 +63,7 @@ class AgentMessageBus:
     def __init__(self):
         """Инициализация Message Bus."""
         self.redis_client: Optional[aioredis.Redis] = None
+        self._disconnecting = False
         
         # Отдельный PubSub connection для каждого агента
         self.agent_pubsubs: Dict[str, aioredis.client.PubSub] = {}
@@ -101,6 +102,7 @@ class AgentMessageBus:
     
     async def disconnect(self):
         """Отключиться от Redis."""
+        self._disconnecting = True
         # Закрываем все PubSub connections
         for agent_name, pubsub in self.agent_pubsubs.items():
             try:
@@ -375,7 +377,12 @@ class AgentMessageBus:
         except asyncio.CancelledError:
             logger.info(f"Listening loop for '{agent_name}' cancelled")
         except Exception as e:
-            logger.error(f"Fatal error in listening loop for '{agent_name}': {e}")
+            if self._disconnecting and "Connection closed by server" in str(e):
+                logger.info(
+                    f"Listening loop for '{agent_name}' closed during shutdown: {e}"
+                )
+            else:
+                logger.error(f"Fatal error in listening loop for '{agent_name}': {e}")
     
     def _get_channel_for_message(self, message: AgentMessage) -> str:
         """

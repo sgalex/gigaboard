@@ -175,6 +175,21 @@ class TestStructurizerAgent:
         # Should have called LLM with the source content
         mock_gigachat.chat_completion.assert_called_once()
 
+    def test_extracts_tool_requests_from_json(self):
+        from apps.backend.app.services.multi_agent.agents.structurizer import StructurizerAgent
+
+        parsed = {
+            "tool_requests": [
+                {
+                    "tool_name": "readTableData",
+                    "arguments": {"jsonDecl": {"contentNodeId": "n1", "tableId": "t1", "offset": 0, "limit": 20}},
+                }
+            ]
+        }
+        reqs = StructurizerAgent._extract_tool_requests(parsed)
+        assert len(reqs) == 1
+        assert reqs[0].tool_name == "readTableData"
+
 
 # ============================================================
 # AnalystAgent
@@ -210,6 +225,21 @@ class TestAnalystAgent:
         mock_gigachat.chat_completion = AsyncMock(side_effect=RuntimeError("API error"))
         result = await agent.process_task({"description": "test"}, {})
         assert result.status == "error"
+
+    def test_extracts_tool_requests_from_json(self):
+        from apps.backend.app.services.multi_agent.agents.analyst import AnalystAgent
+
+        parsed = {
+            "tool_requests": [
+                {
+                    "tool_name": "readTableListFromContentNode",
+                    "arguments": {"contentNodeId": "n1"},
+                }
+            ]
+        }
+        reqs = AnalystAgent._extract_tool_requests(parsed)
+        assert len(reqs) == 1
+        assert reqs[0].tool_name == "readTableListFromContentNode"
 
 
 # ============================================================
@@ -272,6 +302,86 @@ class TestTransformCodexAgent:
         cb = result.get_code("widget")
         assert cb is not None
         assert "<html>" in cb.code
+
+    @pytest.mark.asyncio
+    async def test_normalizes_dict_columns_from_input_preview(self, agent, mock_gigachat):
+        """TransformCodexAgent should handle input_data_preview columns as list[dict]."""
+        code = "import pandas as pd\ndf = df.copy()\ndf_out = df"
+        mock_gigachat.chat_completion = AsyncMock(return_value=json.dumps({
+            "transformation_code": code,
+            "description": "No-op transform",
+            "output_schema": [{"name": "route", "type": "string"}],
+        }))
+
+        task = {
+            "description": "Return input as is",
+            "purpose": "transformation",
+        }
+        context = {
+            "input_data_preview": {
+                "routes": {
+                    "columns": [
+                        {"name": "route", "type": "string"},
+                        {"name": "distance_km", "type": "float"},
+                    ],
+                    "dtypes": {"distance_km": "float64"},
+                    "row_count": 2,
+                    "sample_rows": [
+                        {"route": "A-B", "distance_km": 12.5},
+                        {"route": "B-C", "distance_km": 8.1},
+                    ],
+                }
+            }
+        }
+
+        result = await agent.process_task(task, context)
+        assert isinstance(result, AgentPayload)
+        assert result.status == "success"
+        assert result.has_code
+
+    def test_extracts_tool_requests_from_json(self):
+        from apps.backend.app.services.multi_agent.agents.transform_codex import TransformCodexAgent
+
+        parsed = {
+            "tool_requests": [
+                {
+                    "tool_name": "readTableListFromContentNode",
+                    "arguments": {"contentNodeId": "node-1"},
+                },
+                {
+                    "tool_name": "readTableData",
+                    "arguments": {
+                        "jsonDecl": {
+                            "contentNodeId": "node-1",
+                            "tableId": "sales",
+                            "offset": 0,
+                            "limit": 20,
+                        }
+                    },
+                },
+            ]
+        }
+
+        reqs = TransformCodexAgent._extract_tool_requests(parsed)
+        assert len(reqs) == 2
+        assert reqs[0].tool_name == "readTableListFromContentNode"
+        assert reqs[1].tool_name == "readTableData"
+
+
+def test_widget_codex_extracts_tool_requests_from_json():
+    from apps.backend.app.services.multi_agent.agents.widget_codex import WidgetCodexAgent
+
+    parsed = {
+        "tool_requests": [
+            {
+                "tool_name": "readTableData",
+                "arguments": {"jsonDecl": {"contentNodeId": "n1", "tableId": "sales", "offset": 0, "limit": 10}},
+            }
+        ]
+    }
+    reqs = WidgetCodexAgent._extract_tool_requests(parsed)
+    assert len(reqs) == 1
+    assert reqs[0].tool_name == "readTableData"
 
 
 # ============================================================

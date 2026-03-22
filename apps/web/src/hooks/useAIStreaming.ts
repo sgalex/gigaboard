@@ -12,6 +12,7 @@ export function useAIStreaming(
         socket,
         handleStreamStart,
         handleStreamChunk,
+        handleStreamProgress,
         handleStreamEnd,
         handleStreamError,
         loadHistory,
@@ -47,10 +48,27 @@ export function useAIStreaming(
             handleStreamChunk(data.chunk)
         }
 
+        // Handler для прогресса по шагам мультиагента
+        const onStreamProgress = (data: {
+            session_id: string
+            event?: string
+            agent_label?: string
+            task?: string
+            steps?: string[]
+            step_index?: number
+            total_steps?: number
+            completed_count?: number
+        }) => {
+            handleStreamProgress(data)
+        }
+
         // Handler для завершения
-        const onStreamEnd = (data: { session_id: string; full_response: string }) => {
+        const onStreamEnd = (data: { session_id: string; full_response: string; suggested_actions?: any[] }) => {
             console.log('✅ AI Stream completed:', data.session_id)
-            handleStreamEnd(data.full_response)
+            handleStreamEnd({
+                fullResponse: data.full_response,
+                suggestedActions: data.suggested_actions,
+            })
         }
 
         // Handler для ошибок
@@ -62,6 +80,7 @@ export function useAIStreaming(
         // Подписываемся на события
         socket.on('ai:stream:start', onStreamStart)
         socket.on('ai:stream:chunk', onStreamChunk)
+        socket.on('ai:stream:progress', onStreamProgress)
         socket.on('ai:stream:end', onStreamEnd)
         socket.on('ai:stream:error', onStreamError)
 
@@ -69,8 +88,9 @@ export function useAIStreaming(
         return () => {
             socket.off('ai:stream:start', onStreamStart)
             socket.off('ai:stream:chunk', onStreamChunk)
+            socket.off('ai:stream:progress', onStreamProgress)
             socket.off('ai:stream:end', onStreamEnd)
             socket.off('ai:stream:error', onStreamError)
         }
-    }, [contextId, scope, socket, handleStreamStart, handleStreamChunk, handleStreamEnd, handleStreamError])
+    }, [contextId, scope, socket, handleStreamStart, handleStreamChunk, handleStreamProgress, handleStreamEnd, handleStreamError])
 }

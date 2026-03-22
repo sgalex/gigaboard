@@ -41,7 +41,12 @@ async def _get_or_create_ai_settings(db: AsyncSession, user: User) -> UserAISett
     return settings
 
 
-def _build_response(settings: UserAISettings) -> UserAISettingsResponse:
+def _is_admin(user: User) -> bool:
+    return getattr(user, "role", None) == "admin"
+
+
+def _build_response(settings: UserAISettings, *, viewer: User) -> UserAISettingsResponse:
+    ma = settings.multi_agent_settings if _is_admin(viewer) else None
     return UserAISettingsResponse(
         user_id=settings.user_id,
         provider=LLMProvider(settings.provider),
@@ -55,6 +60,7 @@ def _build_response(settings: UserAISettings) -> UserAISettingsResponse:
         max_tokens=settings.max_tokens,
         has_external_api_key=settings.external_api_key_secret_id is not None,
         preferred_style=settings.preferred_style,
+        multi_agent_settings=ma,
     )
 
 
@@ -73,7 +79,7 @@ async def get_ai_settings(
     Если настройки ещё не созданы, возвращаются дефолтные значения (provider=gigachat).
     """
     settings = await _get_or_create_ai_settings(db, current_user)
-    return _build_response(settings)
+    return _build_response(settings, viewer=current_user)
 
 
 @router.get(
@@ -154,6 +160,15 @@ async def update_ai_settings(
     if payload.preferred_style is not None:
         settings.preferred_style = payload.preferred_style
 
+    update_data = payload.model_dump(exclude_unset=True)
+    if "multi_agent_settings" in update_data:
+        if not _is_admin(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="multi_agent_settings доступны только администратору",
+            )
+        settings.multi_agent_settings = payload.multi_agent_settings
+
     # Обновление/создание секрета для внешнего LLM
     if payload.external_api_key:
         if not settings.external_base_url:
@@ -192,7 +207,7 @@ async def update_ai_settings(
 
     await db.commit()
     await db.refresh(settings)
-    return _build_response(settings)
+    return _build_response(settings, viewer=current_user)
 
 
 @router.post(

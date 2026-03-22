@@ -26,7 +26,7 @@ export function AdminLLMPage() {
                     <h1 className="text-2xl font-bold tracking-tight">Системные настройки LLM</h1>
                     <p className="text-sm text-muted-foreground">
                         Настройки провайдера и модели для всей системы. Доступно только администратору.
-                        Здесь же — Playground для тестирования мультиагента.
+                        Playground вынесен в Профиль → отдельная вкладка.
                     </p>
                 </header>
                 <SystemLLMSettingsPanel />

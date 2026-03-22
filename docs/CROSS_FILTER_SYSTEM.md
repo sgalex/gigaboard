@@ -1,9 +1,10 @@
 # Cross-Filter System (Кросс-фильтрация)
 
 **Статус**: ✅ Реализовано (28 февраля 2026)  
+**Актуализировано**: 20 марта 2026 — §3.5: связь с Multi-Agent (`readTableData`, `_compute_filtered_pipeline`)  
 **Приоритет**: High  
 **Дата создания**: 27 февраля 2026  
-**Связанные документы**: [BOARD_SYSTEM.md](./BOARD_SYSTEM.md), [DASHBOARD_SYSTEM.md](./DASHBOARD_SYSTEM.md), [DATA_NODE_SYSTEM.md](./DATA_NODE_SYSTEM.md), [DRILL_DOWN_SYSTEM.md](./DRILL_DOWN_SYSTEM.md)
+**Связанные документы**: [BOARD_SYSTEM.md](./BOARD_SYSTEM.md), [DASHBOARD_SYSTEM.md](./DASHBOARD_SYSTEM.md), [DATA_NODE_SYSTEM.md](./DATA_NODE_SYSTEM.md), [DRILL_DOWN_SYSTEM.md](./DRILL_DOWN_SYSTEM.md), [MULTI_AGENT.md](./MULTI_AGENT.md) (тулы оркестратора и `_compute_filtered_pipeline`)
 
 ---
 
@@ -494,6 +495,12 @@ flowchart LR
 - При изменении `filteredNodeData` → `refreshKey` инкрементируется → iframe пересоздаётся
 - `buildWidgetApiScript` получает `precomputedTables` → `fetchContentData()` возвращает их без HTTP-запроса
 - Если `filteredNodeData` не заполнен (нет активных фильтров) — `fetchContentData()` делает обычный `GET /api/v1/content-nodes/{id}`
+
+### 3.5 Multi-Agent и AI Assistant (оркестратор)
+
+Тулы **`readTableData`** и **`readTableListFromContentNodes`** при включённом `MULTI_AGENT_TOOLS_USE_FILTERED_PIPELINE` используют тот же бэкендный пересчёт **`_compute_filtered_pipeline`** (`app/routes/filters.py`), что и UI после применения эффективного фильтра (активные фильтры board/dashboard из `FilterStateService` и при необходимости выражение из чата `_orchestrator_applied_filter_expression`). Результат лениво кэшируется в `pipeline_context["_raw_filtered_pipeline_result"]` (`Orchestrator._ensure_filtered_pipeline_raw_cache`, `_resolve_effective_filter_for_tools`). При известном `board_id` в контексте запроса пересчёт выполняется и при **отсутствии** активного фильтра (`filters=None`), чтобы цепочка upstream→downstream не заменялась чтением сырого `ContentNode.content` из БД без исполнения пайплайна.
+
+Если в снимке у таблицы задан `row_count`, но массив `rows` пуст, оркестратор догружает строки через повторный вызов **`_compute_filtered_pipeline`** (`_compute_filtered_pipeline_tables_for_node`, `_merge_filtered_pipeline_into_raw_cache`); при недоступности пересчёта — оставлен контролируемый fallback на `ContentNode.content` (`_hydrate_table_rows_from_content_db`). Подробности и env — см. **`docs/MULTI_AGENT.md`** (разделы «Кросс-фильтр и тулы», «Вызов `readTableData`»).
 
 ---
 

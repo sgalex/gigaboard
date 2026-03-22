@@ -2,13 +2,31 @@
 
 **Дата создания**: 7 февраля 2026  
 **Статус**: Реализована (Февраль 2026)  
-**Актуализировано**: 18 марта 2026 — устойчивость парсинга ответа **AnalystAgent**, анти-петля **QualityGateAgent** при пустых `findings` у аналитика, браузероподобные HTTP-заголовки **ResearchAgent**.
+**Актуализировано**: 22 марта 2026 — таблица ядра: `context_filter`, роли **QualityGate** vs **ValidatorAgent**; ранее 20 марта — тулы `readTableData` / `readTableListFromContentNodes` и **`_compute_filtered_pipeline`** (ленивый кэш `_raw_filtered_pipeline_result`, гидратация строк при метаданных без `rows`, пересчёт при известном `board_id` даже без активного фильтра). Ранее 18 марта — устойчивость парсинга **AnalystAgent**, анти-петля **QualityGateAgent**, HTTP **ResearchAgent**.
 
 ---
 
 ## Executive Summary
 
+Мультиагентный слой — один из главных способов **в этом инструменте** **манипулировать данными через ИИ** (см. видение в [`README.md`](./README.md), [`ARCHITECTURE.md`](./ARCHITECTURE.md)): планирование, специализированные агенты и тулы оркестратора.
+
 **Мультиагентная система GigaBoard** — архитектура с чётким разделением на три слоя:
+
+**Настройки `MULTI_AGENT_*`:** параметры с теми же именами, что переменные окружения (трейсы, бюджеты контекста, таймауты, retry и т.д.), можно задать в **Профиль → Multi-Agent** (только администратор) без правки `.env`. Приоритет: значения в профиле пользователя → env на сервере → дефолты в коде (`runtime_overrides.py`, колонка `user_ai_settings.multi_agent_settings` на время `process_request`).
+
+**Доступ к таблицам через тулы оркестратора:** формулировка шага плана («проанализируй данные») сама по себе не гарантирует вызов `readTableListFromContentNodes` / `readTableData`. Поэтому (1) в промпт планировщика при `tools_enabled` и наличии табличного контекста добавляется блок с требованием явно связать шаги analyst/transform_codex/widget_codex/structurizer с этими инструментами; (2) оркестратор перед выполнением шага дополняет `task.description` у перечисленных агентов стандартным контрактом (`tabular_tool_contract.py`), чтобы пользовательский запрос и механизм тулов оказались в одной задаче.
+
+**Кросс-фильтр и тулы:** `readTableData` / `readTableListFromContentNodes` по возможности берут таблицы из **снимка пайплайна после `_compute_filtered_pipeline`** (см. `docs/CROSS_FILTER_SYSTEM.md`) — тот же путь, что и UI доски/дашборда. После шага `context_filter` сырой результат сохраняется в `pipeline_context["_raw_filtered_pipeline_result"]` (полные строки); если снимка ещё нет, выполняется ленивый пересчёт: эффективный фильтр (активные фильтры board/dashboard из `FilterStateService` и при необходимости `_orchestrator_applied_filter_expression` из чата) передаётся в `_compute_filtered_pipeline`; при **отсутствии** активного фильтра, но при известном `board_id` в контексте, цепочка всё равно пересчитывается с `filters=None` (без кросс-фильтра по измерениям, но с исполнением upstream-трансформаций), чтобы не подставлять сырой `content` из БД в обход пайплайна. Отключить: `MULTI_AGENT_TOOLS_USE_FILTERED_PIPELINE=false`. Реализация: `Orchestrator._load_content_node_tables`, `_ensure_filtered_pipeline_raw_cache`, `_resolve_effective_filter_for_tools`, при догрузке строк — `_compute_filtered_pipeline_tables_for_node`, `_merge_filtered_pipeline_into_raw_cache`, `_hydrate_table_rows_from_content_db`.
+
+**Лимит tool loop:** на один шаг агента с включёнными тулами действует `MULTI_AGENT_TOOL_MAX_ROUNDS_PER_STEP` (дефолт и **минимум в коде — 15** раундов: старые значения вроде `3` в env или профиле поднимаются до 15; больше 15 можно задать явно). Реализация: цикл с `tool_loop_*` в `Orchestrator.process_user_request`.
+
+**Кэш результатов тулов:** на время одного запроса к оркестратору успешные ответы `readTableListFromContentNodes` и `readTableData` кладутся в `pipeline_context["_tool_result_cache"]` по стабильному ключу от нормализованных аргументов; повторный идентичный запрос возвращает кэш (событие трейса `tool_cache_hit`). В `pipeline_context["tool_request_cache_digest_lines"]` накапливаются короткие строки-напоминания; **Analyst**, **TransformCodex** (в т.ч. итеративный режим), **Structurizer** и **WidgetCodex** подмешивают их в промпт перед блоком результатов тулов, чтобы модель не дублировала те же `tool_requests`.
+
+**Analyst и tool loop:** в промпте после блока `TOOL RESULTS` добавлены правила «анти-петля» (не повторять те же `readTableData`, при достаточных данных — сразу `findings`). Оркестратор дедуплицирует одинаковые `tool_requests` в одном раунде и ограничивает их число (`MULTI_AGENT_ANALYST_MAX_TOOL_REQUESTS_PER_ROUND`, по умолчанию 2), чтобы не исчерпывать лимит раундов параллельными повторами.
+
+**Ответ `readTableListFromContentNodes`:** в элементах `tables` и `nodes` (и в каждой записи таблицы внутри `nodes`) возвращаются `content_node_name` и `content_node_description`: имя берётся из контекста пайплайна (`metadata` / `name` / `node_name`) или из БД (`ContentNode.node_metadata.name`), описание — текстовый summary ноды (`text` в снимке контекста или `content.text` в БД).
+
+**Вызов `readTableData`:** оркестратор нормализует `jsonDecl`: алиасы `table_name` / `tableName` / `name` / `table` → `table_id`; при отсутствии `table_id` подставляет его из последнего успешного `readTableListFromContentNodes` для того же `contentNodeId` (чтобы агенты не падали на пустом `table_id`). Если в снимке пайплайна у таблицы есть положительный `row_count`, но массив `rows` пуст (метаданные без тела строк), оркестратор **сначала** пересчитывает полную pandas-цепочку на бэке через `_compute_filtered_pipeline` (тот же эффективный фильтр, что у тулов: board/dashboard + чат; при отсутствии фильтра — цепочка без кросс-фильтра) и обновляет `_raw_filtered_pipeline_result`; затем при необходимости — fallback на `ContentNode.content` в БД (`_hydrate_table_rows_from_content_db` в `orchestrator.py`), чтобы аналитик не получал «пустые» таблицы при реальных данных и не видел несогласованных с доской данных из сырого `content` без пересчёта.
 
 - **Core (Ядро)** — 9 специализированных агентов, решающих универсальные задачи анализа, генерации кода и формирования ответов. Взаимодействуют через единый **Orchestrator** (MessageBus/Redis). Обмениваются данными в универсальном формате **AgentPayload**. Дополнительно **QualityGateAgent** используется для валидации данных (execution_context) в pipeline.
 - **Satellite Controllers (Спутники)** — контекстные контроллеры, привязанные к UI-сценариям (трансформации, виджеты, AI Assistant, подсказки, **AI Research** и др.). Формируют запросы к ядру, исполняют результаты, валидируют в контексте задачи. Не входят в состав ядра.
@@ -32,8 +50,9 @@
 | `agents/transform_codex.py` | TransformCodexAgent       | ✅ Реализован |
 | `agents/widget_codex.py`    | WidgetCodexAgent          | ✅ Реализован |
 | `agents/reporter.py`        | ReporterAgent             | ✅ Реализован |
-| `agents/validator.py`       | ValidatorAgent            | ✅ Реализован |
-| `agents/quality_gate.py`    | QualityGateAgent          | ✅ Реализован |
+| `agents/context_filter.py`  | ContextFilterAgent        | ✅ Реализован |
+| `agents/quality_gate.py`    | QualityGateAgent          | ✅ Реализован; в оркестраторе ключ плана **`validator`** |
+| `agents/validator.py`       | ValidatorAgent            | ✅ Реализован; проверка Python-кода трансформаций (не подменяет Quality Gate в `Orchestrator`) |
 | `agents/resolver.py`        | ResolverService (утилита) | ✅ Реализован |
 | `agents/base.py`            | BaseAgent                 | ✅ Реализован |
 
@@ -121,6 +140,9 @@ flowchart TB
 4. **ContentTable везде** — структурированные данные на всех уровнях (вход/выход агентов, передача от satellite к ядру) используют формат ContentTable.
 5. **Satellite = контекст** — вся контекстно-зависимая логика (исполнение кода, рендеринг, board operations) живёт в satellite-контроллерах, не в ядре.
 6. **Frontend передаёт полную историю** — состояние сессии хранится на клиенте, каждый запрос включает полный `chat_history`.
+7. **Context engineering** — объём и состав данных в промпте LLM на каждом шаге управляются осознанно (бюджеты, селекция фрагментов `agent_results`, усечение тяжёлых полей). Подробный план развития: [`CONTEXT_ENGINEERING.md`](./CONTEXT_ENGINEERING.md).
+8. **Policy-driven execution** — таймауты, retry и уровни деградации контекста (`full`/`compact`/`minimal`) задаются task-aware политиками, а не ad-hoc условиями в шагах.
+9. **Structured working memory** — в `pipeline_context.pipeline_memory` хранятся цель, ограничения и ключевые решения для стабильного `replan/revise_remaining` в длинных сессиях.
 
 ---
 
@@ -259,7 +281,7 @@ AnalystAgent может **читать** неструктурированный 
 **Ответственность**: gate-keeper после выполнения шагов плана. Проверяет согласованность агрегированных результатов (в т.ч. Reporter) с запросом пользователя и при необходимости предлагает **replan** через `suggested_replan`.
 
 **Логика**:
-1. Получает `original_request` + агрегированные результаты агентов (`aggregated_result` или список `agent_results` из контекста).
+1. Получает `original_request` + агрегированные результаты агентов. Предпочтительно поле **`validation_agent_results_slice`** (срез `agent_results` текущего плана из оркестратора): функция **`aggregate_agent_results_for_validation`** строит словарь по `agent`; для нескольких записей с `agent="analyst"` выбирается та, у которой **больше** `findings` (иначе «последний ключ перезаписал» бы успешный анализ пустым partial). Fallback: `aggregated_result` / `aggregated_payload` / полный список `agent_results` из контекста (без цепочки `a or b`, чтобы не терять пустой `{}`).
 2. Определяет ожидаемый тип результата (code_generation, visualization, research, transformation, data_extraction и т.д.).
 3. **Быстрая эвристика**: при `confidence` эвристики ≥ **0,9** результат валидации принимается **без** дополнительного вызова LLM.
 4. Иначе — углублённая проверка через LLM (при ошибке парсинга ответа — откат к эвристике).
@@ -988,12 +1010,14 @@ pipeline_context: Dict[str, Any] = {
 | `board_id`             | Orchestrator  | `str`             | ID доски                                                                         |
 | `user_id`              | Orchestrator  | `str`             | ID пользователя                                                                  |
 | `user_request`         | Orchestrator  | `str`             | Текст запроса                                                                    |
+| `steps[].task.summary` | Planner       | `str`             | Краткий заголовок шага для UI прогресса (полное задание — в `task.description`)   |
 | `controller`           | Controller    | `str`             | Тип контроллера (`transformation`, `analyst`, ...)                               |
 | `mode`                 | Controller    | `str`             | Режим работы                                                                     |
 | `selected_node_ids`    | Controller    | `list[str]`       | Выбранные ноды на канвасе                                                        |
 | `content_nodes_data`   | Controller    | `list[dict]`      | Данные ContentNode (таблицы, текст)                                              |
 | `board_context`        | Controller    | `dict`            | Контекст доски (структура, метаданные)                                           |
 | `input_data_preview`   | Controller    | `dict[str, dict]` | Схема входных данных + sample rows для LLM                                       |
+| `keep_tabular_context_in_prompt` | `TransformationController`, `WidgetController`, `TransformSuggestionsController`, `WidgetSuggestionsController` | `bool` | Если `true`, при `force_tool_data_access` не вырезаются превью таблиц из контекста (`context_selection`), и агенты не делают обязательный первый вызов `readTableListFromContentNodes` |
 | `existing_code`        | Controller    | `str \| None`     | Текущий Python-код (при итеративной трансформации)                               |
 | `existing_widget_code` | Controller    | `str \| None`     | Текущий HTML-код виджета                                                         |
 | `chat_history`         | Controller    | `list[dict]`      | История диалога `[{role, content}]`                                              |
@@ -1176,7 +1200,7 @@ await _orchestrator.initialize()
 | 3.5 | **AnalystAgent** — input из tables/sources            | `agents/analyst.py`                                          | analyst.py (изменение)                      | 3.4         | Читает `tables` и `sources` из всех `previous_results`. Не структурирует — только анализирует. Возвращает `AgentPayload(narrative=..., findings=[...])`                                                                                                                                      |
 | 3.6 | **TransformCodexAgent + WidgetCodexAgent** — code-gen | `agents/transform_codex.py` + `agents/widget_codex.py` (NEW) | transformation.py + reporter.py (code part) | 3.5         | TransformCodexAgent: `purpose="transformation"` (Python/pandas), syntax check (`ast.parse`). Знает про `gb.ai_resolve_batch()`. WidgetCodexAgent: `purpose="widget"` (HTML/CSS/JS), syntax check. Возвращают `AgentPayload(code_blocks=[...], narrative=..., metadata={"widget_type": ...})` |
 | 3.7 | **ReporterAgent** — только формирование ответа        | `agents/reporter.py`                                         | reporter.py (изменение)                     | 3.6         | Убрать генерацию HTML/JS кода (теперь TransformCodexAgent/WidgetCodexAgent). Собирает narrative из findings, tables, code_blocks предыдущих агентов. Возвращает `AgentPayload(narrative=..., code_blocks=[пробрасывает], tables=[пробрасывает])`                                             |
-| 3.8 | **ValidatorAgent** — рефакторинг CriticAgent          | `agents/validator.py`                                        | critic.py (изменение)                       | 3.7         | Gate-keeper. `validation.valid` → pass, `validation.suggested_replan` → replan. Возвращает `AgentPayload(validation=...)`. Лимит 3 итерации                                                                                                                                                  |
+| 3.8 | **Исторический** шаг: рефакторинг CriticAgent → отдельные агенты | `agents/validator.py`, `agents/quality_gate.py` | — | 3.7 | В **текущем** оркестраторе финальный gate — **QualityGateAgent** под ключом **`validator`**; `validator.py` — про проверку Python-кода трансформаций.                                                                                                                                                  |
 
 **Файлы**: 4 новых (discovery.py, research.py, transform_codex.py, widget_codex.py), 5 изменённых (planner.py, structurizer.py, analyst.py, reporter.py, validator.py ← critic.py)
 
@@ -1337,7 +1361,7 @@ feature/multi-agent-refactor
 ├── commit: "refactor: AnalystAgent (tables + findings)"              (Phase 3.5)
 ├── commit: "feat: CodexAgent (unified code generation)"              (Phase 3.6)
 ├── commit: "refactor: ReporterAgent (no code gen)"                   (Phase 3.7)
-├── commit: "refactor: ValidatorAgent (ex CriticAgent)"               (Phase 3.8)
+├── commit: (история) refactor CriticAgent → Validator / QualityGate               (Phase 3.8)
 ├── commit: "feat: Satellite Controllers (5 controllers)"             (Phase 4)
 ├── commit: "refactor: Routes → Controllers integration"              (Phase 5)
 ├── commit: "chore: Remove legacy agents and Engine"                  (Phase 6)
@@ -1543,7 +1567,7 @@ Controller → TASK_REQUEST → MessageBus → Agent → TASK_RESULT → Control
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — общая архитектура системы (ноды, борды, сервисы)
 - [WIDGET_SUGGESTIONS_SYSTEM.md](./WIDGET_SUGGESTIONS_SYSTEM.md) — UI/UX Widget Suggestions
-- [AI_ASSISTANT.md](./AI_ASSISTANT.md) — AI Assistant Panel (фронтенд-интеграция)
+- [AI_ASSISTANT.md](./AI_ASSISTANT.md) — AI Assistant Panel: доска и дашборд, Socket.IO-стрим с `ai:stream:progress`, REST fallback
 - [CONNECTION_TYPES.md](./CONNECTION_TYPES.md) — типы связей между нодами
 - [DATA_NODE_SYSTEM.md](./DATA_NODE_SYSTEM.md) — система DataNode
 

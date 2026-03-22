@@ -8,6 +8,7 @@ from app.services.multi_agent.agents.widget_codex import WidgetCodexAgent, WIDGE
 def test_scaffold_has_correct_placeholders():
     assert "%%CUSTOM_SCRIPTS%%" in WIDGET_SCAFFOLD
     assert "%%CUSTOM_STYLES%%" in WIDGET_SCAFFOLD
+    assert "%%CUSTOM_HEAD_LINKS%%" in WIDGET_SCAFFOLD
     assert "%%RENDER_BODY%%" in WIDGET_SCAFFOLD
     assert "CUSTOM_SCRIPTS_START" in WIDGET_SCAFFOLD
     assert "CUSTOM_SCRIPTS_END" in WIDGET_SCAFFOLD
@@ -52,11 +53,22 @@ def test_assemble_without_scripts():
         'document.getElementById("chart").innerHTML = "hello";',
         "",
         "",
+        "",
     )
     assert "CUSTOM_SCRIPTS_START" in result
     assert "echarts.min.js" not in result
     assert 'document.getElementById("chart").innerHTML' in result
     print("  PASS: assemble without scripts (plain HTML)")
+
+
+def test_assemble_with_head_links_leaflet():
+    rb = 'window.mapInstance = L.map("chart");'
+    hl = '  <link rel="stylesheet" href="/libs/leaflet.css">'
+    out = WidgetCodexAgent._assemble_widget(rb, "", '<script src="/libs/leaflet.js"></script>', hl)
+    assert "/libs/leaflet.css" in out
+    assert "/libs/leaflet.js" in out
+    assert "L.map" in out
+    print("  PASS: assemble with Leaflet head link + script")
 
 
 def test_roundtrip():
@@ -89,5 +101,6 @@ if __name__ == "__main__":
     test_direct_boot()
     test_assemble_with_scripts()
     test_assemble_without_scripts()
+    test_assemble_with_head_links_leaflet()
     test_roundtrip()
-    print("\nALL 7 TESTS PASSED")
+    print("\nALL 8 TESTS PASSED")

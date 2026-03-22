@@ -208,6 +208,40 @@ class SuggestedReplan(BaseModel):
     )
 
 
+class ToolRequest(BaseModel):
+    """Запрос на вызов инструмента от агента."""
+
+    request_id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        description="Уникальный id запроса инструмента",
+    )
+    tool_name: str = Field(..., description="Имя инструмента")
+    arguments: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Аргументы инструмента",
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        description="Короткое обоснование вызова инструмента",
+    )
+
+
+class ToolResult(BaseModel):
+    """Результат вызова инструмента."""
+
+    request_id: str = Field(..., description="request_id исходного ToolRequest")
+    tool_name: str = Field(..., description="Имя инструмента")
+    success: bool = Field(..., description="Успешно ли выполнен инструмент")
+    data: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Полезные данные инструмента",
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Текст ошибки при success=false",
+    )
+
+
 class ValidationResult(BaseModel):
     """Результат валидации от ValidatorAgent."""
 
@@ -311,6 +345,16 @@ class AgentPayload(BaseModel):
         description="Агент-специфичные данные (widget_type и др.)",
     )
 
+    # === TOOLS (запросы и результаты инструментов) ===
+    tool_requests: list[ToolRequest] = Field(
+        default_factory=list,
+        description="Запросы инструментов от агента (для orchestrator tool loop)",
+    )
+    tool_results: list[ToolResult] = Field(
+        default_factory=list,
+        description="Результаты инструментов, доступные агенту в следующем вызове",
+    )
+
     # === ERROR (при status='error') ===
     error: Optional[str] = Field(
         default=None, description="Сообщение об ошибке"
@@ -336,6 +380,8 @@ class AgentPayload(BaseModel):
         validation: ValidationResult | None = None,
         plan: Plan | None = None,
         metadata: dict[str, Any] | None = None,
+        tool_requests: list[ToolRequest] | None = None,
+        tool_results: list[ToolResult] | None = None,
     ) -> "AgentPayload":
         """Создать успешный AgentPayload."""
         return cls(
@@ -349,6 +395,8 @@ class AgentPayload(BaseModel):
             validation=validation,
             plan=plan,
             metadata=metadata or {},
+            tool_requests=tool_requests or [],
+            tool_results=tool_results or [],
         )
 
     @classmethod

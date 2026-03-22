@@ -1,13 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Send, Trash2, Sparkles, Loader2 } from 'lucide-react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Trash2, CircleHelp, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { Textarea } from '@/components/ui/textarea'
-import { cn } from '@/lib/utils'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import {
     fetchSystemLLMSettings,
     updateSystemLLMSettings,
@@ -17,18 +12,286 @@ import {
     setAgentLLMOverrides,
     testSystemLLMSettings,
     fetchAdminGigaChatModels,
-    runPlayground,
     AGENT_KEYS,
     type SystemLLMSettingsResponse,
     type LLMConfigResponse,
     type LLMConfigCreate,
     type LLMConfigUpdate,
     type LLMProvider,
+    type AgentRuntimeOptions,
     type GigaChatModelInfo,
-    type PlaygroundChatMessage,
 } from '@/services/adminSystemLlMApi'
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
+const ALLOWED_CONTEXT_LEVELS = new Set(['full', 'compact', 'minimal'])
+const DEFAULT_TIMEOUTS: Record<string, number> = {
+    planner: 30,
+    discovery: 120,
+    research: 120,
+    structurizer: 90,
+    analyst: 60,
+    transform_codex: 90,
+    widget_codex: 90,
+    reporter: 60,
+    validator: 30,
+}
+const DEFAULT_RETRIES: Record<string, number> = {
+    planner: 1,
+    reporter: 1,
+    validator: 0,
+    _default: 1,
+}
+const DEFAULT_LADDERS: Record<string, string[]> = {
+    planner: ['full', 'compact', 'minimal'],
+    reporter: ['full', 'compact'],
+    validator: ['full', 'compact'],
+    _default: ['full', 'compact'],
+}
+const DEFAULT_CONTEXT_BUDGETS: Record<string, { max_items: number; max_total_chars: number }> = {
+    planner: { max_items: 35, max_total_chars: 120000 },
+    analyst: { max_items: 30, max_total_chars: 100000 },
+    reporter: { max_items: 40, max_total_chars: 120000 },
+    discovery: { max_items: 20, max_total_chars: 90000 },
+    research: { max_items: 20, max_total_chars: 100000 },
+    structurizer: { max_items: 20, max_total_chars: 110000 },
+    transform_codex: { max_items: 25, max_total_chars: 110000 },
+    widget_codex: { max_items: 25, max_total_chars: 110000 },
+    validator: { max_items: 25, max_total_chars: 100000 },
+    _default: { max_items: 30, max_total_chars: 100000 },
+}
+const AGENT_RUNTIME_LIMITS = {
+    timeoutMin: 1,
+    timeoutMax: 1800,
+    retriesMin: 0,
+    retriesMax: 10,
+    itemsMin: 1,
+    itemsMax: 200,
+    charsMin: 1000,
+    charsMax: 500000,
+}
+
+type AgentRuntimeDraft = {
+    timeout_sec: string
+    max_retries: string
+    context_ladder: string
+    max_items: string
+    max_total_chars: string
+    task_overrides: AgentTaskOverrideDraft[]
+}
+
+type AgentTaskOverrideDraft = {
+    id: string
+    task_type: string
+    timeout_sec: string
+    max_retries: string
+    context_ladder: string
+    max_items: string
+    max_total_chars: string
+}
+
+function emptyRuntimeDraft(): AgentRuntimeDraft {
+    return {
+        timeout_sec: '',
+        max_retries: '',
+        context_ladder: '',
+        max_items: '',
+        max_total_chars: '',
+        task_overrides: [],
+    }
+}
+
+function createTaskOverrideDraft(
+    taskType = '',
+    initial?: Partial<Omit<AgentTaskOverrideDraft, 'id' | 'task_type'>>
+): AgentTaskOverrideDraft {
+    return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        task_type: taskType,
+        timeout_sec: initial?.timeout_sec ?? '',
+        max_retries: initial?.max_retries ?? '',
+        context_ladder: initial?.context_ladder ?? '',
+        max_items: initial?.max_items ?? '',
+        max_total_chars: initial?.max_total_chars ?? '',
+    }
+}
+
+const TASK_TYPES_BY_AGENT: Record<string, string[]> = {
+    planner: ['create_plan', 'expand_step', 'revise_remaining', 'replan'],
+    reporter: ['summarize'],
+    validator: ['validate'],
+    discovery: ['search'],
+    research: ['fetch_url', 'analyze_source'],
+    structurizer: ['extract_structure'],
+    analyst: ['analyze'],
+    transform_codex: ['generate_transform_code'],
+    widget_codex: ['generate_widget_code'],
+}
+
+function hasTaskOverridesEnabled(agentKey: string): boolean {
+    return (TASK_TYPES_BY_AGENT[agentKey]?.length ?? 0) > 1
+}
+
+function defaultRuntimeDraftForAgent(agentKey: string): AgentRuntimeDraft {
+    const timeout = DEFAULT_TIMEOUTS[agentKey] ?? 60
+    const retries = DEFAULT_RETRIES[agentKey] ?? DEFAULT_RETRIES._default
+    const ladder = DEFAULT_LADDERS[agentKey] ?? DEFAULT_LADDERS._default
+    const budget = DEFAULT_CONTEXT_BUDGETS[agentKey] ?? DEFAULT_CONTEXT_BUDGETS._default
+    return {
+        timeout_sec: String(timeout),
+        max_retries: String(retries),
+        context_ladder: ladder.join(', '),
+        max_items: String(budget.max_items),
+        max_total_chars: String(budget.max_total_chars),
+        task_overrides: [],
+    }
+}
+
+function runtimeOptionsToDraft(agentKey: string, options?: AgentRuntimeOptions | null): AgentRuntimeDraft {
+    if (!options) return emptyRuntimeDraft()
+    const taskOverrides = options.task_overrides ?? {}
+    const taskRows = hasTaskOverridesEnabled(agentKey)
+        ? Object.entries(taskOverrides).map(([taskType, row]) =>
+              createTaskOverrideDraft(taskType, {
+                  timeout_sec: row.timeout_sec != null ? String(row.timeout_sec) : '',
+                  max_retries: row.max_retries != null ? String(row.max_retries) : '',
+                  context_ladder: Array.isArray(row.context_ladder) ? row.context_ladder.join(', ') : '',
+                  max_items: row.max_items != null ? String(row.max_items) : '',
+                  max_total_chars: row.max_total_chars != null ? String(row.max_total_chars) : '',
+              })
+          )
+        : []
+    return {
+        timeout_sec: options.timeout_sec != null ? String(options.timeout_sec) : '',
+        max_retries: options.max_retries != null ? String(options.max_retries) : '',
+        context_ladder: Array.isArray(options.context_ladder) ? options.context_ladder.join(', ') : '',
+        max_items: options.max_items != null ? String(options.max_items) : '',
+        max_total_chars: options.max_total_chars != null ? String(options.max_total_chars) : '',
+        task_overrides: taskRows,
+    }
+}
+
+function parseIntInRange(
+    raw: string,
+    options: {
+        fieldLabel: string
+        min: number
+        max: number
+    },
+): number | undefined {
+    const { fieldLabel, min, max } = options
+    const v = raw.trim()
+    if (!v) return undefined
+    const num = Number(v)
+    if (!Number.isInteger(num)) {
+        throw new Error(`${fieldLabel}: ожидается целое число`)
+    }
+    if (num < min || num > max) {
+        throw new Error(`${fieldLabel}: значение должно быть в диапазоне ${min}..${max}`)
+    }
+    return num
+}
+
+function normalizeContextLadder(raw: string): string[] | undefined {
+    const v = raw.trim()
+    if (!v) return undefined
+    const levels = v
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean)
+    if (levels.length === 0) return undefined
+    const invalid = levels.filter((lvl) => !ALLOWED_CONTEXT_LEVELS.has(lvl))
+    if (invalid.length > 0) {
+        throw new Error(
+            `context_ladder: недопустимые уровни ${invalid.join(', ')}. Разрешено: full, compact, minimal`
+        )
+    }
+    return levels
+}
+
+function draftToRuntimeOptions(agentKey: string, draft: AgentRuntimeDraft): AgentRuntimeOptions | undefined {
+    const timeout_sec = parseIntInRange(draft.timeout_sec, {
+        fieldLabel: 'timeout_sec',
+        min: AGENT_RUNTIME_LIMITS.timeoutMin,
+        max: AGENT_RUNTIME_LIMITS.timeoutMax,
+    })
+    const max_retries = parseIntInRange(draft.max_retries, {
+        fieldLabel: 'max_retries',
+        min: AGENT_RUNTIME_LIMITS.retriesMin,
+        max: AGENT_RUNTIME_LIMITS.retriesMax,
+    })
+    const max_items = parseIntInRange(draft.max_items, {
+        fieldLabel: 'max_items',
+        min: AGENT_RUNTIME_LIMITS.itemsMin,
+        max: AGENT_RUNTIME_LIMITS.itemsMax,
+    })
+    const max_total_chars = parseIntInRange(draft.max_total_chars, {
+        fieldLabel: 'max_total_chars',
+        min: AGENT_RUNTIME_LIMITS.charsMin,
+        max: AGENT_RUNTIME_LIMITS.charsMax,
+    })
+    const context_ladder = normalizeContextLadder(draft.context_ladder)
+
+    let task_overrides: AgentRuntimeOptions['task_overrides']
+    if (hasTaskOverridesEnabled(agentKey) && draft.task_overrides.length > 0) {
+        const outTaskOverrides: NonNullable<AgentRuntimeOptions['task_overrides']> = {}
+        for (const row of draft.task_overrides) {
+            const hasAnyOverrideValue = Boolean(
+                row.timeout_sec.trim() ||
+                    row.max_retries.trim() ||
+                    row.context_ladder.trim() ||
+                    row.max_items.trim() ||
+                    row.max_total_chars.trim()
+            )
+            if (!hasAnyOverrideValue && !row.task_type.trim()) {
+                continue
+            }
+            if (!row.task_type.trim()) {
+                throw new Error('task_overrides: укажите task_type для каждой заполненной строки')
+            }
+            const rowTimeout = parseIntInRange(row.timeout_sec, {
+                fieldLabel: `task_overrides.${row.task_type}.timeout_sec`,
+                min: AGENT_RUNTIME_LIMITS.timeoutMin,
+                max: AGENT_RUNTIME_LIMITS.timeoutMax,
+            })
+            const rowRetries = parseIntInRange(row.max_retries, {
+                fieldLabel: `task_overrides.${row.task_type}.max_retries`,
+                min: AGENT_RUNTIME_LIMITS.retriesMin,
+                max: AGENT_RUNTIME_LIMITS.retriesMax,
+            })
+            const rowItems = parseIntInRange(row.max_items, {
+                fieldLabel: `task_overrides.${row.task_type}.max_items`,
+                min: AGENT_RUNTIME_LIMITS.itemsMin,
+                max: AGENT_RUNTIME_LIMITS.itemsMax,
+            })
+            const rowChars = parseIntInRange(row.max_total_chars, {
+                fieldLabel: `task_overrides.${row.task_type}.max_total_chars`,
+                min: AGENT_RUNTIME_LIMITS.charsMin,
+                max: AGENT_RUNTIME_LIMITS.charsMax,
+            })
+            const rowLadder = normalizeContextLadder(row.context_ladder)
+            outTaskOverrides[row.task_type.trim()] = {
+                ...(rowTimeout != null ? { timeout_sec: rowTimeout } : {}),
+                ...(rowRetries != null ? { max_retries: rowRetries } : {}),
+                ...(rowLadder != null ? { context_ladder: rowLadder } : {}),
+                ...(rowItems != null ? { max_items: rowItems } : {}),
+                ...(rowChars != null ? { max_total_chars: rowChars } : {}),
+            }
+        }
+        if (Object.keys(outTaskOverrides).length > 0) {
+            task_overrides = outTaskOverrides
+        }
+    }
+
+    const out: AgentRuntimeOptions = {
+        ...(timeout_sec != null ? { timeout_sec } : {}),
+        ...(max_retries != null ? { max_retries } : {}),
+        ...(context_ladder != null ? { context_ladder } : {}),
+        ...(max_items != null ? { max_items } : {}),
+        ...(max_total_chars != null ? { max_total_chars } : {}),
+        ...(task_overrides != null ? { task_overrides } : {}),
+    }
+    return Object.keys(out).length > 0 ? out : undefined
+}
 
 export function SystemLLMSettingsPanel() {
     const [settings, setSettings] = useState<SystemLLMSettingsResponse | null>(null)
@@ -58,6 +321,7 @@ export function SystemLLMSettingsPanel() {
     // Модель по умолчанию и привязки
     const [defaultId, setDefaultId] = useState<string | null>(null)
     const [overrides, setOverrides] = useState<Record<string, string>>({}) // agent_key -> llm_config_id
+    const [runtimeOverrides, setRuntimeOverrides] = useState<Record<string, AgentRuntimeDraft>>({})
     const [savingDefault, setSavingDefault] = useState(false)
     const [savingOverrides, setSavingOverrides] = useState(false)
 
@@ -65,12 +329,48 @@ export function SystemLLMSettingsPanel() {
     const [testingId, setTestingId] = useState<string | null>(null)
     const [testResult, setTestResult] = useState<string | null>(null)
 
-    // Playground (чат: история сообщений как в AI-ассистенте)
-    type PlaygroundMessage = { id: string; role: 'user' | 'assistant'; content: string; raw?: Record<string, unknown> }
-    const [playgroundMessages, setPlaygroundMessages] = useState<PlaygroundMessage[]>([])
-    const [playgroundInput, setPlaygroundInput] = useState('')
-    const [playgroundRunning, setPlaygroundRunning] = useState(false)
-    const playgroundEndRef = useRef<HTMLDivElement>(null)
+    const updateTaskOverride = useCallback(
+        (agentKey: string, rowId: string, patch: Partial<AgentTaskOverrideDraft>) => {
+            setRuntimeOverrides((prev) => {
+                const current = prev[agentKey] ?? defaultRuntimeDraftForAgent(agentKey)
+                const nextRows = current.task_overrides.map((row) =>
+                    row.id === rowId ? { ...row, ...patch } : row
+                )
+                return {
+                    ...prev,
+                    [agentKey]: { ...current, task_overrides: nextRows },
+                }
+            })
+        },
+        []
+    )
+
+    const addTaskOverrideRow = useCallback((agentKey: string) => {
+        setRuntimeOverrides((prev) => {
+            const current = prev[agentKey] ?? defaultRuntimeDraftForAgent(agentKey)
+            const defaultTaskType = TASK_TYPES_BY_AGENT[agentKey]?.[0] ?? ''
+            return {
+                ...prev,
+                [agentKey]: {
+                    ...current,
+                    task_overrides: [...current.task_overrides, createTaskOverrideDraft(defaultTaskType)],
+                },
+            }
+        })
+    }, [])
+
+    const removeTaskOverrideRow = useCallback((agentKey: string, rowId: string) => {
+        setRuntimeOverrides((prev) => {
+            const current = prev[agentKey] ?? defaultRuntimeDraftForAgent(agentKey)
+            return {
+                ...prev,
+                [agentKey]: {
+                    ...current,
+                    task_overrides: current.task_overrides.filter((row) => row.id !== rowId),
+                },
+            }
+        })
+    }, [])
 
     const load = useCallback(async () => {
         try {
@@ -85,10 +385,16 @@ export function SystemLLMSettingsPanel() {
             setGigachatModels(models)
             setDefaultId(data.default_llm_config_id ?? null)
             const ov: Record<string, string> = {}
+            const ro: Record<string, AgentRuntimeDraft> = {}
+            for (const { key } of AGENT_KEYS) {
+                ro[key] = defaultRuntimeDraftForAgent(key)
+            }
             for (const o of data.agent_overrides) {
                 ov[o.agent_key] = o.llm_config_id
+                ro[o.agent_key] = runtimeOptionsToDraft(o.agent_key, o.runtime_options)
             }
             setOverrides(ov)
+            setRuntimeOverrides(ro)
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Не удалось загрузить настройки')
         } finally {
@@ -120,13 +426,26 @@ export function SystemLLMSettingsPanel() {
             setError(null)
             const list = Object.entries(overrides)
                 .filter(([, id]) => id)
-                .map(([agent_key, llm_config_id]) => ({ agent_key, llm_config_id }))
+                .map(([agent_key, llm_config_id]) => ({
+                    agent_key,
+                    llm_config_id,
+                    runtime_options: draftToRuntimeOptions(
+                        agent_key,
+                        runtimeOverrides[agent_key] ?? emptyRuntimeDraft()
+                    ),
+                }))
             const data = await setAgentLLMOverrides(list)
             const ov: Record<string, string> = {}
+            const ro: Record<string, AgentRuntimeDraft> = {}
+            for (const { key } of AGENT_KEYS) {
+                ro[key] = defaultRuntimeDraftForAgent(key)
+            }
             for (const o of data) {
                 ov[o.agent_key] = o.llm_config_id
+                ro[o.agent_key] = runtimeOptionsToDraft(o.agent_key, o.runtime_options)
             }
             setOverrides(ov)
+            setRuntimeOverrides(ro)
             if (settings) setSettings({ ...settings, agent_overrides: data })
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Не удалось сохранить привязки')
@@ -230,72 +549,6 @@ export function SystemLLMSettingsPanel() {
         }
     }
 
-    /** Извлечь только итоговый ответ ИИ (narrative). План и время выполнения — только в «Подробности (JSON)». */
-    function formatPlaygroundResult(result: Record<string, unknown>): string {
-        const status = result.status as string
-        if (status === 'error') {
-            return `Ошибка: ${result.error ?? 'Неизвестная ошибка'}`
-        }
-        const results = result.results as Record<string, { narrative?: { text?: string } | string }> | undefined
-        if (results) {
-            let narrativeText = (results.reporter?.narrative as { text?: string } | undefined)?.text
-            if (!narrativeText && typeof results.reporter?.narrative === 'string') narrativeText = results.reporter.narrative
-            if (!narrativeText) {
-                for (const v of Object.values(results)) {
-                    if (v && typeof v === 'object' && v.narrative) {
-                        narrativeText = typeof v.narrative === 'string' ? v.narrative : (v.narrative as { text?: string }).text
-                        if (narrativeText) break
-                    }
-                }
-            }
-            if (narrativeText?.trim()) return narrativeText.trim()
-        }
-        return 'Готово.'
-    }
-
-    const handleRunPlayground = async () => {
-        const text = playgroundInput.trim()
-        if (!text || playgroundRunning) return
-        const userMsg: PlaygroundMessage = { id: `u-${Date.now()}`, role: 'user', content: text }
-        // Локально считаем историю, включая текущее сообщение
-        const historyForRequest: PlaygroundChatMessage[] = [
-            ...playgroundMessages,
-            userMsg,
-        ].map((m) => ({
-            role: m.role,
-            content: m.content,
-        })).slice(-10)
-
-        setPlaygroundMessages((prev) => [...prev, userMsg])
-        setPlaygroundInput('')
-        setPlaygroundRunning(true)
-        try {
-            const result = await runPlayground(text, historyForRequest)
-            const displayText = formatPlaygroundResult(result)
-            const assistantMsg: PlaygroundMessage = {
-                id: `a-${Date.now()}`,
-                role: 'assistant',
-                content: displayText,
-                raw: result,
-            }
-            setPlaygroundMessages((prev) => [...prev, assistantMsg])
-        } catch (e: unknown) {
-            const errText = e instanceof Error ? e.message : 'Запуск не удался'
-            setPlaygroundMessages((prev) => [
-                ...prev,
-                { id: `a-${Date.now()}`, role: 'assistant', content: `Ошибка: ${errText}` },
-            ])
-        } finally {
-            setPlaygroundRunning(false)
-        }
-    }
-
-    const handleClearPlayground = () => setPlaygroundMessages([])
-
-    useEffect(() => {
-        playgroundEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, [playgroundMessages, playgroundRunning])
-
     return (
         <div className="space-y-6">
             {error && (
@@ -304,13 +557,7 @@ export function SystemLLMSettingsPanel() {
                 </div>
             )}
 
-            <Tabs defaultValue="settings">
-                <TabsList>
-                    <TabsTrigger value="settings">Настройки LLM</TabsTrigger>
-                    <TabsTrigger value="playground">Playground (мультиагент)</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="settings" className="pt-4 space-y-6">
+            <div className="space-y-6">
                     {isLoading && !settings ? (
                         <p className="text-sm text-muted-foreground">Загрузка...</p>
                     ) : (
@@ -570,28 +817,262 @@ export function SystemLLMSettingsPanel() {
                                         </thead>
                                         <tbody>
                                             {AGENT_KEYS.map(({ key, label }) => (
-                                                <tr key={key} className="border-b">
-                                                    <td className="p-2">{label}</td>
-                                                    <td className="p-2">
-                                                        <select
-                                                            className="flex h-8 w-full max-w-xs rounded-md border border-input bg-transparent px-2 py-1 text-sm"
-                                                            value={overrides[key] ?? ''}
-                                                            onChange={(e) =>
-                                                                setOverrides((prev) => ({
-                                                                    ...prev,
-                                                                    [key]: e.target.value || '',
-                                                                }))
-                                                            }
-                                                        >
-                                                            <option value="">По умолчанию</option>
-                                                            {configs.map((c) => (
-                                                                <option key={c.id} value={c.id}>
-                                                                    {c.name}
-                                                                </option>
-                                                            ))}
-                                                        </select>
-                                                    </td>
-                                                </tr>
+                                                <Fragment key={key}>
+                                                    <tr className="border-b">
+                                                        <td className="p-2 align-top">{label}</td>
+                                                        <td className="p-2">
+                                                            <select
+                                                                className="flex h-8 w-full max-w-xs rounded-md border border-input bg-transparent px-2 py-1 text-sm"
+                                                                value={overrides[key] ?? ''}
+                                                                onChange={(e) =>
+                                                                    setOverrides((prev) => ({
+                                                                        ...prev,
+                                                                        [key]: e.target.value || '',
+                                                                    }))
+                                                                }
+                                                            >
+                                                                <option value="">По умолчанию</option>
+                                                                {configs.map((c) => (
+                                                                    <option key={c.id} value={c.id}>
+                                                                        {c.name}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                        </td>
+                                                    </tr>
+                                                    <tr className="border-b bg-muted/10">
+                                                        <td className="p-2 text-xs text-muted-foreground">Runtime policy</td>
+                                                        <td className="p-2">
+                                                            <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                                                                <div className="space-y-1">
+                                                                    <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                                                                        <span>timeout_sec</span>
+                                                                        <CircleHelp
+                                                                            className="h-3.5 w-3.5"
+                                                                            title="Таймаут выполнения шага в секундах. Диапазон: 1..1800."
+                                                                        />
+                                                                    </div>
+                                                                    <Input
+                                                                        placeholder="timeout"
+                                                                        value={runtimeOverrides[key]?.timeout_sec ?? ''}
+                                                                        onChange={(e) =>
+                                                                            setRuntimeOverrides((prev) => ({
+                                                                                ...prev,
+                                                                                [key]: {
+                                                                                    ...(prev[key] ?? emptyRuntimeDraft()),
+                                                                                    timeout_sec: e.target.value,
+                                                                                },
+                                                                            }))
+                                                                        }
+                                                                    />
+                                                                </div>
+                                                                <div className="space-y-1">
+                                                                    <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                                                                        <span>max_retries</span>
+                                                                        <CircleHelp
+                                                                            className="h-3.5 w-3.5"
+                                                                            title="Сколько раз повторять шаг при ошибке. Диапазон: 0..10."
+                                                                        />
+                                                                    </div>
+                                                                    <Input
+                                                                        placeholder="retries"
+                                                                        value={runtimeOverrides[key]?.max_retries ?? ''}
+                                                                        onChange={(e) =>
+                                                                            setRuntimeOverrides((prev) => ({
+                                                                                ...prev,
+                                                                                [key]: {
+                                                                                    ...(prev[key] ?? emptyRuntimeDraft()),
+                                                                                    max_retries: e.target.value,
+                                                                                },
+                                                                            }))
+                                                                        }
+                                                                    />
+                                                                </div>
+                                                                <div className="space-y-1">
+                                                                    <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                                                                        <span>context_ladder</span>
+                                                                        <CircleHelp
+                                                                            className="h-3.5 w-3.5"
+                                                                            title="Уровни деградации контекста через запятую. Разрешено: full, compact, minimal."
+                                                                        />
+                                                                    </div>
+                                                                    <Input
+                                                                        placeholder="full,compact,minimal"
+                                                                        value={runtimeOverrides[key]?.context_ladder ?? ''}
+                                                                        onChange={(e) =>
+                                                                            setRuntimeOverrides((prev) => ({
+                                                                                ...prev,
+                                                                                [key]: {
+                                                                                    ...(prev[key] ?? emptyRuntimeDraft()),
+                                                                                    context_ladder: e.target.value,
+                                                                                },
+                                                                            }))
+                                                                        }
+                                                                    />
+                                                                </div>
+                                                                <div className="space-y-1">
+                                                                    <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                                                                        <span>max_items</span>
+                                                                        <CircleHelp
+                                                                            className="h-3.5 w-3.5"
+                                                                            title="Максимум элементов agent_results в prompt. Диапазон: 1..200."
+                                                                        />
+                                                                    </div>
+                                                                    <Input
+                                                                        placeholder="max_items"
+                                                                        value={runtimeOverrides[key]?.max_items ?? ''}
+                                                                        onChange={(e) =>
+                                                                            setRuntimeOverrides((prev) => ({
+                                                                                ...prev,
+                                                                                [key]: {
+                                                                                    ...(prev[key] ?? emptyRuntimeDraft()),
+                                                                                    max_items: e.target.value,
+                                                                                },
+                                                                            }))
+                                                                        }
+                                                                    />
+                                                                </div>
+                                                                <div className="space-y-1">
+                                                                    <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                                                                        <span>max_total_chars</span>
+                                                                        <CircleHelp
+                                                                            className="h-3.5 w-3.5"
+                                                                            title="Ограничение общего размера контекста в символах. Диапазон: 1000..500000."
+                                                                        />
+                                                                    </div>
+                                                                    <Input
+                                                                        placeholder="max_total_chars"
+                                                                        value={runtimeOverrides[key]?.max_total_chars ?? ''}
+                                                                        onChange={(e) =>
+                                                                            setRuntimeOverrides((prev) => ({
+                                                                                ...prev,
+                                                                                [key]: {
+                                                                                    ...(prev[key] ?? emptyRuntimeDraft()),
+                                                                                    max_total_chars: e.target.value,
+                                                                                },
+                                                                            }))
+                                                                        }
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                            {hasTaskOverridesEnabled(key) ? (
+                                                                <>
+                                                                    <div className="mt-2 flex items-center gap-1 text-[11px] text-muted-foreground">
+                                                                        <span>task_overrides</span>
+                                                                        <CircleHelp
+                                                                            className="h-3.5 w-3.5"
+                                                                            title="Отдельные правила для task_type. Добавьте строку, выберите задачу и задайте значения override."
+                                                                        />
+                                                                    </div>
+                                                                    <div className="mt-1 space-y-2">
+                                                                        {(runtimeOverrides[key]?.task_overrides ?? []).map((row) => (
+                                                                            <div
+                                                                                key={row.id}
+                                                                                className="rounded-md border p-2 bg-background/70 space-y-2"
+                                                                            >
+                                                                                <div className="grid grid-cols-1 md:grid-cols-7 gap-2">
+                                                                                    <select
+                                                                                        className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 py-1 text-xs md:col-span-2"
+                                                                                        value={row.task_type}
+                                                                                        onChange={(e) =>
+                                                                                            updateTaskOverride(key, row.id, {
+                                                                                                task_type: e.target.value,
+                                                                                            })
+                                                                                        }
+                                                                                    >
+                                                                                        <option value="">Выберите task_type</option>
+                                                                                        {(TASK_TYPES_BY_AGENT[key] ?? []).map((task) => (
+                                                                                            <option key={task} value={task}>
+                                                                                                {task}
+                                                                                            </option>
+                                                                                        ))}
+                                                                                    </select>
+                                                                                    <Input
+                                                                                        className="h-8 text-xs"
+                                                                                        placeholder="timeout"
+                                                                                        value={row.timeout_sec}
+                                                                                        onChange={(e) =>
+                                                                                            updateTaskOverride(key, row.id, {
+                                                                                                timeout_sec: e.target.value,
+                                                                                            })
+                                                                                        }
+                                                                                    />
+                                                                                    <Input
+                                                                                        className="h-8 text-xs"
+                                                                                        placeholder="retries"
+                                                                                        value={row.max_retries}
+                                                                                        onChange={(e) =>
+                                                                                            updateTaskOverride(key, row.id, {
+                                                                                                max_retries: e.target.value,
+                                                                                            })
+                                                                                        }
+                                                                                    />
+                                                                                    <Input
+                                                                                        className="h-8 text-xs"
+                                                                                        placeholder="ladder"
+                                                                                        value={row.context_ladder}
+                                                                                        onChange={(e) =>
+                                                                                            updateTaskOverride(key, row.id, {
+                                                                                                context_ladder: e.target.value,
+                                                                                            })
+                                                                                        }
+                                                                                    />
+                                                                                    <Input
+                                                                                        className="h-8 text-xs"
+                                                                                        placeholder="max_items"
+                                                                                        value={row.max_items}
+                                                                                        onChange={(e) =>
+                                                                                            updateTaskOverride(key, row.id, {
+                                                                                                max_items: e.target.value,
+                                                                                            })
+                                                                                        }
+                                                                                    />
+                                                                                    <div className="flex items-center gap-2">
+                                                                                        <Input
+                                                                                            className="h-8 text-xs"
+                                                                                            placeholder="max_total_chars"
+                                                                                            value={row.max_total_chars}
+                                                                                            onChange={(e) =>
+                                                                                                updateTaskOverride(key, row.id, {
+                                                                                                    max_total_chars: e.target.value,
+                                                                                                })
+                                                                                            }
+                                                                                        />
+                                                                                        <Button
+                                                                                            type="button"
+                                                                                            variant="ghost"
+                                                                                            size="icon"
+                                                                                            className="h-8 w-8"
+                                                                                            onClick={() => removeTaskOverrideRow(key, row.id)}
+                                                                                            title="Удалить override"
+                                                                                        >
+                                                                                            <Trash2 className="h-4 w-4" />
+                                                                                        </Button>
+                                                                                    </div>
+                                                                                </div>
+                                                                            </div>
+                                                                        ))}
+                                                                        <Button
+                                                                            type="button"
+                                                                            variant="outline"
+                                                                            size="sm"
+                                                                            className="h-8"
+                                                                            onClick={() => addTaskOverrideRow(key)}
+                                                                        >
+                                                                            <Plus className="h-3.5 w-3.5 mr-1" />
+                                                                            Добавить override
+                                                                        </Button>
+                                                                    </div>
+                                                                </>
+                                                            ) : (
+                                                                <p className="mt-2 text-[11px] text-muted-foreground">
+                                                                    Для этого агента task override не нужен: используется один тип задачи
+                                                                    ({TASK_TYPES_BY_AGENT[key]?.[0] ?? 'default'}).
+                                                                </p>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                </Fragment>
                                             ))}
                                         </tbody>
                                     </table>
@@ -602,102 +1083,7 @@ export function SystemLLMSettingsPanel() {
                             </section>
                         </>
                     )}
-                </TabsContent>
-
-                <TabsContent value="playground" className="pt-4 flex flex-col min-h-[420px]">
-                    <div className="flex items-center justify-between pb-2 border-b border-border">
-                        <p className="text-sm text-muted-foreground">
-                            Чат с мультиагентным пайплайном. Используется модель по умолчанию и привязки агентов.
-                        </p>
-                        {playgroundMessages.length > 0 && (
-                            <Button variant="ghost" size="icon" onClick={handleClearPlayground} title="Очистить историю" className="h-8 w-8">
-                                <Trash2 className="w-4 h-4" />
-                            </Button>
-                        )}
-                    </div>
-                    <div className="flex-1 overflow-y-auto py-3 space-y-2 min-h-[200px]">
-                        {playgroundMessages.length === 0 && !playgroundRunning ? (
-                            <div className="flex flex-col items-center justify-center py-12 text-center text-muted-foreground">
-                                <Sparkles className="w-10 h-10 mb-3 text-primary/40" />
-                                <p className="text-sm">Введите запрос и нажмите Отправить — мультиагент выполнит план и вернёт ответ.</p>
-                            </div>
-                        ) : (
-                            playgroundMessages.map((msg) => (
-                                <div
-                                    key={msg.id}
-                                    className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}
-                                >
-                                    <div
-                                        className={cn(
-                                            'max-w-[90%] rounded-lg px-3 py-2 text-sm',
-                                            msg.role === 'user'
-                                                ? 'bg-primary/15 text-foreground'
-                                                : 'bg-muted text-foreground'
-                                        )}
-                                    >
-                                        {msg.role === 'assistant' ? (
-                                            <div className="prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:text-xs [&_pre]:py-1.5 [&_pre]:px-2 [&_ul]:my-1 [&_ol]:my-1 [&_p]:my-0.5">
-                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-                                            </div>
-                                        ) : (
-                                            <p className="whitespace-pre-wrap break-words">{msg.content}</p>
-                                        )}
-                                        {msg.raw != null && (
-                                            <details className="mt-2 pt-2 border-t border-border/30">
-                                                <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
-                                                    Подробности (JSON)
-                                                </summary>
-                                                <pre className="mt-1 text-xs overflow-auto max-h-[200px] whitespace-pre-wrap break-words">
-                                                    {JSON.stringify(msg.raw, null, 2)}
-                                                </pre>
-                                            </details>
-                                        )}
-                                    </div>
-                                </div>
-                            ))
-                        )}
-                        {playgroundRunning && (
-                            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                                Мультиагент выполняется...
-                            </div>
-                        )}
-                        <div ref={playgroundEndRef} />
-                    </div>
-                    <div className="pt-2 border-t border-border">
-                        <div className="flex gap-2">
-                            <Textarea
-                                value={playgroundInput}
-                                onChange={(e) => setPlaygroundInput(e.target.value)}
-                                onKeyDown={(e) => {
-                                    if (e.key === 'Enter' && !e.shiftKey) {
-                                        e.preventDefault()
-                                        handleRunPlayground()
-                                    }
-                                }}
-                                placeholder="Например: проанализируй данные и предложи визуализацию..."
-                                className="min-h-[48px] max-h-[120px] resize-none"
-                                disabled={playgroundRunning}
-                            />
-                            <Button
-                                onClick={handleRunPlayground}
-                                disabled={!playgroundInput.trim() || playgroundRunning}
-                                size="icon"
-                                className="h-[48px] w-[48px] shrink-0"
-                            >
-                                {playgroundRunning ? (
-                                    <Loader2 className="w-5 h-5 animate-spin" />
-                                ) : (
-                                    <Send className="w-5 h-5" />
-                                )}
-                            </Button>
-                        </div>
-                        <p className="text-xs text-muted-foreground mt-1.5">
-                            Enter — отправить, Shift+Enter — новая строка
-                        </p>
-                    </div>
-                </TabsContent>
-            </Tabs>
+            </div>
         </div>
     )
 }

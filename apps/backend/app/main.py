@@ -134,7 +134,9 @@ async def lifespan(app: FastAPI):
     if redis_ok:
         try:
             _orchestrator = Orchestrator(
-                gigachat_api_key=None,
+                # Env-key остаётся резервным fallback для LLMRouter
+                # (например, если внешний OpenAI-compatible провайдер вернул 401/403).
+                gigachat_api_key=(settings.GIGACHAT_API_KEY or None),
                 enable_agents=[
                     "planner", "discovery", "research",
                     "structurizer", "analyst", "transform_codex",

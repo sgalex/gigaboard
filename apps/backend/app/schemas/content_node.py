@@ -128,6 +128,10 @@ class VisualizeRequest(BaseModel):
     widget_name: str | None = Field(None, max_length=200, description="Custom name for the widget")
     auto_refresh: bool = Field(default=True, description="Auto-refresh on data change")
     position: dict[str, int] | None = Field(None, description="Custom position {x, y}")
+    selected_node_ids: list[str] | None = Field(
+        None,
+        description="Optional list of ContentNode/SourceNode ids for multi-node visualization context",
+    )
 
 
 class VisualizeResponse(BaseModel):
@@ -146,6 +150,10 @@ class VisualizeIterativeRequest(BaseModel):
     existing_js: str | None = Field(None, description="Existing JS code (legacy)")
     existing_widget_code: str | None = Field(None, description="Existing full HTML widget code")
     chat_history: list[dict[str, str]] | None = Field(None, description="Chat history for context (list of {role, content} messages)")
+    selected_node_ids: list[str] | None = Field(
+        None,
+        description="Optional list of ContentNode/SourceNode ids for multi-node visualization context",
+    )
 
 
 class VisualizeIterativeResponse(BaseModel):

@@ -99,6 +99,17 @@ class AIAssistantController(BaseController):
                 if str(node.get("id")) in selected_id_set
             ]
 
+        # Build effective data-bearing node ids for tools/context:
+        # - board: explicit selection wins; otherwise all ContentNode/SourceNode ids on board
+        # - dashboard: all ContentNode/SourceNode ids represented on dashboard
+        effective_node_ids = self._resolve_effective_data_node_ids(
+            context_scope=context_scope,
+            selected_node_ids=selected_node_ids,
+            selected_nodes_data=selected_nodes_data,
+            all_nodes_data=all_nodes_data,
+            board_context=board_context,
+        )
+
         # 0. Deterministic context execution (table selection + optional sample filtering)
         prepared_context_used: Dict[str, Any] = {}
         catalog_nodes_data: List[Dict[str, Any]] = []
@@ -138,7 +149,7 @@ class AIAssistantController(BaseController):
                 db=db_for_context,
                 board_id=board_uuid,
                 source_board_ids=board_context.get("source_board_ids", []),
-                selected_node_ids=[str(nid) for nid in selected_node_ids],
+                selected_node_ids=effective_node_ids,
                 required_tables=required_tables if isinstance(required_tables, list) else [],
                 user_message=user_message,
                 filter_expression=filter_expression if isinstance(filter_expression, dict) else None,
@@ -166,7 +177,7 @@ class AIAssistantController(BaseController):
 
         orchestrator_context = self._build_orchestrator_context(
             board_context=board_context,
-            selected_node_ids=selected_node_ids,
+            selected_node_ids=effective_node_ids,
             selected_nodes_data=selected_nodes_data,
             all_nodes_data=all_nodes_data,
             chat_history=chat_history,
@@ -175,6 +186,13 @@ class AIAssistantController(BaseController):
             catalog_data_preview=catalog_data_preview,
             db=db,
         )
+        # Runtime streaming hooks (e.g. Socket.IO progress updates) are optional.
+        # Keep them in orchestrator context when provided by caller.
+        progress_callback = ctx.get("_progress_callback")
+        if callable(progress_callback):
+            orchestrator_context["_progress_callback"] = progress_callback
+        if bool(ctx.get("_enable_plan_progress", False)):
+            orchestrator_context["_enable_plan_progress"] = True
 
         # 2. Вызвать Orchestrator
         orch_result = await self._call_orchestrator(
@@ -522,6 +540,21 @@ class AIAssistantController(BaseController):
                 summary = cn.get("content_summary", "")
                 request += f"\n  • {name}: {summary}"
 
+        # Приоритет интерпретации: только если на доске одновременно есть аналитика и первоисточник.
+        stats_for_priority = board_context.get("stats") or {}
+        try:
+            _cn = int(stats_for_priority.get("total_content_nodes", 0) or 0)
+            _sn = int(stats_for_priority.get("total_source_nodes", 0) or 0)
+        except (TypeError, ValueError):
+            _cn, _sn = 0, 0
+        if _cn > 0 and _sn > 0:
+            request += (
+                "\n\n[Приоритет данных: при наличии и нод аналитики (ContentNode, не источник), "
+                "и нод первоисточника (SourceNode) опирайся в ответах и при выборе таблиц для инструментов "
+                "прежде всего на ContentNode — результаты трансформаций и работы на доске; "
+                "к данным первоисточника обращайся, если вопрос явно про сырой ввод/загрузку или без ContentNode не обойтись.]"
+            )
+
         table_catalog = board_context.get("table_catalog", [])
         if table_catalog:
             request += "\n\nТабличный каталог доски (схемы):"
@@ -789,6 +822,11 @@ class AIAssistantController(BaseController):
 
         if selected_node_ids:
             ctx["selected_node_ids"] = selected_node_ids
+            # Primary fallback id for tools expecting a single contentNodeId.
+            ctx["content_node_id"] = selected_node_ids[0]
+            # Unified array contract for tool-aware agents.
+            ctx["content_node_ids"] = selected_node_ids
+            ctx["contentNodeIds"] = selected_node_ids
 
         if selected_nodes_data:
             ctx["content_nodes_data"] = selected_nodes_data
@@ -807,6 +845,77 @@ class AIAssistantController(BaseController):
             ctx["db"] = db
 
         return ctx
+
+    @staticmethod
+    def _normalize_uuid_strings(values: List[Any]) -> List[str]:
+        out: List[str] = []
+        seen: set[str] = set()
+        for raw in values:
+            text = str(raw or "").strip()
+            if not text or ":" in text:
+                continue
+            try:
+                normalized = str(UUID(text))
+            except Exception:
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            out.append(normalized)
+        return out
+
+    @classmethod
+    def _resolve_effective_data_node_ids(
+        cls,
+        *,
+        context_scope: str,
+        selected_node_ids: List[Any],
+        selected_nodes_data: List[Dict[str, Any]],
+        all_nodes_data: List[Dict[str, Any]],
+        board_context: Dict[str, Any],
+    ) -> List[str]:
+        """
+        Resolve ContentNode/SourceNode ids that must be available to orchestrator tools.
+
+        Rules:
+        - Board scope:
+          - if explicit selection exists -> pass only selected ids
+          - otherwise pass all data-bearing ids from board context
+        - Dashboard scope:
+          - pass ids of ContentNode/SourceNode represented by dashboard items/widgets
+            (synthetic project table ids are excluded)
+        """
+        explicit_selected_ids = cls._normalize_uuid_strings(selected_node_ids or [])
+        selected_data_ids = cls._normalize_uuid_strings(
+            [node.get("id") for node in (selected_nodes_data or []) if isinstance(node, dict)]
+        )
+        all_data_ids = cls._normalize_uuid_strings(
+            [node.get("id") for node in (all_nodes_data or []) if isinstance(node, dict)]
+        )
+        source_node_ids = cls._normalize_uuid_strings(
+            [
+                node.get("id")
+                for node in ((board_context or {}).get("nodes", {}) or {}).get("source_nodes", [])
+                if isinstance(node, dict)
+            ]
+        )
+
+        if context_scope == "board":
+            if explicit_selected_ids:
+                # Keep explicit selection strict to avoid leaking unrelated nodes.
+                return explicit_selected_ids
+            if selected_data_ids:
+                return selected_data_ids
+            # No selection -> all data-bearing nodes on board (ContentNode including SourceNode).
+            return cls._normalize_uuid_strings(all_data_ids + source_node_ids)
+
+        # Dashboard: pass all real data node ids represented in dashboard context.
+        # (synthetic ids like project_table:<id> are already filtered out)
+        dashboard_ids = cls._normalize_uuid_strings(all_data_ids + selected_data_ids + source_node_ids)
+        if dashboard_ids:
+            return dashboard_ids
+        # Fallback to explicit ids if caller passed any.
+        return explicit_selected_ids
 
     @staticmethod
     def _build_input_data_preview(

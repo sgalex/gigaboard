@@ -1,6 +1,7 @@
 # Transform Dialog: Discussion Mode
 
 **Дата**: 5 февраля 2026  
+**Актуализация терминов**: 22 марта 2026 (TransformCodex / QualityGate vs устаревшие «TransformationAgent → CriticAgent»)  
 **Статус**: ✅ Реализовано
 
 ## Executive Summary
@@ -37,7 +38,7 @@ TransformDialog теперь поддерживает два режима раб
 
 2. **Transformation Mode** (🔧 код)
    - Запускается для конкретных инструкций на трансформацию
-   - MultiAgent workflow: `TransformationAgent → CriticAgent`
+   - MultiAgent workflow: **TransformCodexAgent** (через `TransformationController`) → выполнение в sandbox; проверка Python-кода — **ValidatorAgent** (`validator.py`) где применимо; **QualityGate** относится к финальной валидации пайплайна оркестратора, а не к этому пошаговому чату как к «CriticAgent»
    - Ответ: Python код + preview данных
    - UI: показывает код в Monaco Editor, preview таблиц, кнопка "Сохранить"
 
@@ -289,9 +290,9 @@ if (isDiscussionMode) {
 **Workflow**:
 1. Backend определяет: `is_discussion_mode = False` (есть "отфильтруй", конкретная инструкция)
 2. Запрос к MultiAgent: "Сгенерируй Python код для трансформации... Требуемая трансформация: Отфильтруй..."
-3. Planner создаёт план: `TransformationAgent → CriticAgent`
-4. TransformationAgent генерирует pandas код с фильтрацией
-5. CriticAgent валидирует код (проверяет наличие фильтра)
+3. Planner создаёт план с шагом **transform_codex** (и др. по необходимости)
+4. TransformCodexAgent генерирует pandas код с фильтрацией
+5. При необходимости — валидация кода (**ValidatorAgent** / sandbox), не путать с **QualityGate** полного пайплайна ассистента
 6. Backend выполняет код, получает preview
 7. Backend возвращает: `{code: "...", description: "Фильтрация брендов", preview_data: {...}, mode: "transformation"}`
 8. Frontend показывает код в Monaco Editor, preview таблицы, кнопка "Сохранить" enabled

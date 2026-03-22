@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace as dc_replace
 from typing import Any, Callable, Dict, List, Optional
 from uuid import UUID
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -97,6 +98,14 @@ class LLMRouter:
         self._gigachat = gigachat_service
         self._db_session_factory = db_session_factory
 
+    @staticmethod
+    def _is_auth_or_permission_error(exc: BaseException) -> bool:
+        """Определяет ошибки доступа провайдера (401/403)."""
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = getattr(exc.response, "status_code", None)
+            return status in (401, 403)
+        return False
+
     def _get_gigachat_from_config(self, config: LLMConfig) -> Optional[GigaChatService]:
         """Ключ и параметры только из настроек модели (без env)."""
         api_key = config.gigachat_api_key_encrypted
@@ -152,6 +161,23 @@ class LLMRouter:
         config_result = await db.execute(select(LLMConfig).where(LLMConfig.id == llm_config_id))
         return config_result.scalar_one_or_none()
 
+    async def get_agent_runtime_options_map(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Возвращает runtime_options по агентам из agent_llm_override.
+        Используется оркестратором для task policies (timeout/retries/context budget).
+        """
+        if not self._db_session_factory:
+            return {}
+        async with self._db_session_factory() as db:
+            result = await db.execute(select(AgentLLMOverride))
+            rows = result.scalars().all()
+            options_map: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                if not isinstance(row.runtime_options, dict):
+                    continue
+                options_map[row.agent_key] = row.runtime_options
+            return options_map
+
     async def chat_completion(
         self,
         *,
@@ -188,7 +214,21 @@ class LLMRouter:
                             t = temp if temp is not None else config.temperature
                             m = max_tok if max_tok is not None else config.max_tokens
                             p = dc_replace(params, temperature=t, max_tokens=m)
-                            return await client.chat_completion(p)
+                            try:
+                                return await client.chat_completion(p)
+                            except Exception as e:
+                                if self._gigachat and self._is_auth_or_permission_error(e):
+                                    logger.warning(
+                                        "External LLM returned auth/permission error for agent=%s; "
+                                        "fallback to internal GigaChat",
+                                        agent_key,
+                                    )
+                                    return await self._gigachat.chat_completion(
+                                        messages=messages_dict,
+                                        temperature=t,
+                                        max_tokens=m,
+                                    )
+                                raise
                     logger.warning(
                         "LLM config %s has no valid credentials (укажите API-ключ в настройках модели)",
                         config.id,

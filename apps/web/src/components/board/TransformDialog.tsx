@@ -16,13 +16,30 @@ import { ContentNode } from '@/types'
 import { cn } from '@/lib/utils'
 import { TransformSuggestionsPanel } from './TransformSuggestionsPanel'
 import { contentNodesAPI } from '@/services/api'
+import { MultiAgentProgressBlock } from '@/components/shared/MultiAgentProgressBlock'
+import {
+    type ProgressStep as SharedProgressStep,
+    type ProgressMeta as SharedProgressMeta,
+    mergePlanSteps,
+    applyProgressToSteps,
+    updateMetaFromPlanEvent,
+    updateMetaFromProgressEvent,
+    markRunningAsCompleted,
+    markLastRunningAsFailed,
+    finalizeMeta,
+} from '@/lib/multiAgentProgress'
 
 interface TransformDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     sourceNode?: ContentNode
     sourceNodes?: ContentNode[]
-    onTransform: (code: string, transformationId: string, description?: string, chatHistory?: ChatMessage[]) => Promise<void>
+    onTransform: (
+        code: string,
+        transformationId: string,
+        description?: string,
+        chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>
+    ) => Promise<void>
     // Edit mode
     initialMessages?: ChatMessage[]
     initialCode?: string
@@ -92,6 +109,8 @@ export function TransformDialog({
     const [inputValue, setInputValue] = useState('')
     const [isGenerating, setIsGenerating] = useState(false)
     const [isSaving, setIsSaving] = useState(false)
+    const [progressSteps, setProgressSteps] = useState<SharedProgressStep[]>([])
+    const [progressMeta, setProgressMeta] = useState<SharedProgressMeta>({ current: 0, total: null })
     const [currentTransformation, setCurrentTransformation] = useState<TransformationState | null>(null)
     const [editedCode, setEditedCode] = useState<string | null>(null)
     const [rightPanelTab, setRightPanelTab] = useState<'preview' | 'code'>('preview')
@@ -145,7 +164,7 @@ export function TransformDialog({
             !autocompleteSearch || t.name.toLowerCase().includes(autocompleteSearch.toLowerCase())
         )
         return filtered.map(t => ({
-            kind: (t.isResult ? 'result_table' : 'source_table') as const,
+            kind: t.isResult ? 'result_table' : 'source_table',
             label: t.name,
             hint: `${t.rowCount.toLocaleString()} rows`,
             insertText: t.name,
@@ -318,6 +337,8 @@ export function TransformDialog({
     useEffect(() => {
         if (!open) {
             previewLoadedRef.current = false
+            setProgressSteps([])
+            setProgressMeta({ current: 0, total: null })
             return
         }
 
@@ -338,6 +359,8 @@ export function TransformDialog({
                 transformationId: initialTransformationId,
             })
             setEditedCode(null)
+            setProgressSteps([])
+            setProgressMeta({ current: 0, total: null })
             previewLoadedRef.current = false // Reset flag to trigger preview load
         } else {
             // Create mode: reset
@@ -345,6 +368,8 @@ export function TransformDialog({
             setInputValue('')
             setCurrentTransformation(null)
             setEditedCode(null)
+            setProgressSteps([])
+            setProgressMeta({ current: 0, total: null })
             setRightPanelTab('preview')
             previewLoadedRef.current = false
         }
@@ -428,7 +453,7 @@ export function TransformDialog({
     // Auto-scroll chat
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, [chatMessages])
+    }, [chatMessages, isGenerating, progressSteps.length, progressMeta.current])
 
     // Close autocomplete on click outside
     useEffect(() => {
@@ -482,6 +507,8 @@ export function TransformDialog({
         setChatMessages(prev => [...prev, userMessage])
         setInputValue('')
         setIsGenerating(true)
+        setProgressSteps([])
+        setProgressMeta({ current: 0, total: null })
 
         try {
             // Build chat history
@@ -493,17 +520,51 @@ export function TransformDialog({
                 { role: userMessage.role, content: userMessage.content }
             ]
 
-            // Call MultiAgent transform endpoint (with full validation workflow)
-            const response = await contentNodesAPI.transformMultiagent(primaryNode.id, {
-                user_prompt: userMessage.content,
-                existing_code: currentTransformation?.code,
-                transformation_id: currentTransformation?.transformationId,
-                chat_history: fullChatHistory,
-                selected_node_ids: nodes.map(n => n.id),
-                preview_only: true
-            })
-
-            const data = response.data
+            let data: any = null
+            let streamError: string | null = null
+            await contentNodesAPI.transformMultiagentStream(
+                primaryNode.id,
+                {
+                    user_prompt: userMessage.content,
+                    existing_code: currentTransformation?.code,
+                    transformation_id: currentTransformation?.transformationId,
+                    chat_history: fullChatHistory,
+                    selected_node_ids: nodes.map(n => n.id),
+                    preview_only: true,
+                },
+                {
+                    onPlanUpdate: (steps, meta) => {
+                        setProgressSteps((prev) =>
+                            mergePlanSteps(prev, steps, meta?.completedCount, 'transform')
+                        )
+                        setProgressMeta((prev) =>
+                            updateMetaFromPlanEvent(prev, steps.length, meta?.completedCount)
+                        )
+                    },
+                    onProgress: (_agentLabel, task, meta) => {
+                        setProgressSteps((prev) =>
+                            applyProgressToSteps(prev, task, meta?.stepIndex, 'transform')
+                        )
+                        setProgressMeta((prev) => {
+                            return updateMetaFromProgressEvent(prev, meta?.stepIndex, meta?.totalSteps)
+                        })
+                    },
+                    onResult: (result) => {
+                        data = result
+                    },
+                    onError: (errorText) => {
+                        streamError = errorText
+                    },
+                }
+            )
+            if (streamError) {
+                throw new Error(streamError)
+            }
+            if (!data) {
+                throw new Error('Пустой результат трансформации')
+            }
+            setProgressSteps((prev) => markRunningAsCompleted(prev))
+            setProgressMeta((prev) => finalizeMeta(prev, progressSteps.length))
 
             console.log('🤖 AI response received:', data)
             console.log('📄 Code length:', data.code?.length || 0, 'chars')
@@ -555,6 +616,7 @@ export function TransformDialog({
 
         } catch (error) {
             console.error('Transform generation failed:', error)
+            setProgressSteps((prev) => markLastRunningAsFailed(prev))
 
             // Extract error message from axios error or generic error
             let errorText = 'Ошибка генерации кода'
@@ -946,10 +1008,12 @@ export function TransformDialog({
                                 </div>
                             )}
                             {isGenerating && (
-                                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                    AI создаёт код трансформации...
-                                </div>
+                                <MultiAgentProgressBlock
+                                    runningText="AI создаёт код трансформации..."
+                                    progressMeta={progressMeta}
+                                    progressSteps={progressSteps}
+                                    variant="blue"
+                                />
                             )}
                             <div ref={messagesEndRef} />
                         </div>

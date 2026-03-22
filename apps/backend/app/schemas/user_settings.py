@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Any, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 
 class LLMProvider(str, Enum):
@@ -65,6 +65,9 @@ class UserAISettingsResponse(BaseModel):
 
     # Произвольные пользовательские предпочтения (язык, стиль и т.п.)
     preferred_style: Optional[dict[str, Any]] = None
+
+    # Переопределения MULTI_AGENT_* (см. профиль → Multi-Agent)
+    multi_agent_settings: Optional[dict[str, Any]] = None
 
     class Config:
         from_attributes = True
@@ -137,6 +140,11 @@ class UserAISettingsUpdate(BaseModel):
     preferred_style: Optional[dict[str, Any]] = Field(
         default=None,
         description="Дополнительные пользовательские предпочтения (язык, тон, формат ответов и т.п.)",
+    )
+
+    multi_agent_settings: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Переопределения multi-agent (ключи как MULTI_AGENT_* в env). None = не менять поле.",
     )
 
 
@@ -234,6 +242,41 @@ class LLMConfigUpdate(BaseModel):
     max_tokens: Optional[int] = None
 
 
+class AgentRuntimeTaskOptions(BaseModel):
+    """Переопределения runtime-политики для конкретного task_type."""
+
+    timeout_sec: Optional[int] = Field(default=None, ge=1, le=1800)
+    max_retries: Optional[int] = Field(default=None, ge=0, le=10)
+    context_ladder: Optional[list[str]] = Field(
+        default=None,
+        description='Допустимые уровни: "full", "compact", "minimal"',
+    )
+    max_items: Optional[int] = Field(default=None, ge=1, le=200)
+    max_total_chars: Optional[int] = Field(default=None, ge=1000, le=500000)
+
+    @field_validator("context_ladder")
+    @classmethod
+    def validate_context_ladder(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is None:
+            return value
+        allowed = {"full", "compact", "minimal"}
+        normalized = [str(item).strip().lower() for item in value if str(item).strip()]
+        if not normalized:
+            return None
+        invalid = [lvl for lvl in normalized if lvl not in allowed]
+        if invalid:
+            raise ValueError(
+                f"Unsupported context ladder level(s): {invalid}. Allowed: full, compact, minimal"
+            )
+        return normalized
+
+
+class AgentRuntimeOptions(AgentRuntimeTaskOptions):
+    """Runtime-настройки агента + task-specific overrides."""
+
+    task_overrides: Optional[dict[str, AgentRuntimeTaskOptions]] = None
+
+
 class SystemLLMSettingsResponse(BaseModel):
     """Системные настройки: модель по умолчанию и списки для UI."""
 
@@ -241,7 +284,7 @@ class SystemLLMSettingsResponse(BaseModel):
     configs: list[LLMConfigResponse] = Field(default_factory=list)
     agent_overrides: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="Список {agent_key, llm_config_id}",
+        description="Список {agent_key, llm_config_id, runtime_options}",
     )
 
     class Config:
@@ -259,6 +302,7 @@ class AgentLLMOverrideItem(BaseModel):
 
     agent_key: str
     llm_config_id: UUID
+    runtime_options: Optional[AgentRuntimeOptions] = None
 
 
 class AgentLLMOverridesSet(BaseModel):

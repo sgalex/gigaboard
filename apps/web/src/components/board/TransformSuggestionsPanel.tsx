@@ -133,7 +133,7 @@ export const TransformSuggestionsPanel = ({
         return (
             <div className="flex items-center justify-center p-4">
                 <Loader2 className="w-4 h-4 animate-spin text-purple-600" />
-                <span className="ml-2 text-xs text-gray-600">Анализ данных...</span>
+                <span className="ml-2 text-xs text-gray-600">Загрузка рекомендаций</span>
             </div>
         )
     }

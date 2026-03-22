@@ -49,6 +49,106 @@ const api: AxiosInstance = axios.create({
     baseURL: API_URL,
 })
 
+type MultiAgentStreamEvent = {
+    type: 'start' | 'progress' | 'plan' | 'result' | 'error' | 'done'
+    agent_label?: string
+    task?: string
+    steps?: string[]
+    completed_count?: number
+    source?: string
+    result?: Record<string, unknown>
+    error?: string
+}
+
+type MultiAgentStreamMeta = {
+    phase?: string
+    stepIndex?: number
+    totalSteps?: number
+}
+
+type MultiAgentPlanMeta = {
+    completedCount?: number
+    source?: string
+}
+
+type RunMultiAgentStreamHandlers = {
+    onProgress?: (agentLabel: string, task: string, meta?: MultiAgentStreamMeta) => void
+    onPlanUpdate?: (steps: string[], meta?: MultiAgentPlanMeta) => void
+    onResult?: (result: Record<string, unknown>) => void
+    onError?: (error: string) => void
+}
+
+function getAuthHeadersForStream(): HeadersInit {
+    const token = useAuthStore.getState().token
+    const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+    }
+    if (token) {
+        ;(headers as Record<string, string>)['Authorization'] = `Bearer ${token}`
+    }
+    return headers
+}
+
+async function consumeNdjsonStream(
+    response: Response,
+    handlers: RunMultiAgentStreamHandlers
+): Promise<void> {
+    if (!response.body) {
+        throw new Error('Пустой поток ответа')
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buffer = ''
+
+    while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed) continue
+
+            let event: MultiAgentStreamEvent
+            try {
+                event = JSON.parse(trimmed) as MultiAgentStreamEvent
+            } catch {
+                continue
+            }
+
+            if (event.type === 'progress') {
+                handlers.onProgress?.(event.agent_label || 'Агент', event.task || 'Выполнение шага', {
+                    phase:
+                        typeof (event as Record<string, unknown>).phase === 'string'
+                            ? ((event as Record<string, unknown>).phase as string)
+                            : undefined,
+                    stepIndex:
+                        typeof (event as Record<string, unknown>).step_index === 'number'
+                            ? ((event as Record<string, unknown>).step_index as number)
+                            : undefined,
+                    totalSteps:
+                        typeof (event as Record<string, unknown>).total_steps === 'number'
+                            ? ((event as Record<string, unknown>).total_steps as number)
+                            : undefined,
+                })
+            } else if (event.type === 'plan') {
+                handlers.onPlanUpdate?.(Array.isArray(event.steps) ? event.steps : [], {
+                    completedCount:
+                        typeof event.completed_count === 'number' ? event.completed_count : undefined,
+                    source: typeof event.source === 'string' ? event.source : undefined,
+                })
+            } else if (event.type === 'result' && event.result) {
+                handlers.onResult?.(event.result)
+            } else if (event.type === 'error') {
+                handlers.onError?.(event.error || 'Ошибка выполнения')
+            }
+        }
+    }
+}
+
 // Add token to requests
 api.interceptors.request.use((config) => {
     const token = useAuthStore.getState().token
@@ -244,6 +344,52 @@ export const contentNodesAPI = {
             status: string;
             error?: string;
         }>(`/api/v1/content-nodes/${contentId}/visualize-multiagent`, params),
+    transformMultiagentStream: async (
+        contentId: string,
+        params: {
+            user_prompt: string
+            existing_code?: string
+            transformation_id?: string
+            chat_history?: Array<{ role: string; content: string }>
+            selected_node_ids?: string[]
+            preview_only?: boolean
+        },
+        handlers: RunMultiAgentStreamHandlers
+    ): Promise<void> => {
+        const resp = await fetch(`/api/v1/content-nodes/${contentId}/transform-multiagent-stream`, {
+            method: 'POST',
+            headers: getAuthHeadersForStream(),
+            body: JSON.stringify(params),
+        })
+        if (!resp.ok) {
+            const errorText = await resp.text()
+            throw new Error(errorText || 'Ошибка запуска трансформации')
+        }
+        await consumeNdjsonStream(resp, handlers)
+    },
+    visualizeMultiagentStream: async (
+        contentId: string,
+        params: {
+            user_prompt: string
+            existing_html?: string
+            existing_css?: string
+            existing_js?: string
+            existing_widget_code?: string
+            chat_history?: Array<{ role: string; content: string }>
+        },
+        handlers: RunMultiAgentStreamHandlers
+    ): Promise<void> => {
+        const resp = await fetch(`/api/v1/content-nodes/${contentId}/visualize-multiagent-stream`, {
+            method: 'POST',
+            headers: getAuthHeadersForStream(),
+            body: JSON.stringify(params),
+        })
+        if (!resp.ok) {
+            const errorText = await resp.text()
+            throw new Error(errorText || 'Ошибка запуска генерации виджета')
+        }
+        await consumeNdjsonStream(resp, handlers)
+    },
     // Widget suggestions
     analyzeSuggestions: (contentId: string, params: {
         chat_history: Array<{ role: string; content: string }>;

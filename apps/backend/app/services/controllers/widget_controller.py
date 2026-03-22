@@ -297,6 +297,34 @@ class WidgetController(BaseController):
         return request
 
     @staticmethod
+    def _input_data_preview_from_content_tables(
+        content_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Те же поля, что у TransformationController.input_data_preview — схема и sample_rows."""
+        preview: Dict[str, Any] = {}
+        for table in content_data.get("tables") or []:
+            if not isinstance(table, dict):
+                continue
+            name = str(table.get("name") or "table")
+            cols_raw = table.get("columns") or []
+            col_names: List[str] = []
+            for c in cols_raw:
+                if isinstance(c, dict):
+                    col_names.append(str(c.get("name", "")))
+                else:
+                    col_names.append(str(c))
+            rows = table.get("rows") or []
+            rc = table.get("row_count")
+            if rc is None:
+                rc = len(rows)
+            preview[name] = {
+                "columns": col_names,
+                "row_count": int(rc) if isinstance(rc, (int, float)) else len(rows),
+                "sample_rows": rows[:20],
+            }
+        return preview
+
+    @staticmethod
     def _build_orchestrator_context(
         ctx: Dict[str, Any],
         content_data: Dict[str, Any],
@@ -312,8 +340,21 @@ class WidgetController(BaseController):
             "is_refinement": is_refinement,
         }
 
+        selected_ids = [
+            str(item).strip()
+            for item in (ctx.get("selected_node_ids", []) or [])
+            if str(item).strip()
+        ]
+        if content_node_id and content_node_id not in selected_ids:
+            selected_ids.insert(0, str(content_node_id))
+
         if content_node_id:
-            orch_ctx["content_node_id"] = content_node_id
+            orch_ctx["content_node_id"] = str(content_node_id)
+        if selected_ids:
+            orch_ctx["selected_node_ids"] = selected_ids
+            # Unified array contract for tool-aware agents.
+            orch_ctx["content_node_ids"] = selected_ids
+            orch_ctx["contentNodeIds"] = selected_ids
 
         if content_data:
             orch_ctx["content_node"] = {
@@ -324,12 +365,36 @@ class WidgetController(BaseController):
                 "tables": content_data.get("tables", []),
                 "text": content_data.get("text", ""),
             }
+            ip = WidgetController._input_data_preview_from_content_tables(content_data)
+            if ip:
+                orch_ctx["input_data_preview"] = ip
+            # Fallback source for tool table loading (single-node mode).
+            if content_node_id:
+                orch_ctx["content_nodes_data"] = [
+                    {
+                        "id": str(content_node_id),
+                        "name": ctx.get("content_node_metadata", {}).get("name", "content_node"),
+                        "tables": content_data.get("tables", []),
+                        "text": content_data.get("text", ""),
+                    }
+                ]
+
+        # Multi-node mode: caller may pass merged content nodes for cross-node widgets.
+        if isinstance(ctx.get("content_nodes_data"), list) and ctx.get("content_nodes_data"):
+            orch_ctx["content_nodes_data"] = ctx.get("content_nodes_data")
 
         if existing_widget_code:
             orch_ctx["existing_widget_code"] = existing_widget_code
 
         if chat_history:
             orch_ctx["chat_history"] = chat_history
+
+        if "_progress_callback" in ctx:
+            orch_ctx["_progress_callback"] = ctx["_progress_callback"]
+        if "_enable_plan_progress" in ctx:
+            orch_ctx["_enable_plan_progress"] = ctx["_enable_plan_progress"]
+
+        orch_ctx["keep_tabular_context_in_prompt"] = True
 
         return orch_ctx
 

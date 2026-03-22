@@ -199,6 +199,7 @@ class DiscoveryAgent(BaseAgent):
                 else max_results
             )
             raw_results = self._filter_off_topic_results(query, raw_results, filter_cap)
+            raw_results = self._filter_low_value_help_domains(query, raw_results, max_results)
             if len(queries_used) > 1:
                 raw_results = raw_results[:max_results]
 
@@ -538,6 +539,73 @@ class DiscoveryAgent(BaseAgent):
                 len(filtered),
             )
         # Если всё отфильтровалось — возвращаем исходный список, чтобы пайплайн не падал
+        return filtered[:max_keep] if filtered else raw_results[:max_keep]
+
+    # Домены справок/маркетплейсов, часто всплывающие при «широких» запросах и бесполезные для research
+    _LOW_VALUE_DOMAIN_FRAGMENTS = (
+        "support.google.com",
+        "support.google.ru",
+        "play.google.com",
+        "maps.google.com",
+        "accounts.google.com",
+    )
+
+    def _looks_like_finance_or_commodity_query(self, query: str) -> bool:
+        q = (query or "").lower()
+        return any(
+            kw in q
+            for kw in (
+                "нефт",
+                "oil",
+                "brent",
+                "wti",
+                "crude",
+                "commodit",
+                "сырь",
+                "финанс",
+                "finance",
+                "бирж",
+                "stock",
+                "акци",
+                "курс",
+                "цен",
+                "тренд",
+                "invest",
+                "инвест",
+                "котиров",
+                "форекс",
+                "forex",
+            )
+        )
+
+    def _filter_low_value_help_domains(
+        self,
+        query: str,
+        raw_results: List[Dict[str, Any]],
+        max_keep: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Убирает очевидно нерелевантные URL (справки Google Play/Карт и т.п.) для финансовых/товарных запросов.
+        Если после фильтра список пуст — возвращаем исходный (как в off-topic фильтре).
+        """
+        if not raw_results or not self._looks_like_finance_or_commodity_query(query):
+            return raw_results[:max_keep]
+
+        filtered: List[Dict[str, Any]] = []
+        for r in raw_results:
+            url = (r.get("url") or "").lower()
+            if any(dom in url for dom in self._LOW_VALUE_DOMAIN_FRAGMENTS):
+                self.logger.debug("Filtered low-value help URL: %s", r.get("url", "")[:90])
+                continue
+            filtered.append(r)
+            if len(filtered) >= max_keep:
+                break
+
+        if len(filtered) < len(raw_results):
+            self.logger.info(
+                "Discovery: removed %s low-value portal URLs (finance/commodity query)",
+                len(raw_results) - len(filtered),
+            )
         return filtered[:max_keep] if filtered else raw_results[:max_keep]
 
     # ------------------------------------------------------------------

@@ -20,6 +20,7 @@ from ..schemas.agent_payload import (
     Narrative,
     PayloadContentTable,
 )
+from ..context_selection import select_agent_results_for_prompt
 from app.services.gigachat_service import GigaChatService
 
 
@@ -44,6 +45,7 @@ REPORTER_SYSTEM_PROMPT = '''Ты генератор интерактивных �
    - Plotly v2.35+: https://cdn.plot.ly/plotly-2.35.2.min.js
    - D3 v7: https://cdn.jsdelivr.net/npm/d3@7
    - ECharts v6 (локально): /libs/echarts.min.js
+   - Leaflet v1.9 (локально): /libs/leaflet.css + /libs/leaflet.js (иконки: /libs/images/)
 3. Данные получай через: const data = await window.fetchContentData();
 4. Структура данных: data.tables[0].columns (названия колонок), data.tables[0].rows (массив строк)
 5. Вызывай render() при загрузке
@@ -318,6 +320,21 @@ class ReporterAgent(BaseAgent):
                     agent_results = list(all_res.values())
                 else:
                     agent_results = all_res
+
+        if agent_results:
+            if (context or {}).get("_context_selection_applied_for") == "reporter":
+                self.logger.debug(
+                    "📏 ReporterAgent: using orchestrator-selected context (%s items)",
+                    len(agent_results),
+                )
+            else:
+                selected = select_agent_results_for_prompt("reporter", agent_results)
+                self.logger.info(
+                    "📏 ReporterAgent: context-selected agent_results (%s → %s items)",
+                    len(agent_results),
+                    len(selected),
+                )
+                agent_results = selected
 
         # ── Collect data from previous agents ────────────────────────
         all_findings: List[Finding] = []

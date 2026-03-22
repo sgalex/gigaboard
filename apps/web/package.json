@@ -8,7 +8,7 @@
         "build": "npm run copy-libs && vite build",
         "build:check": "npm run copy-libs && tsc -b && vite build",
         "preview": "vite preview",
-        "copy-libs": "node -e \"const fs=require('fs'); fs.cpSync('../../node_modules/echarts/dist/echarts.min.js','public/libs/echarts.min.js',{recursive:true}); fs.mkdirSync('public/libs/fonts',{recursive:true}); ['inter-latin-wght-normal','inter-latin-ext-wght-normal','inter-cyrillic-wght-normal','inter-cyrillic-ext-wght-normal'].forEach(f=>fs.cpSync('../../node_modules/@fontsource-variable/inter/files/'+f+'.woff2','public/libs/fonts/'+f+'.woff2'));\""
+        "copy-libs": "node scripts/copy-libs.cjs"
     },
     "dependencies": {
         "@monaco-editor/react": "^4.7.0",
@@ -25,6 +25,7 @@
         "axios": "^1.13.2",
         "date-fns": "^4.1.0",
         "echarts": "^6.0.0",
+        "leaflet": "^1.9.4",
         "modern-screenshot": "^4.6.8",
         "postcss": "^8.5.6",
         "react": "^18.2.0",

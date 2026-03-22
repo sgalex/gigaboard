@@ -21,6 +21,8 @@ export interface UserAISettings {
     max_tokens?: number | null
     has_external_api_key: boolean
     preferred_style?: Record<string, unknown> | null
+    /** Переопределения MULTI_AGENT_* (те же ключи, что в env) */
+    multi_agent_settings?: Record<string, unknown> | null
 }
 
 export interface UpdateUserAISettingsPayload {
@@ -35,6 +37,7 @@ export interface UpdateUserAISettingsPayload {
     temperature?: number | null
     max_tokens?: number | null
     preferred_style?: Record<string, unknown> | null
+    multi_agent_settings?: Record<string, unknown> | null
 }
 
 export interface TestAISettingsResponse {

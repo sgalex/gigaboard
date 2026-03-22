@@ -14,7 +14,8 @@ from datetime import datetime
 
 from .base import BaseAgent
 from ..message_bus import AgentMessageBus
-from ..schemas.agent_payload import Finding, Narrative
+from ..schemas.agent_payload import Finding, Narrative, ToolRequest, AgentPayload
+from ..context_selection import select_agent_results_for_prompt
 from app.services.gigachat_service import GigaChatService
 
 
@@ -437,6 +438,16 @@ Input (AVAILABLE INPUT DATA):
 - Используй \\n для переносов строк в text
 '''
 
+from app.services.multi_agent.tabular_tool_contract import TOOL_MODE_AGENT_SYSTEM_APPENDIX_RU
+
+WIDGET_SUGGESTIONS_SYSTEM_PROMPT = (
+    WIDGET_SUGGESTIONS_SYSTEM_PROMPT + "\n" + TOOL_MODE_AGENT_SYSTEM_APPENDIX_RU
+)
+TRANSFORM_SUGGESTIONS_SYSTEM_PROMPT = (
+    TRANSFORM_SUGGESTIONS_SYSTEM_PROMPT + "\n" + TOOL_MODE_AGENT_SYSTEM_APPENDIX_RU
+)
+ANALYST_SYSTEM_PROMPT = ANALYST_SYSTEM_PROMPT + "\n" + TOOL_MODE_AGENT_SYSTEM_APPENDIX_RU
+
 
 class AnalystAgent(BaseAgent):
     """
@@ -517,12 +528,112 @@ class AnalystAgent(BaseAgent):
         )
         return "\n".join(lines)
 
+    @staticmethod
+    def _is_policy_refusal_narrative(text: str) -> bool:
+        if not text or len(text) < 50:
+            return False
+        t = text.lower()
+        markers = (
+            "временно ограничен",
+            "чувствительн",
+            "не обладает собственным мнением",
+            "неправильного толкования",
+            "ограничены",
+        )
+        return sum(1 for m in markers if m in t) >= 2
+
+    def _fallback_narrative_from_structurizer_tables(
+        self, agent_results: List[Dict[str, Any]]
+    ) -> Optional[str]:
+        for result in reversed(agent_results[-20:]):
+            if not isinstance(result, dict):
+                continue
+            if result.get("agent") != "structurizer":
+                continue
+            if result.get("status") != "success":
+                continue
+            tables = result.get("tables") or []
+            if not tables:
+                continue
+            parts: List[str] = [
+                "## Сводка по извлечённым таблицам",
+                "",
+                "_Автоматическая выжимка из Structurizer (ответ модели был отказом по политике)._",
+                "",
+            ]
+            for tbl in tables[:5]:
+                if not isinstance(tbl, dict):
+                    continue
+                name = tbl.get("name", "table")
+                rows = tbl.get("rows") or []
+                cols = tbl.get("columns") or []
+                col_names = ", ".join(
+                    (c.get("name") if isinstance(c, dict) else str(c)) for c in cols[:12]
+                )
+                parts.append(f"### {name}")
+                parts.append(f"Колонки: {col_names}")
+                parts.append("")
+                for row in rows[:8]:
+                    if isinstance(row, dict):
+                        parts.append(
+                            "- "
+                            + "; ".join(f"{k}: {v}" for k, v in list(row.items())[:8])
+                        )
+                    elif isinstance(row, (list, tuple)):
+                        parts.append("- " + "; ".join(str(x) for x in row[:8]))
+                parts.append("")
+            text = "\n".join(parts).strip()
+            if len(text) > 120:
+                return text
+        return None
+
     def _findings_from_analyst_parsed_raw(
         self, raw: Dict[str, Any]
     ) -> tuple[List[Finding], str]:
         """Строит findings и narrative из распарсенного JSON ответа аналитика."""
         narrative_text = raw.get("text") or raw.get("message", "")
         findings: List[Finding] = []
+        # Некоторые модели возвращают findings[] вместо insights[] — поддерживаем оба.
+        for f in raw.get("findings", []) or []:
+            if isinstance(f, str) and f.strip():
+                findings.append(
+                    Finding(
+                        type="insight",
+                        text=f.strip(),
+                        severity="medium",
+                        confidence=0.75,
+                    )
+                )
+            elif isinstance(f, dict):
+                ft = str(f.get("type") or "insight").strip()
+                if ft not in (
+                    "insight",
+                    "recommendation",
+                    "data_quality_issue",
+                    "validation_issue",
+                    "warning",
+                ):
+                    ft = "insight"
+                txt = (
+                    f.get("text")
+                    or f.get("finding")
+                    or f.get("description")
+                    or ""
+                )
+                if str(txt).strip():
+                    _sev = str(f.get("severity", "medium")).lower()
+                    if _sev not in ("critical", "high", "medium", "low", "info"):
+                        _sev = "medium"
+                    findings.append(
+                        Finding(
+                            type=ft,  # type: ignore[arg-type]
+                            text=str(txt).strip(),
+                            severity=_sev,  # type: ignore[arg-type]
+                            confidence=f.get("confidence")
+                            if isinstance(f.get("confidence"), (int, float))
+                            else None,
+                        )
+                    )
         for ins in raw.get("insights", []) or []:
             if isinstance(ins, dict):
                 findings.append(
@@ -608,11 +719,23 @@ class AnalystAgent(BaseAgent):
                         agent_results = all_results
                     self.logger.info(f"📦 Loaded {len(agent_results)} results from Redis")
 
-            # Ограничиваем объём контекста для LLM, чтобы избежать ошибок
-            # вида "context too long" от GigaChat: оставляем только
-            # наиболее релевантные и свежие результаты.
+            # Context engineering: централизованный отбор prompt-контекста.
+            # На этой фазе сохраняем baseline лимиты (через defaults в context_selection),
+            # но переносим логику в единый слой для всех агентов.
             if agent_results:
-                agent_results = self._limit_agent_results_for_prompt(agent_results)
+                if (context or {}).get("_context_selection_applied_for") == "analyst":
+                    self.logger.debug(
+                        "📏 AnalystAgent: using orchestrator-selected context (%s items)",
+                        len(agent_results),
+                    )
+                else:
+                    selected_results = select_agent_results_for_prompt("analyst", agent_results)
+                    self.logger.info(
+                        "📏 AnalystAgent: context-selected agent_results (%s → %s items)",
+                        len(agent_results),
+                        len(selected_results),
+                    )
+                    agent_results = selected_results
             
             # Изменение #5/#7: извлекаем input_data из контекста в отдельный метод, не мутируем task
             input_data_for_prompt = task.get("input_data")
@@ -650,6 +773,126 @@ class AnalystAgent(BaseAgent):
             # Формируем prompt
             task_for_prompt = {**task, "input_data": input_data_for_prompt} if input_data_for_prompt else task
             task_prompt = self._build_universal_prompt(task_for_prompt, agent_results)
+            tools_enabled = bool((context or {}).get("tools_enabled"))
+            force_tool_data_access = bool(
+                (context or {}).get("force_tool_data_access")
+            )
+            tool_results = (context or {}).get("tool_results", []) if context else []
+            content_node_id = str((context or {}).get("content_node_id") or "").strip()
+            selected_node_ids = []
+            if context and isinstance(context.get("selected_node_ids"), list):
+                selected_node_ids = [
+                    str(item).strip()
+                    for item in context.get("selected_node_ids", [])
+                    if str(item).strip()
+                ]
+            if not selected_node_ids and context and isinstance(context.get("content_node_ids"), list):
+                selected_node_ids = [
+                    str(item).strip()
+                    for item in context.get("content_node_ids", [])
+                    if str(item).strip()
+                ]
+            if not selected_node_ids and context and isinstance(context.get("contentNodeIds"), list):
+                selected_node_ids = [
+                    str(item).strip()
+                    for item in context.get("contentNodeIds", [])
+                    if str(item).strip()
+                ]
+            if not content_node_id and selected_node_ids:
+                content_node_id = selected_node_ids[0]
+            node_ids_for_tools: List[str] = []
+            for _id in [content_node_id, *selected_node_ids]:
+                _text = str(_id or "").strip()
+                if _text and _text not in node_ids_for_tools:
+                    node_ids_for_tools.append(_text)
+            keep_tabular = bool((context or {}).get("keep_tabular_context_in_prompt"))
+            digest_lines = (context or {}).get("tool_request_cache_digest_lines") or []
+            if isinstance(digest_lines, list) and digest_lines:
+                task_prompt += (
+                    "\n\nУЖЕ ВЫПОЛНЕННЫЕ ЗАПРОСЫ К ДАННЫМ (не дублируй идентичные tool_requests — "
+                    "результат уже в кэше и/или в блоке TOOL RESULTS ниже):\n"
+                    + "\n".join(f"  • {line}" for line in digest_lines[-25:])
+                )
+            if (
+                tools_enabled
+                and force_tool_data_access
+                and not keep_tabular
+                and not tool_results
+                and node_ids_for_tools
+            ):
+                return AgentPayload.partial(
+                    agent=self.agent_name,
+                    tool_requests=[
+                        ToolRequest(
+                            tool_name="readTableListFromContentNodes",
+                            arguments={"nodeIds": node_ids_for_tools},
+                            reason="force_tool_data_access: table context is removed from prompt",
+                        )
+                    ],
+                    narrative=Narrative(
+                        text="Сначала запрашиваю список таблиц через инструмент, затем продолжу анализ."
+                    ),
+                    metadata={"tool_mode": "forced_bootstrap"},
+                )
+            if tool_results:
+                rendered = []
+                for item in tool_results[-4:]:
+                    if not isinstance(item, dict):
+                        continue
+                    tname = item.get("tool_name", "tool")
+                    if item.get("success"):
+                        rendered.append(
+                            f"- {tname}: {json.dumps(item.get('data', {}), ensure_ascii=False)[:2500]}"
+                        )
+                    else:
+                        rendered.append(f"- {tname}: ERROR={item.get('error', 'unknown')}")
+                if rendered:
+                    task_prompt += (
+                        "\n\nTOOL RESULTS (latest):\n"
+                        + "\n".join(rendered)
+                        + "\n"
+                    )
+                    task_prompt += (
+                        "\n🛑 АНТИ-ПЕТЛЯ (обязательно):\n"
+                        "- Если в TOOL RESULTS уже есть успешные строки таблиц, достаточные чтобы ответить на "
+                        "запрос пользователя — верни ИТОГОВЫЙ JSON анализа (findings, narrative и т.д.), "
+                        "БЕЗ поля tool_requests.\n"
+                        "- Не запрашивай readTableData повторно для той же пары (contentNodeId, table_id), "
+                        "если эта выборка уже есть в блоке выше или в «УЖЕ ВЫПОЛНЕННЫЕ ЗАПРОСЫ» — "
+                        "оркестратор отдаёт кэш, а лимит раундов исчерпывается.\n"
+                        "- Если нужна ещё одна таблица — не более ОДНОГО нового readTableData в tool_requests "
+                        "за ответ; не дублируй параллельно три одинаковых сценария.\n"
+                    )
+            if tools_enabled:
+                task_prompt += (
+                    "\n\nTOOL MODE ENABLED.\n"
+                    "Доступ к данным таблиц: сначала readTableListFromContentNodes "
+                    "(content_node_name, content_node_description, table_id, колонки), "
+                    "при необходимости строк — readTableData. Если задача требует фактических значений из строк "
+                    "таблицы, вызови readTableData (одного списка таблиц недостаточно).\n"
+                    "Если данных недостаточно, верни JSON:\n"
+                    "{\n"
+                    '  "tool_requests": [\n'
+                    "    {\n"
+                    '      "tool_name": "readTableListFromContentNodes",\n'
+                    '      "arguments": {"nodeIds": ["<uuid1>", "<uuid2>"]},\n'
+                    '      "reason": "optional"\n'
+                    "    },\n"
+                    "    {\n"
+                    '      "tool_name": "readTableData",\n'
+                    '      "arguments": {"jsonDecl": {"contentNodeId":"<uuid>","table_id":"<id_or_name>","offset":0,"limit":50}},\n'
+                    '      "reason": "optional"\n'
+                    "    }\n"
+                    "  ]\n"
+                    "}\n"
+                    "В jsonDecl.table_id используй значение поля table_id из ответа readTableListFromContentNodes "
+                    "для нужной таблицы.\n"
+                    "Если данных достаточно — верни обычный JSON анализа."
+                )
+                if content_node_id:
+                    task_prompt += (
+                        f"\n\nДоступные nodeIds для инструментов (включи в arguments.nodeIds): {content_node_id}"
+                    )
             original_user_request = (
                 (context or {}).get("original_user_request")
                 or (context or {}).get("user_request")
@@ -697,6 +940,16 @@ class AnalystAgent(BaseAgent):
             )
 
             raw = self._parse_generic_response(response)
+            tool_requests = self._extract_tool_requests(raw)
+            if tool_requests:
+                return AgentPayload.partial(
+                    agent=self.agent_name,
+                    tool_requests=tool_requests,
+                    narrative=Narrative(
+                        text="Для корректного анализа требуется догрузка табличных данных."
+                    ),
+                    metadata={"tool_mode": "request"},
+                )
             # If model returned JSON-like text but parsing failed, do one strict retry
             # with explicit "valid JSON only" correction (prevents replan loops).
             if self._looks_like_unparsed_json(raw, response):
@@ -719,13 +972,17 @@ class AnalystAgent(BaseAgent):
                     )
             findings, narrative_text = self._findings_from_analyst_parsed_raw(raw)
             if not findings and isinstance(raw, dict):
-                fallback_text = str(raw.get("message", "")).strip()
+                # Раньше брали только message — при ответе вида {"text":"...", "insights":[]}
+                # narrative в text терялся и findings не восстанавливались (QualityGate: no findings).
+                fallback_text = (narrative_text or "").strip()
+                if not fallback_text:
+                    fallback_text = str(raw.get("message", "")).strip()
                 if fallback_text:
                     recovered = self._extract_findings_from_raw_text(fallback_text)
                     if recovered:
                         findings.extend(recovered)
                         self.logger.warning(
-                            "⚠️ Analyst fallback recovered %s finding(s) from raw text",
+                            "⚠️ Analyst fallback recovered %s finding(s) from narrative/message text",
                             len(recovered),
                         )
                     if not narrative_text:
@@ -799,7 +1056,23 @@ class AnalystAgent(BaseAgent):
                     parts.append(f"{prefix} {f.text}")
                 narrative_text = "## Результаты анализа\n\n" + "\n".join(parts)
                 self.logger.info(f"📝 Built narrative from {len(parts)} findings (LLM returned no text field)")
-            
+
+            if (
+                narrative_text
+                and self._is_policy_refusal_narrative(narrative_text)
+                and not is_widget_mode
+                and not is_transform_suggestions_mode
+            ):
+                fb = self._fallback_narrative_from_structurizer_tables(agent_results)
+                if fb:
+                    narrative_text = fb
+                    meta_raw = dict(meta_raw) if isinstance(meta_raw, dict) else {}
+                    meta_raw["confidence"] = min(float(meta_raw.get("confidence") or 0.3), 0.55)
+                    meta_raw["policy_refusal_overridden"] = True
+                    self.logger.warning(
+                        "Analyst: replaced policy-refusal narrative with structurizer table summary"
+                    )
+
             return self._success_payload(
                 narrative=Narrative(text=narrative_text, format="markdown"),
                 findings=findings,
@@ -1343,6 +1616,35 @@ class AnalystAgent(BaseAgent):
             return False
         text = str(raw_response or "")
         return "{" in text and "}" in text and '"' in text
+
+    @staticmethod
+    def _extract_tool_requests(raw: Any) -> List[ToolRequest]:
+        if not isinstance(raw, dict):
+            return []
+        items = raw.get("tool_requests")
+        if not isinstance(items, list):
+            return []
+        out: List[ToolRequest] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool_name") or item.get("name") or "").strip()
+            if not tool_name:
+                continue
+            args = item.get("arguments") or item.get("args") or {}
+            if not isinstance(args, dict):
+                args = {}
+            try:
+                out.append(
+                    ToolRequest(
+                        tool_name=tool_name,
+                        arguments=args,
+                        reason=item.get("reason"),
+                    )
+                )
+            except Exception:
+                continue
+        return out
 
     @staticmethod
     def _extract_findings_from_raw_text(raw_text: str, max_items: int = 8) -> List[Finding]:

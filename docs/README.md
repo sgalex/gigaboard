@@ -2,16 +2,18 @@
 
 ## 📖 Что это?
 
-**GigaBoard** — AI-powered платформа для создания data pipelines с концепцией **Data-Centric Canvas**. Бесконечное полотно, где пользователи строят аналитические pipelines из узлов данных, а мульти-агентная AI система автоматизирует анализ, трансформации и визуализации.
+**GigaBoard** — **инструмент для аналитики и обработки данных с помощью ИИ** на **доске-пайплайне**: узлы и связи задают путь данных от **источников** (файлы, БД, API, streaming, research и др.) через **трансформации** до **виджетов** и текстовых выводов; **ассистент и мультиагент** (см. [MULTI_AGENT.md](./MULTI_AGENT.md)) отвечают на естественном языке, генерируют код трансформаций и визуализаций и работают в контексте графа и таблиц. Рядом — **дашборды** как презентационный слой, **глобальные фильтры** по доске/дашборду, **совместное редактирование** в реальном времени, явный **lineage** и **replay** при обновлении данных.
+
+По типу это **рабочее приложение** с прямым назначением (как табличный редактор к таблицам), а не «платформа» в смысле **инфраструктуры или экосистемы под сторонние продукты**. **Data-Centric Canvas** — бесконечное полотно (React Flow), на котором этот пайплайн **наглядно закреплён**.
 
 ### Ключевые возможности
-- 🎨 **Data-Centric Canvas** — бесконечное полотно с 4 типами узлов (React Flow)
-- 🤖 **AI Assistant Panel** — диалог в контексте доски, создание узлов одной кнопкой
-- 🔗 **5 типов связей**: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
-- 🧠 **Multi-Agent System** — 9 core агентов + satellite-контроллеры, Orchestrator
-- 👥 **Real-time совместная работа** — Socket.IO + Redis pub/sub
-- 🎨 **AI-генерация визуализаций** — Reporter Agent создаёт WidgetNode из данных
-- 🔄 **Автоматический replay** — обновление source запускает перепросчёт всего pipeline
+- 🤖 **ИИ как рабочий инструмент** — AI Assistant Panel, мультиагент (Orchestrator), генерация трансформаций и виджетов; стрим и прогресс через Socket.IO (см. [AI_ASSISTANT.md](./AI_ASSISTANT.md))
+- 🎨 **Доска-пайплайн** — 4 типа узлов, 5 типов связей; воспроизводимые операции и граф зависимостей
+- 📊 **Дашборды и фильтры** — редактор дашбордов; Cross-Filter по измерениям и пресетам (см. [DASHBOARD_SYSTEM.md](./DASHBOARD_SYSTEM.md), [CROSS_FILTER_SYSTEM.md](./CROSS_FILTER_SYSTEM.md))
+- 🧠 **Multi-Agent System** — 9 core агентов + satellite-контроллеры (Transform, Widget, Assistant, Research и др.)
+- 👥 **Real-time коллаборация** — Socket.IO + Redis pub/sub
+- 🎨 **AI-виджеты** — **WidgetCodexAgent** / **WidgetController**; **Reporter** — итоговый narrative (см. [`MULTI_AGENT.md`](./MULTI_AGENT.md))
+- 🔄 **Replay** — обновление источника запускает перепросчёт downstream-пайплайна
 
 ---
 
@@ -55,7 +57,8 @@ Package:   uv (Python), npm (Frontend)
 
 | Документ                                                 | Описание                                                    |
 | -------------------------------------------------------- | ----------------------------------------------------------- |
-| [MULTI_AGENT.md](./MULTI_AGENT.md)                       | Orchestrator, AgentPayload, 9 агентов, satellite-контроллеры (в т.ч. ResearchController); см. также history/2026-03-18 — Analyst/JSON, Quality Gate, Research HTTP |
+| [MULTI_AGENT.md](./MULTI_AGENT.md)                       | Orchestrator, AgentPayload, 9 агентов, satellite-контроллеры (в т.ч. ResearchController); тулы таблиц через `_compute_filtered_pipeline` (см. также `CROSS_FILTER_SYSTEM.md` §3.5); history/2026-03-18, 2026-03-20 |
+| [CONTEXT_ENGINEERING.md](./CONTEXT_ENGINEERING.md)       | **Context engineering:** план внедрения бюджетов, селекции контекста, рабочей памяти, метрик по шагам пайплайна |
 | [TASK_TYPES_REFERENCE.md](./TASK_TYPES_REFERENCE.md)     | Типы задач для каждого агента (task types)                  |
 | [ADAPTIVE_PLANNING.md](./ADAPTIVE_PLANNING.md)           | Full Replan — адаптивное планирование на основе результатов |
 | [AI_RESOLVER_SYSTEM.md](./AI_RESOLVER_SYSTEM.md)         | Batch AI resolution (пол, sentiment, категоризация)         |
@@ -66,7 +69,7 @@ Package:   uv (Python), npm (Frontend)
 
 | Документ                                                                 | Описание                                                      |
 | ------------------------------------------------------------------------ | ------------------------------------------------------------- |
-| [WIDGET_GENERATION_SYSTEM.md](./WIDGET_GENERATION_SYSTEM.md)             | Reporter Agent: AI-генерация HTML/CSS/JS визуализаций         |
+| [WIDGET_GENERATION_SYSTEM.md](./WIDGET_GENERATION_SYSTEM.md)             | WidgetCodex / виджеты: AI-генерация HTML/CSS/JS (Reporter — итоговый narrative) |
 | [WIDGET_SUGGESTIONS_SYSTEM.md](./WIDGET_SUGGESTIONS_SYSTEM.md)           | AI-рекомендации по улучшению виджетов                         |
 | [TRANSFORM_SYSTEM.md](./TRANSFORM_SYSTEM.md)                             | Transform Dialog: итеративный чат, preview, Monaco Editor     |
 | [TRANSFORM_DIALOG_CHAT_SYSTEM.md](./TRANSFORM_DIALOG_CHAT_SYSTEM.md)     | Dual-panel layout, итеративный чат, suggestions (реализовано) |
@@ -124,11 +127,14 @@ Package:   uv (Python), npm (Frontend)
 | [DOCKER_VM_DEPLOYMENT.md](./DOCKER_VM_DEPLOYMENT.md) | Пошаговое развёртывание на виртуальной машине (Linux, Docker Compose) |
 | [res/README.md](../res/README.md) | Вспомогательные ресурсы репозитория (демо-данные, шаблоны nginx для ВМ) |
 
-### История
+### История и служебные каталоги
 
-| Каталог                | Описание                                           |
-| ---------------------- | -------------------------------------------------- |
-| [history/](./history/) | Завершённые фичи, устаревшие V1 документы, анализы |
+| Каталог | Описание |
+| ------- | -------- |
+| [history/README.md](./history/README.md) | **Архив**: снимки решений, V1-документы; актуальность — по корню `docs/` |
+| [history/](./history/) | Файлы архива (не считать спецификацией без сверки с кодом) |
+| [workflow_logs/README.md](./workflow_logs/README.md) | **Логи прогонов** (демо), не нормативная документация |
+| [workflow_logs/](./workflow_logs/) | Сохранённые логи сессий |
 
 ---
 
@@ -137,7 +143,7 @@ Package:   uv (Python), npm (Frontend)
 ```
 GigaBoard/
 ├── res/                           # Вспомогательные ресурсы (демо-данные, шаблоны nginx для ВМ)
-├── docs/                          # 📚 Документация (~42 файл)
+├── docs/                          # 📚 Документация: корень — спецификации; history/ — архив; workflow_logs/ — логи прогонов (см. README в каждом каталоге)
 │   ├── README.md                  # ⭐ Этот файл — навигация
 │   ├── SPECIFICATIONS.md          # Требования (FR-1..FR-23)
 │   ├── ARCHITECTURE.md            # Архитектура системы
@@ -173,8 +179,8 @@ GigaBoard/
 │   └── web/                       # ⚛️ React Frontend
 │       └── src/
 │           ├── components/        # React компоненты
-│           │   └── board/         # Canvas компоненты (15 файлов)
-│           ├── store/             # Zustand stores (6 stores)
+│           │   └── board/         # Canvas компоненты
+│           ├── store/             # Zustand stores (board, project, auth, ui, …)
 │           ├── pages/             # Страницы
 │           ├── hooks/             # Custom hooks
 │           └── lib/               # Utilities

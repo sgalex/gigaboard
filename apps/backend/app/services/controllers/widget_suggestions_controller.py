@@ -16,6 +16,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .base_controller import BaseController, ControllerResult
+from .widget_controller import WidgetController
 
 logger = logging.getLogger("controller.widget_suggestions")
 
@@ -140,39 +141,55 @@ class WidgetSuggestionsController(BaseController):
             mode=mode,
         )
 
-        # Формируем input_data_preview в стандартном формате для Planner и Analyst
-        # content_data имеет формат {tables: [...], text: ""},
-        # а агенты читают input_data_preview: {table_name: {columns, row_count, sample_rows}}
-        input_data_preview: Dict[str, Any] = {}
-        for table in content_data.get("tables", []):
-            name = table.get("name", "df")
-            raw_columns = table.get("columns", [])
-            # Нормализуем колонки: [{name, type}] → ["name1", "name2", ...]
-            # Planner использует ', '.join(columns) — нужны строки
-            columns: List[str] = []
-            for c in raw_columns:
-                if isinstance(c, dict):
-                    columns.append(c.get("name", str(c)))
-                else:
-                    columns.append(str(c))
-            rows = table.get("rows", [])
-            row_count = table.get("row_count", len(rows))
-            input_data_preview[name] = {
-                "columns": columns,
-                "row_count": row_count,
-                "sample_rows": rows[:20],
-            }
+        # Тот же формат превью, что WidgetController (схема + sample_rows до 20 строк)
+        input_data_preview = WidgetController._input_data_preview_from_content_tables(
+            content_data
+        )
 
-        orchestrator_context = {
+        content_node_id = ctx.get("content_node_id")
+        selected_ids = [
+            str(item).strip()
+            for item in (ctx.get("selected_node_ids", []) or [])
+            if str(item).strip()
+        ]
+        if content_node_id and str(content_node_id) not in selected_ids:
+            selected_ids.insert(0, str(content_node_id))
+
+        orchestrator_context: Dict[str, Any] = {
             "controller": self.controller_name,
             "mode": f"widget_suggestions_{mode}",
-            "content_node_id": ctx.get("content_node_id"),
+            "content_node_id": content_node_id,
             "content_data": content_data,
-            "input_data_preview": input_data_preview,  # Стандартный ключ для Planner/Analyst
+            "input_data_preview": input_data_preview,
             "existing_widget_code": current_widget_code,
             "chat_history": chat_history,
             "max_suggestions": max_suggestions,
+            "keep_tabular_context_in_prompt": True,
         }
+        if selected_ids:
+            orchestrator_context["selected_node_ids"] = selected_ids
+            orchestrator_context["content_node_ids"] = selected_ids
+            orchestrator_context["contentNodeIds"] = selected_ids
+        meta = ctx.get("content_node_metadata") or {}
+        orchestrator_context["content_node"] = {
+            "content": content_data,
+            "metadata": meta,
+        }
+        orchestrator_context["data"] = {
+            "tables": content_data.get("tables", []),
+            "text": content_data.get("text", ""),
+        }
+        if content_node_id:
+            orchestrator_context["content_nodes_data"] = [
+                {
+                    "id": str(content_node_id),
+                    "name": meta.get("name", "content_node"),
+                    "tables": content_data.get("tables", []),
+                    "text": content_data.get("text", ""),
+                }
+            ]
+        if isinstance(ctx.get("content_nodes_data"), list) and ctx.get("content_nodes_data"):
+            orchestrator_context["content_nodes_data"] = ctx.get("content_nodes_data")
 
         # Вызвать Orchestrator
         try:

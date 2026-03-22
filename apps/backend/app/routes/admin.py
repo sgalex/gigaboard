@@ -3,8 +3,11 @@
 тест LLM, Playground мультиагента. Доступ только при role=admin.
 См. docs/ADMIN_AND_SYSTEM_LLM.md, docs/LLM_CONFIGURATION_CONCEPT.md.
 """
+import asyncio
 import httpx
+import json
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -241,7 +244,14 @@ async def get_system_llm_settings(
     return SystemLLMSettingsResponse(
         default_llm_config_id=settings.default_llm_config_id,
         configs=[_llm_config_to_response(c) for c in configs],
-        agent_overrides=[{"agent_key": o.agent_key, "llm_config_id": str(o.llm_config_id)} for o in overrides],
+        agent_overrides=[
+            {
+                "agent_key": o.agent_key,
+                "llm_config_id": str(o.llm_config_id),
+                "runtime_options": o.runtime_options,
+            }
+            for o in overrides
+        ],
     )
 
 
@@ -273,7 +283,14 @@ async def update_system_llm_settings(
     return SystemLLMSettingsResponse(
         default_llm_config_id=settings.default_llm_config_id,
         configs=[_llm_config_to_response(c) for c in configs],
-        agent_overrides=[{"agent_key": o.agent_key, "llm_config_id": str(o.llm_config_id)} for o in overrides],
+        agent_overrides=[
+            {
+                "agent_key": o.agent_key,
+                "llm_config_id": str(o.llm_config_id),
+                "runtime_options": o.runtime_options,
+            }
+            for o in overrides
+        ],
     )
 
 
@@ -292,7 +309,14 @@ async def get_agent_llm_overrides(
     """Список привязок агент → модель."""
     result = await db.execute(select(AgentLLMOverride))
     rows = result.scalars().all()
-    return [AgentLLMOverrideItem(agent_key=o.agent_key, llm_config_id=o.llm_config_id) for o in rows]
+    return [
+        AgentLLMOverrideItem(
+            agent_key=o.agent_key,
+            llm_config_id=o.llm_config_id,
+            runtime_options=o.runtime_options,
+        )
+        for o in rows
+    ]
 
 
 @router.put(
@@ -307,7 +331,6 @@ async def set_agent_llm_overrides(
 ) -> list[AgentLLMOverrideItem]:
     """Полная замена привязок. Передать список {agent_key, llm_config_id}."""
     # Проверить все llm_config_id
-    from uuid import UUID
     for item in payload.overrides:
         r = await db.execute(select(LLMConfig).where(LLMConfig.id == item.llm_config_id))
         if not r.scalar_one_or_none():
@@ -318,11 +341,29 @@ async def set_agent_llm_overrides(
     # Удалить старые, вставить новые
     await db.execute(delete(AgentLLMOverride))
     for item in payload.overrides:
-        db.add(AgentLLMOverride(agent_key=item.agent_key, llm_config_id=item.llm_config_id))
+        runtime_options = (
+            item.runtime_options.model_dump(exclude_none=True)
+            if item.runtime_options is not None
+            else None
+        )
+        db.add(
+            AgentLLMOverride(
+                agent_key=item.agent_key,
+                llm_config_id=item.llm_config_id,
+                runtime_options=runtime_options,
+            )
+        )
     await db.commit()
     result = await db.execute(select(AgentLLMOverride))
     rows = result.scalars().all()
-    return [AgentLLMOverrideItem(agent_key=o.agent_key, llm_config_id=o.llm_config_id) for o in rows]
+    return [
+        AgentLLMOverrideItem(
+            agent_key=o.agent_key,
+            llm_config_id=o.llm_config_id,
+            runtime_options=o.runtime_options,
+        )
+        for o in rows
+    ]
 
 
 # ---------- Тест LLM (по модели или default) ----------
@@ -452,6 +493,27 @@ async def get_system_gigachat_models(
 # ---------- Playground ----------
 
 
+def _build_playground_enriched_request(
+    *,
+    prompt: str,
+    chat_history: list[dict],
+) -> str:
+    """Построить enriched user_request из истории и текущего сообщения."""
+    enriched_request_lines: list[str] = []
+    if chat_history:
+        enriched_request_lines.append("История диалога (от старого к новому):")
+        for msg in chat_history:
+            role = msg.get("role", "user")
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            prefix = "Пользователь" if role == "user" else "Ассистент"
+            enriched_request_lines.append(f"- {prefix}: {content}")
+    enriched_request_lines.append("\nТекущий вопрос пользователя:")
+    enriched_request_lines.append(prompt.strip())
+    return "\n".join(enriched_request_lines).strip()
+
+
 @router.post(
     "/llm-playground/run",
     status_code=status.HTTP_200_OK,
@@ -469,23 +531,11 @@ async def run_llm_playground(
             detail="Orchestrator not available (Redis or GigaChat not initialized)",
         )
     try:
-        # Строим обогащённый запрос: краткая история диалога + текущий вопрос.
         chat_history = (payload.chat_history or [])[-10:]
-        enriched_request_lines: list[str] = []
-
-        if chat_history:
-            enriched_request_lines.append("История диалога (от старого к новому):")
-            for msg in chat_history:
-                role = msg.get("role", "user")
-                content = (msg.get("content") or "").strip()
-                if not content:
-                    continue
-                prefix = "Пользователь" if role == "user" else "Ассистент"
-                enriched_request_lines.append(f"- {prefix}: {content}")
-
-        enriched_request_lines.append("\nТекущий вопрос пользователя:")
-        enriched_request_lines.append(payload.prompt.strip())
-        enriched_request = "\n".join(enriched_request_lines).strip()
+        enriched_request = _build_playground_enriched_request(
+            prompt=payload.prompt,
+            chat_history=chat_history,
+        )
 
         context: dict = {}
         if chat_history:
@@ -504,3 +554,84 @@ async def run_llm_playground(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Playground run failed: {e}",
         )
+
+
+@router.post(
+    "/llm-playground/run-stream",
+    status_code=status.HTTP_200_OK,
+)
+async def run_llm_playground_stream(
+    payload: SystemLLMPlaygroundRunRequest,
+    current_user: User = Depends(get_current_admin_user),
+):
+    """
+    Streaming-версия Playground: отправляет progress-события и финальный result в формате NDJSON.
+    """
+    from app.main import get_orchestrator
+
+    orchestrator = get_orchestrator()
+    if not orchestrator:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orchestrator not available (Redis or GigaChat not initialized)",
+        )
+
+    chat_history = (payload.chat_history or [])[-10:]
+    enriched_request = _build_playground_enriched_request(
+        prompt=payload.prompt,
+        chat_history=chat_history,
+    )
+    context: dict = {}
+    if chat_history:
+        context["chat_history"] = chat_history
+
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def _progress_callback(progress_payload: dict) -> None:
+        payload = progress_payload or {}
+        if payload.get("event") == "plan_update":
+            await queue.put({
+                "type": "plan",
+                "steps": payload.get("steps") or [],
+                "completed_count": payload.get("completed_count") or 0,
+                "source": payload.get("source"),
+            })
+            return
+        await queue.put({
+            "type": "progress",
+            **payload,
+        })
+
+    async def _run_orchestrator() -> None:
+        try:
+            await queue.put({"type": "start"})
+            result = await orchestrator.process_request(
+                user_request=enriched_request,
+                board_id="playground",
+                user_id=str(current_user.id),
+                session_id=None,
+                context={
+                    **context,
+                    "_progress_callback": _progress_callback,
+                    "_enable_plan_progress": True,
+                },
+            )
+            await queue.put({"type": "result", "result": result})
+        except Exception as e:
+            await queue.put({"type": "error", "error": f"Playground run failed: {e}"})
+        finally:
+            await queue.put({"type": "done"})
+
+    async def _event_stream():
+        task = asyncio.create_task(_run_orchestrator())
+        try:
+            while True:
+                item = await queue.get()
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+                if item.get("type") == "done":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(_event_stream(), media_type="application/x-ndjson")

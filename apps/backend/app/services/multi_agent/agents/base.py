@@ -25,6 +25,8 @@ from ..schemas.agent_payload import (
     PayloadContentTable,
     Plan,
     Source,
+    ToolRequest,
+    ToolResult,
     ValidationResult,
 )
 
@@ -253,6 +255,8 @@ class BaseAgent(ABC):
         validation: Optional[ValidationResult] = None,
         plan: Optional[Plan] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        tool_requests: Optional[List[ToolRequest]] = None,
+        tool_results: Optional[List[ToolResult]] = None,
     ) -> AgentPayload:
         """Создать успешный AgentPayload от имени этого агента.
 
@@ -272,6 +276,8 @@ class BaseAgent(ABC):
             validation=validation,
             plan=plan,
             metadata=metadata,
+            tool_requests=tool_requests,
+            tool_results=tool_results,
         )
 
     def _error_payload(
@@ -457,6 +463,19 @@ class BaseAgent(ABC):
 
     MAX_GIGACHAT_PARSE_RETRIES = 1  # 1 retry = максимум 2 вызова
 
+    @staticmethod
+    def _classify_llm_parse_error(error: Exception) -> str:
+        text = str(error).lower()
+        if "empty response" in text or "empty" == text.strip():
+            return "empty_response"
+        if "json" in text or isinstance(error, json.JSONDecodeError):
+            return "json_malformed"
+        if "schema" in text or "missing" in text or "must contain" in text:
+            return "schema_invalid"
+        if "timeout" in text:
+            return "timeout"
+        return "unknown_parse_error"
+
     async def _call_gigachat_with_json_retry(
         self,
         messages: List[Dict[str, str]],
@@ -499,25 +518,27 @@ class BaseAgent(ABC):
                 return parse_fn(response)
             except Exception as e:
                 last_error = e
+                error_kind = self._classify_llm_parse_error(e)
                 if attempt < retries:
                     # Добавляем ответ LLM + описание ошибки и просим исправить
                     raw_text = response if isinstance(response, str) else str(response)
                     # Обрезаем чтобы не раздуть промпт
                     raw_text_short = raw_text[:1500] if len(raw_text) > 1500 else raw_text
                     self.logger.warning(
-                        f"⚠️ [{self.agent_name}] Parse error (attempt {attempt + 1}): {e}. Retrying..."
+                        f"⚠️ [{self.agent_name}] Parse error[{error_kind}] (attempt {attempt + 1}): {e}. Retrying..."
                     )
                     messages.append({"role": "assistant", "content": raw_text_short})
                     messages.append({
                         "role": "user",
                         "content": (
                             f"Твой предыдущий ответ содержит синтаксическую ошибку и не может быть распознан: {e}\n"
+                            f"Тип ошибки: {error_kind}.\n"
                             "Пожалуйста, верни исправленный ответ — ТОЛЬКО валидный JSON, без текста вне JSON."
                         ),
                     })
                 else:
                     self.logger.error(
-                        f"❌ [{self.agent_name}] Parse failed after {attempt + 1} attempt(s): {e}"
+                        f"❌ [{self.agent_name}] Parse failed[{error_kind}] after {attempt + 1} attempt(s): {e}"
                     )
 
         raise last_error  # type: ignore[misc]

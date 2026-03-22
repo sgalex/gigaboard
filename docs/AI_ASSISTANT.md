@@ -2,12 +2,29 @@
 
 ## Обзор
 
-**AI Assistant Panel** — постоянный боковой панель в правой части интерфейса GigaBoard, который позволяет пользователю вести диалог с ИИ-ассистентом в контексте текущей доски.
+**AI Assistant Panel** — боковая панель чата с ИИ-ассистентом: в контексте **текущей доски** (`scope=board`) или **текущего дашборда** (`scope=dashboard`). Компонент: `AIAssistantPanel` (`apps/web/src/components/board/AIAssistantPanel.tsx`).
 
 Похоже на:
 - 💬 **Cursor AI Agent** (помощник разработчика в редакторе)
 - 🤖 **GitHub Copilot Chat** (быстрая помощь в коде)
 - 📊 **Tableau Explain** (контекстные подсказки)
+
+### Режимы контекста и доставка ответа
+
+| Режим | Где в UI | Контекст для оркестратора | Сокет для стрима |
+| ----- | -------- | --------------------------- | ---------------- |
+| **Доска** | `BoardPage` / канвас доски | Выделенные ноды + данные доски (`AIService.get_board_context`) | Socket.IO из `BoardCanvas` → `useAIAssistantStore.setSocket` |
+| **Дашборд** | `DashboardPage`, `DashboardViewPage` | Элементы дашборда и библиотека проекта (`AIService.get_dashboard_context`) | Отдельное подключение `socketService.connect(JWT)` при монтировании панели с `scope=dashboard` |
+
+**Основной путь ответа** — **Socket.IO** (`ai_chat_stream` на сервере, `sendMessageStream` в Zustand): сервер эмитит `ai:stream:start`, **`ai:stream:progress`** (план и шаги мультиагента), `ai:stream:chunk`, `ai:stream:end` или `ai:stream:error`. UI прогресса унифицирован компонентом `MultiAgentProgressBlock` и логикой слияния шагов в `apps/web/src/lib/multiAgentProgress.ts`.
+
+**Запасной путь** — **REST** `POST /api/v1/boards/{board_id}/ai/chat` или `POST /api/v1/dashboards/{dashboard_id}/ai/chat`: без пошагового прогресса; используется, если нет подключённого сокета или для дашборда недоступен JWT.
+
+**История чата**: для доски — PostgreSQL (`chat_messages`, привязка к `board_id`); для дашборда — **Redis** (сессии по пользователю и `dashboard_id`), см. `apps/backend/app/routes/ai_assistant.py`.
+
+**Сервер (дашборд, Socket.IO)**: в событии `ai_chat_stream` передаются `scope: "dashboard"`, `board_id` (идентификатор дашборда), `access_token` (JWT) и остальные поля; обработчик в `apps/backend/app/core/socketio.py` проверяет токен, строит контекст дашборда и передаёт в оркестратор `_progress_callback` / `_enable_plan_progress`, как для доски.
+
+**Подключение клиента**: при использовании `io({ auth: { token } })` серверный обработчик `connect` принимает третий аргумент `auth` (требование python-socketio / Socket.IO v4).
 
 ---
 
@@ -24,51 +41,44 @@ flowchart TB
     Panel["AI Assistant Panel\n• User input\n• Message history\n• Suggested actions"]
   end
   
-  subgraph Backend["BACKEND API"]
-    Route["/api/v1/boards/{board_id}/ai/chat\n(FastAPI endpoint)"]
-    AIServ["AIService.chat_stream()\n• Создаёт Orchestrator + MessageBus\n• Вызывает process_user_request()"]
+  subgraph Backend["BACKEND"]
+    Route["REST /api/v1/boards|dashboards/.../ai/chat\nили Socket.IO ai_chat_stream"]
+    Ctrl["AIAssistantController\n• контекст доски/дашборда\n• intent / board ops"]
+    AIServ["AIService\n• Orchestrator + MessageBus\n• process_request / process_user_request"]
   end
   
   subgraph Orchestration["ORCHESTRATION"]
-    ORCH["MultiAgentOrchestrator\n• _request_plan() → Planner\n• _execute_task() → Agents\n• CriticAgent (standalone)"]
-    MB["AgentMessageBus\n(Redis Pub/Sub, DB=1)\n• request_response()"]
+    ORCH["Orchestrator V2\n(Single Path)"]
+    MB["AgentMessageBus\n(in-process + Redis)"]
   end
   
-  subgraph Agents["12 АГЕНТОВ (BaseAgent)"]
-    Planner["Planner"]
-    Researcher["Researcher"]
-    Structurizer["Structurizer"]
-    Analyst["Analyst"]
-    Transform["Transformation"]
-    Reporter["Reporter"]
-    Search["Search"]
-    Resolver["Resolver"]
-    Executor["Executor"]
+  subgraph Loop["Исполнение плана"]
+    MB["MessageBus"]
+    Steps["Агенты по шагам\n(analyst, codex, research, …)"]
   end
   
-  Panel -->|"POST /ai/chat\n{message, context}"| Route
-  Route --> AIServ
+  Panel --> Route
+  Route --> Ctrl
+  Ctrl --> AIServ
   AIServ --> ORCH
-  ORCH -->|"request_response(agent, task)"| MB
-  MB -->|"_handle_message() → process_task()"| Agents
-  Agents -->|"TASK_RESULT"| MB
-  MB -->|"return result"| ORCH
-  ORCH -->|"aggregated response"| AIServ
-  AIServ -->|"AIChatResponse + Socket.IO"| Panel
-  Canvas <-."Real-time updates\n(Socket.IO)".-> Panel
+  ORCH --> MB
+  MB --> Steps
+  Steps --> ORCH
+  ORCH --> QG["QualityGate\n(ключ плана: validator)"]
+  ORCH --> AIServ
+  AIServ -->|"ai:stream:* / AIChatResponse"| Panel
+  Canvas <-."Socket.IO board".-> Panel
 ```
 
-**Поток данных**:
+**Поток данных** (упрощённо; **в продукте по умолчанию** — стрим через Socket.IO, не синхронный POST):
 1. Пользователь вводит сообщение в AI Assistant Panel
-2. Frontend → `POST /api/v1/boards/{board_id}/ai/chat`
-3. **AIService создаёт Orchestrator + MessageBus, вызывает `process_user_request()`**
-4. Orchestrator → `message_bus.request_response("planner", task)` → получает план
-5. Orchestrator итерирует по шагам плана, вызывая каждого агента через `request_response()`
-6. Каждый агент получает задачу через `_handle_message()` → `process_task()`
-7. Агенты возвращают TASK_RESULT обратно через Message Bus
-8. Orchestrator собирает результаты, CriticAgent (standalone) валидирует
-9. Backend → Frontend: `AIChatResponse` с текстом и `suggested_actions`
-10. Frontend отображает сообщение AI + кнопки действий
+2. Frontend → Socket.IO **`ai_chat_stream`** (или fallback: **REST** `POST .../ai/chat` для доски/дашборда)
+3. **AIAssistantController** + **Orchestrator** выполняют мультиагентный пайплайн; при стриме прогресс шлётся событиями **`ai:stream:progress`**
+4. **Planner** строит план; оркестратор последовательно исполняет шаги (analyst, codex, research, шаг `context_filter` при необходимости и т.д.)
+5. Агенты вызываются через `MessageBus` / `process_task` в едином процессе; результаты накапливаются в `pipeline_context` / `agent_results`
+6. Финальная валидация качества — **QualityGateAgent** (в плане и реестре ключ `validator`), не отдельный «CriticAgent»
+7. Backend → Frontend: при стриме — чанки `ai:stream:chunk` и финал `ai:stream:end`; при REST — `AIChatResponse` с текстом и `suggested_actions`
+8. Frontend отображает сообщение AI + кнопки действий
 
 > **Примечание**: Агенты **не общаются друг с другом напрямую**. Orchestrator медиирует все вызовы.
 
@@ -145,6 +155,10 @@ flowchart TB
 ---
 
 ## Контекстный выбор узлов
+
+### Приоритет ContentNode в промпте
+
+В табличный контекст ассистента попадают **и** ноды первоисточника (`SourceNode`), **и** ноды аналитики (`ContentNode`, не источник). Если на доске есть оба типа, в обогащённый запрос добавляется явное правило: при ответах и при выборе таблиц для тулов **приоритет у ContentNode** (результаты работы на доске), к первоисточнику — когда вопрос про сырой ввод или без него не обойтись.
 
 ### Принцип работы
 
@@ -387,49 +401,22 @@ class AIService:
 
 Orchestrator медиирует **все** вызовы агентов через Message Bus. Агенты не общаются друг с другом напрямую.
 
-**Основной flow** (`process_user_request()`):
+**Основной flow** (см. реальный `Orchestrator.process_request` / `process_user_request` в `orchestrator.py`):
+
+- Планировщик создаёт план; оркестратор исполняет шаги по очереди, при необходимости вызывает **replan** / **adaptive planning**.
+- Ключ плана `validator` обрабатывает **QualityGateAgent** (файл `quality_gate.py`), а не устаревший «CriticAgent».
+- Отдельный модуль **`validator.py`** (`ValidatorAgent`) — про проверку сгенерированного Python-кода (безопасность, синтаксис и т.д.) в других сценариях, не путать с финальной фазой Quality Gate в чате.
 
 ```python
-class MultiAgentOrchestrator:
-    """
-    Orchestrator для Multi-Agent системы.
-    Принимает запрос от AIService.chat_stream(),
-    вызывает агентов через message_bus.request_response(),
-    собирает и агрегирует результаты.
-    """
-    
-    async def process_user_request(self, message: str, board_id: str, ...) -> dict:
-        # 1. Получить план от Planner через Message Bus
-        plan = await self._request_plan(message, board_id, session_id)
-        
-        # 2. Выполнить каждый шаг плана
-        results = {}
-        for step in plan.steps:
-            result = await self._execute_task(
-                agent_name=step.agent,
-                task=step.task,
-                session_id=session_id,
-            )
-            results[step.agent] = result
-        
-        # 3. CriticAgent валидирует (standalone, без Message Bus)
-        critic = CriticAgent(message_bus=None)
-        validation = await critic.process_task({"results": results, ...})
-        
-        # 4. Агрегировать и вернуть
-        return aggregated_response
-    
-    async def _request_plan(self, message, board_id, session_id):
-        """Отправить запрос Planner через Message Bus"""
-        return await self.message_bus.request_response("planner", task)
-    
-    async def _execute_task(self, agent_name, task, session_id):
-        """Отправить задачу агенту через Message Bus"""
-        return await self.message_bus.request_response(agent_name, task)
+# Упрощённая схема (имена методов в репозитории могут отличаться)
+async def process_request(...):
+    # 1. Planner → план
+    # 2. Цикл по шагам: analyst, transform_codex, research, context_filter, …
+    # 3. При необходимости — replan
+    # 4. Финальная фаза: QualityGateAgent под ключом "validator"
+    # 5. Reporter → итоговый narrative / suggested_actions
+    return raw_results
 ```
-
-> **Примечание**: CriticAgent вызывается **standalone** (`message_bus=None`), без Message Bus.
-> Это единственный агент, который не проходит через pub/sub.
 
 ### Backend Route Update
 
@@ -462,7 +449,7 @@ async def chat_with_ai(
             context=request.context,
         )
         
-        # Orchestrator уже вернул suggested_actions из Reporter/Developer агентов
+        # Orchestrator уже вернул suggested_actions из Reporter и др.
         suggested_actions = None
         if result.get("suggested_actions"):
             suggested_actions = [

@@ -2,6 +2,9 @@
 
 **Последнее обновление**: 23 января 2026 | **Статус**: ✅ Включено в MVP
 
+> **Терминология (2026-03)**  
+> Узел **«Developer Agent»** в диаграммах ниже — **концептуальное имя** роли генерации UI/кода форм. В мультиагентном ядре GigaBoard аналогичные задачи распределяются между **Planner**, **Reporter**, сценариями **WidgetCodex** и UI-контроллерами; отдельного класса «Developer Agent» в `apps/backend/app/services/multi_agent/agents/` нет. См. [`MULTI_AGENT.md`](./MULTI_AGENT.md).
+
 ---
 
 ## 📖 Обзор
@@ -1071,4 +1074,4 @@ describe('DynamicForm', () => {
 **Статус**: ✅ Готово к разработке  
 **Приоритет**: High (MVP)  
 **Estimated effort**: 8 недель  
-**Зависимости**: Multi-Agent System, Developer Agent, AI Assistant Panel
+**Зависимости**: Multi-Agent System, AI Assistant Panel; роль «Developer Agent» в тексте ниже — концептуальная (см. врезку в начале документа)

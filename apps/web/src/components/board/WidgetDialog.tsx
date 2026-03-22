@@ -22,6 +22,18 @@ import { findOptimalNodePosition, convertNodesToBounds } from '@/lib/nodePositio
 import { useBoardStore } from '@/store/boardStore'
 import { SuggestionsPanel } from './SuggestionsPanel'
 import { buildWidgetApiScript, injectApiScript, unescapeWidgetHtml } from './widgetApiScript'
+import { MultiAgentProgressBlock } from '@/components/shared/MultiAgentProgressBlock'
+import {
+    type ProgressStep as SharedProgressStep,
+    type ProgressMeta as SharedProgressMeta,
+    mergePlanSteps,
+    applyProgressToSteps,
+    updateMetaFromPlanEvent,
+    updateMetaFromProgressEvent,
+    markRunningAsCompleted,
+    markLastRunningAsFailed,
+    finalizeMeta,
+} from '@/lib/multiAgentProgress'
 
 interface WidgetDialogProps {
     open: boolean
@@ -76,6 +88,8 @@ export const WidgetDialog = ({
     const [inputValue, setInputValue] = useState('')
     const [isGenerating, setIsGenerating] = useState(false)
     const [isSaving, setIsSaving] = useState(false)
+    const [progressSteps, setProgressSteps] = useState<SharedProgressStep[]>([])
+    const [progressMeta, setProgressMeta] = useState<SharedProgressMeta>({ current: 0, total: null })
     const [autoRefresh, setAutoRefresh] = useState(true)
     const [refreshInterval, setRefreshInterval] = useState(5)
     const [currentVisualization, setCurrentVisualization] = useState<VisualizationState | null>(null)
@@ -116,6 +130,8 @@ export const WidgetDialog = ({
                 description: 'Existing widget'
             })
             setEditedCode(null)
+            setProgressSteps([])
+            setProgressMeta({ current: 0, total: null })
         } else {
             // Create mode: reset everything
             setChatMessages([])
@@ -125,6 +141,8 @@ export const WidgetDialog = ({
             setAutoRefresh(true)
             setRefreshInterval(5)
             setRightPanelTab('preview')
+            setProgressSteps([])
+            setProgressMeta({ current: 0, total: null })
         }
         setIframeKey(prev => prev + 1)
     }, [open, widgetNodeId, initialHtmlCode, initialWidgetName, initialMessages, initialAutoRefresh, initialRefreshInterval])
@@ -132,7 +150,7 @@ export const WidgetDialog = ({
     // Auto-scroll chat to bottom
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, [chatMessages])
+    }, [chatMessages, isGenerating, progressSteps.length, progressMeta.current])
 
     // Click outside to close autocomplete
     useEffect(() => {
@@ -277,6 +295,8 @@ export const WidgetDialog = ({
         setChatMessages(prev => [...prev, userMessage])
         setInputValue('')
         setIsGenerating(true)
+        setProgressSteps([])
+        setProgressMeta({ current: 0, total: null })
 
         try {
             // Build chat history including current message
@@ -288,17 +308,51 @@ export const WidgetDialog = ({
                 { role: userMessage.role, content: userMessage.content }
             ]
 
-            // Call MultiAgent visualization endpoint (with full validation workflow)
-            const response = await contentNodesAPI.visualizeMultiagent(contentNode.id, {
-                user_prompt: userMessage.content,
-                existing_html: currentVisualization?.html,
-                existing_css: currentVisualization?.css,
-                existing_js: currentVisualization?.js,
-                existing_widget_code: currentVisualization?.widget_code,
-                chat_history: fullChatHistory
-            })
-
-            const data = response.data
+            let data: any = null
+            let streamError: string | null = null
+            await contentNodesAPI.visualizeMultiagentStream(
+                contentNode.id,
+                {
+                    user_prompt: userMessage.content,
+                    existing_html: currentVisualization?.html,
+                    existing_css: currentVisualization?.css,
+                    existing_js: currentVisualization?.js,
+                    existing_widget_code: currentVisualization?.widget_code,
+                    chat_history: fullChatHistory,
+                },
+                {
+                    onPlanUpdate: (steps, meta) => {
+                        setProgressSteps((prev) =>
+                            mergePlanSteps(prev, steps, meta?.completedCount, 'widget')
+                        )
+                        setProgressMeta((prev) =>
+                            updateMetaFromPlanEvent(prev, steps.length, meta?.completedCount)
+                        )
+                    },
+                    onProgress: (_agentLabel, task, meta) => {
+                        setProgressSteps((prev) =>
+                            applyProgressToSteps(prev, task, meta?.stepIndex, 'widget')
+                        )
+                        setProgressMeta((prev) => {
+                            return updateMetaFromProgressEvent(prev, meta?.stepIndex, meta?.totalSteps)
+                        })
+                    },
+                    onResult: (result) => {
+                        data = result
+                    },
+                    onError: (errorText) => {
+                        streamError = errorText
+                    },
+                }
+            )
+            if (streamError) {
+                throw new Error(streamError)
+            }
+            if (!data) {
+                throw new Error('Пустой результат генерации визуализации')
+            }
+            setProgressSteps((prev) => markRunningAsCompleted(prev))
+            setProgressMeta((prev) => finalizeMeta(prev, progressSteps.length))
 
             console.log('🏷️ API response:', {
                 widget_name: data.widget_name,
@@ -333,6 +387,7 @@ export const WidgetDialog = ({
 
         } catch (error) {
             console.error('Visualization generation failed:', error)
+            setProgressSteps((prev) => markLastRunningAsFailed(prev))
             const errorMessage: ChatMessage = {
                 id: (Date.now() + 1).toString(),
                 role: 'assistant',
@@ -687,10 +742,12 @@ export const WidgetDialog = ({
                                 ))
                             )}
                             {isGenerating && (
-                                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                    AI создаёт визуализацию...
-                                </div>
+                                <MultiAgentProgressBlock
+                                    runningText="AI создаёт визуализацию..."
+                                    progressMeta={progressMeta}
+                                    progressSteps={progressSteps}
+                                    variant="purple"
+                                />
                             )}
                             <div ref={messagesEndRef} />
                         </div>

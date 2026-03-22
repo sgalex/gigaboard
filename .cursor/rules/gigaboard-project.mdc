@@ -9,7 +9,7 @@ alwaysApply: true
 
 ## Контекст проекта
 
-- **Проект**: GigaBoard — AI‑платформа для построения data‑pipeline'ов в формате Data‑Centric Canvas.
+- **Проект**: GigaBoard — **инструмент для аналитики и обработки данных с помощью ИИ** на доске-пайплайне (не «платформа» в смысле инфраструктуры под экосистему сторонних продуктов); Data‑Centric Canvas — среда графа пайплайна и lineage.
 - **Backend**: FastAPI, SQLAlchemy, PostgreSQL, Redis, Socket.IO.
 - **Frontend**: React, TypeScript, Vite, React Flow, Zustand.
 - **AI**: Мультиагентная система (планируется интеграция с GigaChat).
@@ -30,7 +30,8 @@ alwaysApply: true
 
 3. **Специфичная документация по контексту**
    - `docs/DATA_NODE_SYSTEM.md` — работа с DataNode.
-   - `docs/MULTI_AGENT_SYSTEM.md` — мультиагентная архитектура.
+   - `docs/MULTI_AGENT.md` — мультиагентная архитектура.
+   - `docs/CONTEXT_ENGINEERING.md` — контекст в промптах LLM (бюджеты, селекция, план развития).
    - `docs/BOARD_CONSTRUCTION_SYSTEM.md` — система досок.
    - `docs/CONNECTION_TYPES.md` — типы связей между нодами.
    - При необходимости — другие файлы в `docs/` и `docs/history/`.

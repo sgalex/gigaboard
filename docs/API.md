@@ -9,7 +9,7 @@
 - **SourceNode наследует ContentNode** — хранит и конфигурацию источника, и извлечённые данные
 - **4 типа узлов**: SourceNode, ContentNode, WidgetNode, CommentNode
 - **5 типов связей**: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
-- **Multi-Agent System**: Orchestrator → PlannerAgent, StructurizerAgent, AnalystAgent, TransformCodexAgent, WidgetCodexAgent, ReporterAgent, DiscoveryAgent, ResearchAgent, ValidatorAgent + 5 Controllers
+- **Multi-Agent System**: Orchestrator (Single Path) → 9 ролей в плане (planner, discovery, research, structurizer, analyst, transform_codex, widget_codex, reporter, validator) + шаги `context_filter` и др.; ключ плана `validator` исполняет **QualityGateAgent**; 6 satellite-контроллеров (Transform, TransformSuggestions, Widget, WidgetSuggestions, AI Assistant, Research). См. [`MULTI_AGENT.md`](./MULTI_AGENT.md)
 - **Real-time**: Socket.IO для коллаборативных обновлений
 
 **Версионирование**: Все endpoints под `/api/v1` (кроме `/health` и `/ai/resolve`)
@@ -435,7 +435,11 @@ EdgeListResponse { edges: [EdgeResponse], total: int }
 
 ---
 
-## 11. AI Assistant (`/api/v1/boards/{board_id}/ai`)
+## 11. AI Assistant
+
+### 11.1 Доска (`/api/v1/boards/{board_id}/ai`)
+
+История чата хранится в PostgreSQL (`chat_messages`).
 
 | Method | Path                               | Request Body                     | Response              | Описание                    |
 | ------ | ---------------------------------- | -------------------------------- | --------------------- | --------------------------- |
@@ -443,6 +447,19 @@ EdgeListResponse { edges: [EdgeResponse], total: int }
 | GET    | `.../ai/chat/history/me`           | query: `limit?=50`               | `ChatHistoryResponse` | История чата текущего юзера |
 | GET    | `.../ai/chat/history`              | query: `session_id`, `limit?=50` | `ChatHistoryResponse` | История по сессии           |
 | DELETE | `.../ai/chat/session/{session_id}` | —                                | `{message}`           | Удалить сессию чата         |
+
+### 11.2 Дашборд (`/api/v1/dashboards/{dashboard_id}/ai`)
+
+Тот же контракт запроса/ответа (`AIChatRequest` / `AIChatResponse`), но контекст `mode: dashboard` и история сессий — в **Redis** (не в `chat_messages`). См. `apps/backend/app/routes/ai_assistant.py`.
+
+| Method | Path                               | Request Body                     | Response              | Описание                    |
+| ------ | ---------------------------------- | -------------------------------- | --------------------- | --------------------------- |
+| POST   | `.../ai/chat`                      | `AIChatRequest`                  | `AIChatResponse`      | Отправить сообщение AI      |
+| GET    | `.../ai/chat/history/me`           | query: `limit?=50`               | `ChatHistoryResponse` | Последняя сессия из Redis   |
+| GET    | `.../ai/chat/history`              | query: `session_id`, `limit?=50` | `ChatHistoryResponse` | История сессии из Redis     |
+| DELETE | `.../ai/chat/session/{session_id}` | —                                | `{message}`           | Удалить сессию в Redis      |
+
+**Стриминг с прогрессом** для дашборда — через Socket.IO (см. ниже), не через отдельный REST NDJSON.
 
 <details>
 <summary>📄 Schemas</summary>
@@ -510,6 +527,7 @@ UserAISettingsResponse {
     max_tokens?: int
     has_external_api_key: bool
     preferred_style?: dict
+    multi_agent_settings?: dict  // только admin; для остальных в ответе не возвращается
 }
 
 UserAISettingsUpdate {
@@ -532,6 +550,7 @@ UserAISettingsUpdate {
     max_tokens?: int
 
     preferred_style?: dict
+    multi_agent_settings?: dict  // optional; если передано — сохранить (null — очистить)
 }
 
 UserAISettingsTestResponse {
@@ -549,9 +568,53 @@ UserAISettingsTestResponse {
   - `external_base_url` по умолчанию `https://api.openai.com/v1`;
   - `external_default_model` и `temperature`/`max_tokens` задают дефолты для Multi-Agent системы;
   - `external_api_key` сохраняется в зашифрованном виде в отдельной сущности `UserSecret`, в ответе ключ никогда не возвращается — только флаг `has_external_api_key`.
+- `multi_agent_settings`: словарь с теми же ключами, что переменные окружения `MULTI_AGENT_*`; применяется при запуске оркестратора для данного пользователя (приоритет над env). Чтение и запись в API — только для роли **admin**; в ответе для не-админов поле не возвращается.
 - `POST /ai-settings/test`:
   - использует текущие сохранённые настройки + значения из тела запроса (они имеют приоритет);
   - на MVP-этапе выполняет только валидацию параметров (формат URL, наличие ключа) и возвращает диагностическое сообщение; в следующих итерациях будет вызывать реальный OpenAI-совместимый endpoint.
+
+### Admin LLM settings (`/api/v1/admin/*`)
+
+Управление системными LLM-пресетами и привязками агентов (только `admin`).
+
+| Method | Path                                   | Request Body              | Response                          | Описание |
+| ------ | -------------------------------------- | ------------------------- | --------------------------------- | -------- |
+| GET    | `/api/v1/admin/llm-configs`            | —                         | `list[LLMConfigResponse]`         | Список LLM-пресетов |
+| POST   | `/api/v1/admin/llm-configs`            | `LLMConfigCreate`         | `LLMConfigResponse`               | Создать пресет |
+| GET    | `/api/v1/admin/llm-configs/{id}`       | —                         | `LLMConfigResponse`               | Получить пресет |
+| PATCH  | `/api/v1/admin/llm-configs/{id}`       | `LLMConfigUpdate`         | `LLMConfigResponse`               | Обновить пресет |
+| DELETE | `/api/v1/admin/llm-configs/{id}`       | —                         | —                                 | Удалить пресет |
+| GET    | `/api/v1/admin/llm-settings`           | —                         | `SystemLLMSettingsResponse`       | Получить default + overrides |
+| PATCH  | `/api/v1/admin/llm-settings`           | `SystemLLMSettingsUpdate` | `SystemLLMSettingsResponse`       | Обновить модель по умолчанию |
+| GET    | `/api/v1/admin/agent-llm-overrides`    | —                         | `list[AgentLLMOverrideItem]`      | Список привязок агента |
+| PUT    | `/api/v1/admin/agent-llm-overrides`    | `AgentLLMOverridesSet`    | `list[AgentLLMOverrideItem]`      | Полная замена привязок |
+
+`AgentLLMOverrideItem.runtime_options` поддерживает:
+
+```json
+{
+  "timeout_sec": 45,
+  "max_retries": 1,
+  "context_ladder": ["full", "compact", "minimal"],
+  "max_items": 30,
+  "max_total_chars": 100000,
+  "task_overrides": {
+    "replan": {
+      "timeout_sec": 60,
+      "context_ladder": ["compact", "minimal"],
+      "max_items": 35,
+      "max_total_chars": 120000
+    }
+  }
+}
+```
+
+Валидация `runtime_options`:
+- `context_ladder`: только `full`, `compact`, `minimal`;
+- `timeout_sec`: `1..1800`;
+- `max_retries`: `0..10`;
+- `max_items`: `1..200`;
+- `max_total_chars`: `1000..500000`.
 
 ---
 
@@ -580,7 +643,7 @@ CSVAnalysisResult { delimiter, encoding, has_header, rows_count, columns: [{name
 
 ---
 
-## 14. Database (`/api/v1/database`)
+## 15. Database (`/api/v1/database`)
 
 | Method | Path                               | Request Body                | Response                     | Описание              |
 | ------ | ---------------------------------- | --------------------------- | ---------------------------- | --------------------- |
@@ -600,7 +663,7 @@ DatabaseConnectionResponse { success: bool, database_type, tables: [str], table_
 
 ---
 
-## 15. Dimensions (`/api/v1/projects/{project_id}/dimensions`)
+## 16. Dimensions (`/api/v1/projects/{project_id}/dimensions`)
 
 Измерения для Cross-Filter. См. [CROSS_FILTER_SYSTEM.md](./CROSS_FILTER_SYSTEM.md).
 
@@ -619,9 +682,11 @@ DatabaseConnectionResponse { success: bool, database_type, tables: [str], table_
 
 ---
 
-## 16. Board Filters (`/api/v1/boards/{board_id}/filters`)
+## 17. Board Filters (`/api/v1/boards/{board_id}/filters`)
 
 Активные фильтры доски (Cross-Filter). Хранение in-memory по умолчанию (для production — Redis).
+
+Тот же бэкендный пересчёт **`_compute_filtered_pipeline`** используется мультиагентным оркестратором для тулов `readTableData` / `readTableListFromContentNodes` (при `MULTI_AGENT_TOOLS_USE_FILTERED_PIPELINE`), см. **`docs/CROSS_FILTER_SYSTEM.md`** §3.5 и **`docs/MULTI_AGENT.md`**.
 
 | Method | Path                                                           | Request Body        | Response                 | Описание              |
 | ------ | -------------------------------------------------------------- | ------------------- | ------------------------ | --------------------- |
@@ -633,7 +698,7 @@ DatabaseConnectionResponse { success: bool, database_type, tables: [str], table_
 
 ---
 
-## 17. Dashboard Filters (`/api/v1/dashboards/{dashboard_id}/filters`)
+## 18. Dashboard Filters (`/api/v1/dashboards/{dashboard_id}/filters`)
 
 Активные фильтры дашборда. Контракт аналогичен Board Filters.
 
@@ -647,7 +712,7 @@ DatabaseConnectionResponse { success: bool, database_type, tables: [str], table_
 
 ---
 
-## 18. Filter Presets (`/api/v1/projects/{project_id}/filter-presets`)
+## 19. Filter Presets (`/api/v1/projects/{project_id}/filter-presets`)
 
 Сохранённые наборы фильтров (проектный скоуп).
 
@@ -661,7 +726,7 @@ DatabaseConnectionResponse { success: bool, database_type, tables: [str], table_
 
 ---
 
-## 19. Dashboards (`/api/v1/dashboards`)
+## 20. Dashboards (`/api/v1/dashboards`)
 
 Дашборды — презентационный слой. См. [DASHBOARD_SYSTEM.md](./DASHBOARD_SYSTEM.md).
 
@@ -682,7 +747,7 @@ DatabaseConnectionResponse { success: bool, database_type, tables: [str], table_
 
 ---
 
-## 20. Library (`/api/v1/projects/{project_id}/library`)
+## 21. Library (`/api/v1/projects/{project_id}/library`)
 
 Библиотека виджетов и таблиц проекта (для размещения на дашбордах).
 
@@ -701,7 +766,7 @@ DatabaseConnectionResponse { success: bool, database_type, tables: [str], table_
 
 ---
 
-## 21. Public (`/api/v1/public`)
+## 22. Public (`/api/v1/public`)
 
 Публичный доступ без авторизации (шаринг дашбордов).
 
@@ -711,7 +776,7 @@ DatabaseConnectionResponse { success: bool, database_type, tables: [str], table_
 
 ---
 
-## 22. Content Nodes — Dimension mappings
+## 23. Content Nodes — Dimension mappings
 
 Эндпоинты для Cross-Filter (маппинг столбцов к измерениям):
 
@@ -727,9 +792,38 @@ DatabaseConnectionResponse { success: bool, database_type, tables: [str], table_
 ### Подключение
 ```javascript
 const socket = io('http://localhost:8000', {
-  auth: { token: 'Bearer <access_token>' }
+  path: '/socket.io',
+  auth: { token: 'Bearer <access_token>' } // опционально; третий аргумент auth передаётся в обработчик connect на сервере
 });
 ```
+
+### AI Assistant — стрим чата (`ai_chat_stream`)
+
+Клиент → сервер: событие **`ai_chat_stream`**, тело (JSON):
+
+| Поле | Тип | Описание |
+| ---- | --- | -------- |
+| `board_id` | string (UUID) | Для **доски** — `board_id`; для **дашборда** — `dashboard_id` (то же поле, см. `scope`) |
+| `session_id` | string (UUID), опционально | Сессия чата |
+| `message` | string | Текст пользователя |
+| `selected_node_ids` | string[] | Только доска: выделенные ноды |
+| `allow_auto_filter` | bool | |
+| `required_tables` | list | |
+| `filter_expression` | object | |
+| `scope` | `"board"` \| `"dashboard"` | По умолчанию `board`. Для дашборда обязательно `dashboard` |
+| `access_token` | string | Для **`scope=dashboard`** — JWT доступа (как в REST) |
+
+Сервер → клиент (после успешного старта):
+
+| Событие | Назначение |
+| ------- | ---------- |
+| `ai:stream:start` | `{ session_id, board_id }` — начало (в поле `board_id` для дашборда передаётся id дашборда) |
+| `ai:stream:progress` | Прогресс мультиагента: `event`, `task`, `steps`, `step_index`, `total_steps`, `completed_count`, … |
+| `ai:stream:chunk` | Фрагменты итогового текста |
+| `ai:stream:end` | `{ session_id, full_response, suggested_actions? }` |
+| `ai:stream:error` | `{ error, session_id? }` |
+
+Реализация: `apps/backend/app/core/socketio.py` (`ai_chat_stream`). Для дашборда контекст и Redis-история совпадают с REST `POST .../dashboards/{id}/ai/chat`.
 
 ### События доски
 
@@ -767,7 +861,7 @@ const socket = io('http://localhost:8000', {
 | Event            | Направление     | Описание                          |
 | ---------------- | --------------- | --------------------------------- |
 | `agent_thinking` | Server → Client | Агент начал обработку             |
-| `tool_generated` | Server → Client | Developer Agent создал инструмент |
+| `tool_generated` | Server → Client | Событие генерации инструмента (legacy / отладка) |
 | `tool_executed`  | Server → Client | Инструмент выполнен               |
 
 ---
@@ -783,6 +877,6 @@ const socket = io('http://localhost:8000', {
 > **Предыдущая версия**: Устаревшая API документация с DataNode endpoints и nested URLs доступна в [history/API_V1_LEGACY.md](history/API_V1_LEGACY.md)
 
 **Версия API**: 1.0  
-**Последнее обновление**: 2026-03-01  
+**Последнее обновление**: 2026-03-22  
 **Статус**: ✅ Актуален — описывает реально существующие endpoints  
-**Итого**: REST-модули: Health, Auth, Projects, Boards, Source Nodes, Content Nodes, Extraction, Widget Nodes, Comment Nodes, Edges, AI Assistant, AI Resolver, Files, Database, Dimensions, Board Filters, Dashboard Filters, Filter Presets, Dashboards, Library, Public; + Socket.IO события
+**Итого**: REST-модули: Health, Auth, Projects, Boards, Source Nodes, Content Nodes, Extraction, Widget Nodes, Comment Nodes, Edges, AI Assistant, AI Resolver, User Profile & LLM, Admin LLM, Files, Database, Dimensions, Board Filters, Dashboard Filters, Filter Presets, Dashboards, Library, Public, Content Nodes dimension mappings; + Socket.IO события

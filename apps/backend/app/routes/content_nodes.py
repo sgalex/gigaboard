@@ -2,12 +2,16 @@
 
 См. docs/API.md для полной документации endpoints.
 """
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 import uuid
 import logging
+import asyncio
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_db
@@ -70,6 +74,38 @@ def _serialize_edge(edge) -> dict | None:
         return None
     from app.schemas.edge import EdgeResponse
     return EdgeResponse.model_validate(edge).model_dump(by_alias=True)
+
+
+def _ndjson_default(obj: Any) -> Any:
+    """Fallback for NDJSON streams: pandas Period/Timestamp, numpy scalars, etc."""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    try:
+        import numpy as np
+
+        if isinstance(obj, np.generic):
+            return obj.item()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except Exception:
+        pass
+    try:
+        import pandas as pd
+
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        if isinstance(obj, pd.Period):
+            return str(obj)
+        if isinstance(obj, pd.Timedelta):
+            return str(obj)
+    except Exception:
+        pass
+    if hasattr(obj, "isoformat"):
+        try:
+            return obj.isoformat()
+        except Exception:
+            pass
+    return str(obj)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -360,6 +396,7 @@ async def preview_transformation(
             context={
                 "board_id": board_id,
                 "user_id": str(current_user.id),
+                "content_node_id": str(content_id),
                 "input_tables": [t for nd in nodes_data for t in nd.get("tables", [])],
                 "text_content": text_content,
                 "existing_code": existing_code,
@@ -578,6 +615,7 @@ async def iterative_transformation(
             context={
                 "board_id": board_id,
                 "user_id": str(current_user.id),
+                "content_node_id": str(content_id),
                 "auth_token": auth_token,
                 "input_tables": [t for nd in nodes_data for t in nd.get("tables", [])],
                 "input_data": input_data,  # Full DataFrames for execution
@@ -1203,6 +1241,7 @@ async def transform_content_node(
             context={
                 "board_id": str(source_node.board_id),
                 "user_id": str(current_user.id),
+                "content_node_id": str(content_id),
                 "input_tables": input_tables,
                 "skip_execution": True,
             },
@@ -1458,6 +1497,11 @@ async def create_visualization(
             )
 
         content_data = content_node.content or {}
+        selected_node_ids = [str(content_id)]
+        if isinstance(request.selected_node_ids, list) and request.selected_node_ids:
+            selected_node_ids = [str(item).strip() for item in request.selected_node_ids if str(item).strip()]
+            if str(content_id) not in selected_node_ids:
+                selected_node_ids.insert(0, str(content_id))
 
         # 1. Generate widget code via V2 controller
         orchestrator = _get_orchestrator_or_503()
@@ -1471,6 +1515,7 @@ async def create_visualization(
                 "content_node_id": str(content_id),
                 "content_data": content_data,
                 "content_node_metadata": content_node.node_metadata or {},
+                "selected_node_ids": selected_node_ids,
             },
         )
 
@@ -1595,6 +1640,11 @@ async def visualize_content_iterative(
             )
 
         content_data = content_node.content or {}
+        selected_node_ids = [str(content_id)]
+        if isinstance(request.selected_node_ids, list) and request.selected_node_ids:
+            selected_node_ids = [str(item).strip() for item in request.selected_node_ids if str(item).strip()]
+            if str(content_id) not in selected_node_ids:
+                selected_node_ids.insert(0, str(content_id))
 
         # V2 controller
         orchestrator = _get_orchestrator_or_503()
@@ -1610,6 +1660,7 @@ async def visualize_content_iterative(
                 "content_node_metadata": content_node.node_metadata or {},
                 "existing_widget_code": request.existing_widget_code,
                 "chat_history": request.chat_history or [],
+                "selected_node_ids": selected_node_ids,
                 "is_refinement": bool(request.existing_widget_code),
             },
         )
@@ -1675,6 +1726,11 @@ async def visualize_content_multiagent(
             )
 
         content_data = content_node.content or {}
+        selected_node_ids = [str(content_id)]
+        if isinstance(request.selected_node_ids, list) and request.selected_node_ids:
+            selected_node_ids = [str(item).strip() for item in request.selected_node_ids if str(item).strip()]
+            if str(content_id) not in selected_node_ids:
+                selected_node_ids.insert(0, str(content_id))
 
         # V2 controller
         orchestrator = _get_orchestrator_or_503()
@@ -1690,6 +1746,7 @@ async def visualize_content_multiagent(
                 "content_node_metadata": content_node.node_metadata or {},
                 "existing_widget_code": request.existing_widget_code,
                 "chat_history": request.chat_history or [],
+                "selected_node_ids": selected_node_ids,
                 "is_refinement": bool(request.existing_widget_code),
             },
         )
@@ -1724,6 +1781,112 @@ async def visualize_content_multiagent(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Visualization generation failed: {str(e)}"
         )
+
+
+@router.post("/{content_id}/visualize-multiagent-stream")
+async def visualize_content_multiagent_stream(
+    content_id: UUID,
+    request: VisualizeIterativeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Streaming-версия /visualize-multiagent (NDJSON прогресс + финальный результат)."""
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def _progress_callback(progress_payload: dict) -> None:
+        payload = progress_payload or {}
+        if payload.get("event") == "plan_update":
+            await queue.put(
+                {
+                    "type": "plan",
+                    "steps": payload.get("steps") or [],
+                    "completed_count": payload.get("completed_count") or 0,
+                    "source": payload.get("source"),
+                }
+            )
+            return
+        await queue.put({"type": "progress", **payload})
+
+    async def _run_pipeline() -> None:
+        try:
+            await queue.put({"type": "start"})
+            content_node = await ContentNodeService.get_content_node(db, content_id)
+            if not content_node:
+                await queue.put({"type": "error", "error": f"ContentNode {content_id} not found"})
+                return
+
+            board = await BoardService.get_board(db, content_node.board_id, current_user.id)
+            if not board:
+                await queue.put({"type": "error", "error": "Access denied to this board"})
+                return
+
+            content_data = content_node.content or {}
+            selected_node_ids = [str(content_id)]
+            if isinstance(request.selected_node_ids, list) and request.selected_node_ids:
+                selected_node_ids = [str(item).strip() for item in request.selected_node_ids if str(item).strip()]
+                if str(content_id) not in selected_node_ids:
+                    selected_node_ids.insert(0, str(content_id))
+            orchestrator = _get_orchestrator_or_503()
+            controller = WidgetController(orchestrator)
+
+            result = await controller.process_request(
+                user_message=request.user_prompt,
+                context={
+                    "board_id": str(content_node.board_id),
+                    "user_id": str(current_user.id),
+                    "content_node_id": str(content_id),
+                    "content_data": content_data,
+                    "content_node_metadata": content_node.node_metadata or {},
+                    "existing_widget_code": request.existing_widget_code,
+                    "chat_history": request.chat_history or [],
+                    "selected_node_ids": selected_node_ids,
+                    "is_refinement": bool(request.existing_widget_code),
+                    "_progress_callback": _progress_callback,
+                    "_enable_plan_progress": True,
+                },
+            )
+
+            if result.status != "success":
+                await queue.put({"type": "error", "error": result.error or "Visualization generation failed"})
+                return
+
+            response_payload = {
+                "html_code": result.code if result.code_language == "html" else "",
+                "css_code": "",
+                "js_code": "",
+                "widget_code": result.widget_code,
+                "widget_name": result.widget_name or "",
+                "widget_type": result.widget_type or "custom",
+                "description": result.code_description or "AI-generated visualization",
+                "status": "success",
+            }
+            await queue.put({"type": "result", "result": response_payload})
+        except HTTPException as e:
+            await queue.put({"type": "error", "error": str(e.detail)})
+        except Exception as e:
+            logger.error(f"MultiAgent visualization stream failed: {e}", exc_info=True)
+            await queue.put(
+                {
+                    "type": "error",
+                    "error": f"Visualization generation failed: {str(e)}",
+                }
+            )
+        finally:
+            await queue.put({"type": "done"})
+
+    async def _event_stream():
+        task = asyncio.create_task(_run_pipeline())
+        try:
+            while True:
+                item = await queue.get()
+                yield json.dumps(item, ensure_ascii=False, default=_ndjson_default) + "\n"
+                if item.get("type") == "done":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(_event_stream(), media_type="application/x-ndjson")
 
 
 @router.post("/{content_id}/transform-multiagent")
@@ -1776,6 +1939,7 @@ async def transform_content_multiagent(
             context={
                 "board_id": board_id,
                 "user_id": str(current_user.id),
+                "content_node_id": str(content_id),
                 "auth_token": auth_token,
                 "input_tables": [t for nd in nodes_data for t in nd.get("tables", [])],
                 "input_data": input_data,  # Full DataFrames for execution
@@ -1839,6 +2003,128 @@ async def transform_content_multiagent(
         )
 
 
+@router.post("/{content_id}/transform-multiagent-stream")
+async def transform_content_multiagent_stream(
+    content_id: UUID,
+    params: dict,
+    db: AsyncSession = Depends(get_db),
+    user_and_token: tuple[User, str] = Depends(get_current_user_with_token),
+):
+    """Streaming-версия /transform-multiagent (NDJSON прогресс + финальный результат)."""
+    current_user, auth_token = user_and_token
+
+    user_prompt = params.get("user_prompt")
+    if not user_prompt:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_prompt is required")
+
+    existing_code = params.get("existing_code")
+    chat_history = params.get("chat_history", [])
+    selected_node_ids = params.get("selected_node_ids", [str(content_id)])
+    if isinstance(selected_node_ids, str):
+        selected_node_ids = [selected_node_ids]
+
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def _progress_callback(progress_payload: dict) -> None:
+        payload = progress_payload or {}
+        if payload.get("event") == "plan_update":
+            await queue.put(
+                {
+                    "type": "plan",
+                    "steps": payload.get("steps") or [],
+                    "completed_count": payload.get("completed_count") or 0,
+                    "source": payload.get("source"),
+                }
+            )
+            return
+        await queue.put({"type": "progress", **payload})
+
+    async def _run_pipeline() -> None:
+        try:
+            await queue.put({"type": "start"})
+            nodes_data, input_data, text_content, board_id = await _collect_content_nodes_data(
+                db, content_id, selected_node_ids
+            )
+
+            orchestrator = _get_orchestrator_or_503()
+            controller = TransformationController(orchestrator)
+
+            result = await controller.process_request(
+                user_message=user_prompt,
+                context={
+                    "board_id": board_id,
+                    "user_id": str(current_user.id),
+                    "content_node_id": str(content_id),
+                    "auth_token": auth_token,
+                    "input_tables": [t for nd in nodes_data for t in nd.get("tables", [])],
+                    "input_data": input_data,
+                    "text_content": text_content,
+                    "existing_code": existing_code,
+                    "chat_history": chat_history,
+                    "selected_node_ids": selected_node_ids,
+                    "_progress_callback": _progress_callback,
+                    "_enable_plan_progress": True,
+                },
+            )
+
+            if result.status != "success":
+                await queue.put(
+                    {
+                        "type": "error",
+                        "error": result.error or "Transformation failed",
+                    }
+                )
+                return
+
+            if result.mode == "discussion":
+                response_payload = {
+                    "transformation_id": None,
+                    "code": None,
+                    "description": result.narrative,
+                    "content_type": result.narrative_format,
+                    "preview_data": None,
+                    "validation": {"is_valid": True, "errors": []},
+                    "agent_plan": result.plan,
+                    "mode": "discussion",
+                }
+            else:
+                response_payload = {
+                    "transformation_id": str(uuid.uuid4()),
+                    "code": result.code,
+                    "description": result.code_description,
+                    "preview_data": result.preview_data,
+                    "validation": result.validation or {"is_valid": True, "errors": []},
+                    "agent_plan": result.plan,
+                }
+            await queue.put({"type": "result", "result": response_payload})
+        except HTTPException as e:
+            await queue.put({"type": "error", "error": str(e.detail)})
+        except Exception as e:
+            logger.error(f"MultiAgent transformation stream failed: {e}", exc_info=True)
+            await queue.put(
+                {
+                    "type": "error",
+                    "error": f"Transformation generation failed: {str(e)}",
+                }
+            )
+        finally:
+            await queue.put({"type": "done"})
+
+    async def _event_stream():
+        task = asyncio.create_task(_run_pipeline())
+        try:
+            while True:
+                item = await queue.get()
+                yield json.dumps(item, ensure_ascii=False, default=_ndjson_default) + "\n"
+                if item.get("type") == "done":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(_event_stream(), media_type="application/x-ndjson")
+
+
 @router.post("/{content_id}/analyze-suggestions")
 async def analyze_widget_suggestions(
     content_id: UUID,
@@ -1873,6 +2159,7 @@ async def analyze_widget_suggestions(
             )
 
         content_data = content_node.content or {}
+        _cn_meta = content_node.node_metadata or {}
 
         # V2 controller
         orchestrator = _get_orchestrator_or_503()
@@ -1884,7 +2171,9 @@ async def analyze_widget_suggestions(
                 "board_id": str(content_node.board_id),
                 "user_id": str(current_user.id),
                 "content_node_id": str(content_id),
+                "selected_node_ids": [str(content_id)],
                 "content_data": content_data,
+                "content_node_metadata": _cn_meta,
                 "current_widget_code": request.current_widget_code,
                 "chat_history": request.chat_history or [],
                 "max_suggestions": request.max_suggestions or 6,
@@ -1994,6 +2283,8 @@ async def analyze_transform_suggestions(
                 "content_text": content_text, "is_text_only": True,
             })
 
+        _cn_meta = content_node.node_metadata or {}
+
         # V2 controller
         orchestrator = _get_orchestrator_or_503()
         controller = TransformSuggestionsController(orchestrator)
@@ -2003,6 +2294,9 @@ async def analyze_transform_suggestions(
             context={
                 "board_id": str(content_node.board_id),
                 "user_id": str(current_user.id),
+                "content_node_id": str(content_id),
+                "selected_node_ids": [str(content_id)],
+                "content_node_name": _cn_meta.get("name", "content_node"),
                 "input_schemas": input_schemas,
                 "existing_code": current_code,
                 "chat_history": chat_history,

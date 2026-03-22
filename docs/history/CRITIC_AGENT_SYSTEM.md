@@ -1,10 +1,10 @@
-> **⚠️ УСТАРЕВШЕЕ** — CriticAgent заменён на **ValidatorAgent** в V2. См. [`MULTI_AGENT_V2_CONCEPT.md`](./MULTI_AGENT_V2_CONCEPT.md).
+> **⚠️ УСТАРЕВШЕЕ (V1)** — роль «CriticAgent» в текущем коде **не используется**. Финальная валидация пайплайна оркестратора — **QualityGateAgent** (ключ плана `validator`, `quality_gate.py`); отдельно **ValidatorAgent** (`validator.py`) проверяет Python-код трансформаций. См. [`../MULTI_AGENT.md`](../MULTI_AGENT.md).
 
 # CriticAgent — Валидация результатов Multi-Agent системы
 
 **Дата создания**: Сессия 2026-02  
-**Статус**: ⛔ Устаревшее (V1). Заменено на ValidatorAgent.  
-**Связанные документы**: [MULTI_AGENT_V2_CONCEPT.md](./MULTI_AGENT_V2_CONCEPT.md), [ADAPTIVE_PLANNING.md](./ADAPTIVE_PLANNING.md)
+**Статус**: ⛔ Устаревшее (V1). Архив.  
+**Связанные документы**: [`../MULTI_AGENT.md`](../MULTI_AGENT.md), [`../ADAPTIVE_PLANNING.md`](../ADAPTIVE_PLANNING.md), [`README.md`](./README.md)
 
 ---
 

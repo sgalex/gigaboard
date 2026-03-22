@@ -20,6 +20,8 @@ from ..schemas.agent_payload import (
     Column,
     Narrative,
     PayloadContentTable,
+    ToolRequest,
+    AgentPayload,
 )
 from app.services.gigachat_service import GigaChatService
 
@@ -222,8 +224,12 @@ class StructurizerAgent(BaseAgent):
         self.llm_router = llm_router
         
     def _get_default_system_prompt(self) -> str:
-        return STRUCTURIZER_SYSTEM_PROMPT
-    
+        from app.services.multi_agent.tabular_tool_contract import (
+            TOOL_MODE_AGENT_SYSTEM_APPENDIX_RU,
+        )
+
+        return STRUCTURIZER_SYSTEM_PROMPT + "\n" + TOOL_MODE_AGENT_SYSTEM_APPENDIX_RU
+
     async def process_task(
         self,
         task: Dict[str, Any],
@@ -239,8 +245,58 @@ class StructurizerAgent(BaseAgent):
             
             # Получаем текст для парсинга
             raw_content = self._extract_raw_content(task, context)
+            tools_enabled = bool((context or {}).get("tools_enabled")) if context else False
+            force_tool_data_access = bool(
+                (context or {}).get("force_tool_data_access")
+            ) if context else False
+            tool_results = (context or {}).get("tool_results", []) if context else []
+            tool_request_cache_digest_lines: Optional[List[str]] = None
+            if context and isinstance(context.get("tool_request_cache_digest_lines"), list):
+                tool_request_cache_digest_lines = context["tool_request_cache_digest_lines"]
+            content_node_id = str((context or {}).get("content_node_id") or "").strip()
+            if not content_node_id and context and isinstance(context.get("selected_node_ids"), list):
+                node_ids = [
+                    str(item).strip()
+                    for item in context.get("selected_node_ids", [])
+                    if str(item).strip()
+                ]
+                if node_ids:
+                    content_node_id = node_ids[0]
+            node_ids_for_tools = []
+            if context and isinstance(context.get("selected_node_ids"), list):
+                for item in context.get("selected_node_ids", []):
+                    text = str(item).strip()
+                    if text and text not in node_ids_for_tools:
+                        node_ids_for_tools.append(text)
+            if context and isinstance(context.get("content_node_ids"), list):
+                for item in context.get("content_node_ids", []):
+                    text = str(item).strip()
+                    if text and text not in node_ids_for_tools:
+                        node_ids_for_tools.append(text)
+            if context and isinstance(context.get("contentNodeIds"), list):
+                for item in context.get("contentNodeIds", []):
+                    text = str(item).strip()
+                    if text and text not in node_ids_for_tools:
+                        node_ids_for_tools.append(text)
+            if content_node_id and content_node_id not in node_ids_for_tools:
+                node_ids_for_tools.insert(0, content_node_id)
             
             if not raw_content:
+                if tools_enabled and force_tool_data_access and not tool_results and node_ids_for_tools:
+                    return AgentPayload.partial(
+                        agent=self.agent_name,
+                        tool_requests=[
+                            ToolRequest(
+                                tool_name="readTableListFromContentNodes",
+                                arguments={"nodeIds": node_ids_for_tools},
+                                reason="force_tool_data_access: table context is removed from prompt",
+                            )
+                        ],
+                        narrative=Narrative(
+                            text="Запрашиваю таблицы через инструменты для структуризации."
+                        ),
+                        metadata={"tool_mode": "forced_bootstrap"},
+                    )
                 self.logger.warning("No raw content provided for structurization")
                 return self._success_payload(
                     narrative_text="No input content provided for structurization.",
@@ -251,7 +307,13 @@ class StructurizerAgent(BaseAgent):
             self.logger.info(f"🔍 Structurizing {content_length} characters of content")
             
             # Формируем промпт и вызываем LLM
-            user_prompt = self._build_prompt(description, raw_content)
+            user_prompt = self._build_prompt(
+                description,
+                raw_content,
+                tool_results=tool_results,
+                tools_enabled=tools_enabled,
+                tool_request_cache_digest_lines=tool_request_cache_digest_lines,
+            )
             messages = [
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -267,6 +329,16 @@ class StructurizerAgent(BaseAgent):
 
             # Парсим ответ LLM (старый dict формат)
             raw_result = self._parse_response(response)
+            tool_requests = self._extract_tool_requests(raw_result)
+            if tool_requests:
+                return AgentPayload.partial(
+                    agent=self.agent_name,
+                    tool_requests=tool_requests,
+                    narrative=Narrative(
+                        text="Для структуризации требуется догрузка данных таблиц."
+                    ),
+                    metadata={"tool_mode": "request"},
+                )
             raw_result = self._add_row_ids(raw_result)
             
             # V2: Конвертируем в PayloadContentTable + entities/kv в таблицы
@@ -317,28 +389,36 @@ class StructurizerAgent(BaseAgent):
         if context:
             agent_results = context.get("agent_results", [])
             content_parts: List[str] = []
-            
+            _max_per_source = 4500
             for result in agent_results:
                 if not isinstance(result, dict):
                     continue
-                
+
                 # V2: sources[] с fetched=True и content
                 sources = result.get("sources", [])
                 if isinstance(sources, list):
                     for s in sources:
                         if isinstance(s, dict) and s.get("fetched") and s.get("content"):
                             url = s.get("url", "unknown")
-                            content_parts.append(f"=== Source: {url} ===\n{s['content']}")
-                
+                            block = s["content"]
+                            if len(block) > _max_per_source:
+                                block = block[:_max_per_source] + "\n\n... (truncated per source)"
+                            content_parts.append(f"=== Source: {url} ===\n{block}")
+
                 # V1 fallback: pages[]
                 pages = result.get("pages", [])
                 if isinstance(pages, list):
                     for p in pages:
                         if isinstance(p, dict) and p.get("content"):
-                            content_parts.append(f"=== Source: {p.get('url', 'unknown')} ===\n{p['content']}")
-            
+                            content_parts.append(
+                                f"=== Source: {p.get('url', 'unknown')} ===\n{p['content']}"
+                            )
+
             if content_parts:
-                return "\n\n".join(content_parts)
+                joined = "\n\n".join(content_parts)
+                if len(joined) > 14000:
+                    joined = joined[:14000] + "\n\n... (truncated total)"
+                return joined
         
         # 4. data поле в task
         if task.get("data"):
@@ -373,7 +453,7 @@ class StructurizerAgent(BaseAgent):
         Уменьшает риск срабатывания blacklist/moderation GigaChat:
         ограничение длины, замена длинных URL на плейсхолдер.
         """
-        max_content_length = 10000
+        max_content_length = 8000
         if len(content) > max_content_length:
             content = content[:max_content_length] + "\n\n... (truncated)"
         # Замена URL на плейсхолдер — часто триггерит модерацию
@@ -385,10 +465,18 @@ class StructurizerAgent(BaseAgent):
         )
         return content
 
-    def _build_prompt(self, description: str, content: str) -> str:
+    def _build_prompt(
+        self,
+        description: str,
+        content: str,
+        *,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        tools_enabled: bool = False,
+        tool_request_cache_digest_lines: Optional[List[str]] = None,
+    ) -> str:
         """Формирует промпт для LLM."""
         content = self._sanitize_content_for_llm(content)
-        return f"""**TASK**: {description}
+        prompt = f"""**TASK**: {description}
 
 **RAW CONTENT TO STRUCTURE**:
 {content}
@@ -402,6 +490,81 @@ class StructurizerAgent(BaseAgent):
 6. Return ONLY valid JSON with the required structure
 
 Remember: Your job is ONLY to extract structure, not to analyze or make recommendations."""
+        digest_lines = tool_request_cache_digest_lines or []
+        if digest_lines:
+            prompt += (
+                "\n\nУЖЕ ВЫПОЛНЕННЫЕ ЗАПРОСЫ К ДАННЫМ (не дублируй идентичные tool_requests; "
+                "данные уже получены — см. TOOL RESULTS ниже):\n"
+            )
+            for line in digest_lines[-25:]:
+                prompt += f"  • {line}\n"
+        if tool_results:
+            rendered = []
+            for item in tool_results[-4:]:
+                if not isinstance(item, dict):
+                    continue
+                tname = item.get("tool_name", "tool")
+                if item.get("success"):
+                    rendered.append(
+                        f"- {tname}: {json.dumps(item.get('data', {}), ensure_ascii=False)[:2200]}"
+                    )
+                else:
+                    rendered.append(f"- {tname}: ERROR={item.get('error', 'unknown')}")
+            if rendered:
+                prompt += "\n\nTOOL RESULTS (latest):\n" + "\n".join(rendered) + "\n"
+        if tools_enabled:
+            prompt += (
+                "\nTOOL MODE ENABLED.\n"
+                "Доступ к данным: readTableListFromContentNodes (в ответе есть table_id для каждой таблицы); "
+                "для строк таблицы — readTableData с jsonDecl.table_id. Если задача требует значений из строк, "
+                "вызови readTableData.\n"
+                "Если данных недостаточно, верни JSON:\n"
+                "{\n"
+                '  "tool_requests": [\n'
+                "    {\n"
+                '      "tool_name": "readTableListFromContentNodes",\n'
+                '      "arguments": {"nodeIds": ["<uuid1>", "<uuid2>"]},\n'
+                '      "reason": "optional"\n'
+                "    },\n"
+                "    {\n"
+                '      "tool_name": "readTableData",\n'
+                '      "arguments": {"jsonDecl": {"contentNodeId":"<uuid>","table_id":"<id_or_name>","offset":0,"limit":50}},\n'
+                '      "reason": "optional"\n'
+                "    }\n"
+                "  ]\n"
+                "}\n"
+                "Иначе верни обычный JSON со structured tables."
+            )
+        return prompt
+
+    @staticmethod
+    def _extract_tool_requests(raw: Any) -> List[ToolRequest]:
+        if not isinstance(raw, dict):
+            return []
+        items = raw.get("tool_requests")
+        if not isinstance(items, list):
+            return []
+        out: List[ToolRequest] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool_name") or item.get("name") or "").strip()
+            if not tool_name:
+                continue
+            args = item.get("arguments") or item.get("args") or {}
+            if not isinstance(args, dict):
+                args = {}
+            try:
+                out.append(
+                    ToolRequest(
+                        tool_name=tool_name,
+                        arguments=args,
+                        reason=item.get("reason"),
+                    )
+                )
+            except Exception:
+                continue
+        return out
     
     def _parse_response(self, response: str) -> Dict[str, Any]:
         """Парсит ответ LLM. Несколько попыток: markdown → извлечение по скобкам → repair."""

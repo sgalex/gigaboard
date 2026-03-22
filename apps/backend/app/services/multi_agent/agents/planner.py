@@ -41,7 +41,9 @@ PLANNER_SYSTEM_PROMPT = '''
 
 ✅ ВЫ ДОЛЖНЫ:
 - Создавать ТОЛЬКО структуру плана: steps с agent и task
-- Описывать задачи для агентов в текстовом виде (description)
+- В каждом task указывать:
+  • **description** — полное техническое задание для агента (контекст, критерии, ограничения)
+  • **summary** — короткая строка для UI прогресса (до ~120 символов, одна строка; например «Поиск в сети», «Анализ продаж»)
 - Делегировать генерацию данных специализированным агентам
 - Указывать зависимости между шагами (depends_on)
 
@@ -52,7 +54,8 @@ PLANNER_SYSTEM_PROMPT = '''
       "step_id": "1",
       "agent": "analyst",
       "task": {
-        "description": "Проанализируй данные и предложи 10 вариантов трансформаций"
+        "description": "Проанализируй данные и предложи 10 вариантов трансформаций",
+        "summary": "Анализ данных и идеи трансформаций"
       }
     },
     {
@@ -60,6 +63,7 @@ PLANNER_SYSTEM_PROMPT = '''
       "agent": "reporter",
       "task": {
         "description": "Сформируй текстовый ответ с рекомендациями",
+        "summary": "Итоговый отчёт",
         "widget_type": "text"
       },
       "depends_on": ["1"]
@@ -145,6 +149,15 @@ PLANNER_SYSTEM_PROMPT = '''
 **ДОСТУПНЫЕ АГЕНТЫ И ИХ ТИПЫ ЗАДАЧ**:
 
 **ДОСТУПНЫЕ АГЕНТЫ**:
+
+КРИТИЧЕСКОЕ ПРАВИЛО ИМЕНОВАНИЯ АГЕНТОВ:
+- В поле `steps[].agent` используй ТОЛЬКО эти точные ключи:
+  `context_filter`, `discovery`, `research`, `structurizer`, `analyst`,
+  `transform_codex`, `widget_codex`, `reporter`, `validator`.
+- НЕЛЬЗЯ использовать синонимы или вариации имён агентов:
+  `researcher`, `analyzer`, `writer`, `critic`, `validator_agent`, `planner_agent` и т.п.
+- Если сомневаешься — выбирай ближайший допустимый ключ из списка выше.
+- План с агентом вне списка считается невалидным.
 
 - **context_filter**: LLM-шаг построения и применения кросс-фильтра к контексту
   - Когда использовать: перед analyst, если запрос содержит конкретную сущность/срез
@@ -319,13 +332,15 @@ PLANNER_SYSTEM_PROMPT = '''
     {
       "agent": "analyst",
       "task": {
-        "description": "Analyze dataset structure and identify business analysis opportunities"
+        "description": "Analyze dataset structure and identify business analysis opportunities",
+        "summary": "Анализ структуры данных"
       }
     },
     {
       "agent": "reporter",
       "task": {
         "description": "Create text report with analysis recommendations",
+        "summary": "Текстовый отчёт",
         "widget_type": "text"
       },
       "depends_on": ["1"]
@@ -385,6 +400,7 @@ Always respond with structured plan in JSON format:
       "agent": "discovery",
       "task": {
         "description": "Find information about top Rust web frameworks",
+        "summary": "Поиск источников (Rust web)",
         "query": "top rust web frameworks github stars 2025"
       },
       "depends_on": [],
@@ -395,6 +411,7 @@ Always respond with structured plan in JSON format:
       "agent": "research",
       "task": {
         "description": "Fetch full content from search results",
+        "summary": "Загрузка страниц",
         "max_urls": 5
       },
       "depends_on": ["1"],
@@ -404,7 +421,8 @@ Always respond with structured plan in JSON format:
       "step_id": "3",
       "agent": "structurizer",
       "task": {
-        "description": "Extract structured comparison table of Rust frameworks with columns: name, github_stars, category, description"
+        "description": "Extract structured comparison table of Rust frameworks with columns: name, github_stars, category, description",
+        "summary": "Извлечение таблицы"
       },
       "depends_on": ["2"],
       "estimated_time": "5s"
@@ -413,7 +431,8 @@ Always respond with structured plan in JSON format:
       "step_id": "4",
       "agent": "analyst",
       "task": {
-        "description": "Analyze Rust frameworks comparison data, identify trends and top picks"
+        "description": "Analyze Rust frameworks comparison data, identify trends and top picks",
+        "summary": "Анализ данных"
       },
       "depends_on": ["3"],
       "estimated_time": "5s"
@@ -423,6 +442,7 @@ Always respond with structured plan in JSON format:
       "agent": "reporter",
       "task": {
         "description": "Create final report with Rust frameworks comparison",
+        "summary": "Финальный отчёт",
         "widget_type": "text"
       },
       "depends_on": ["4"],
@@ -433,6 +453,8 @@ Always respond with structured plan in JSON format:
 }
 
 **ПАРАМЕТРЫ ЗАДАЧ ДЛЯ КАЖДОГО АГЕНТА**:
+
+Общее для **каждого** шага: в `task` всегда указывай `description` (полное ТЗ) и `summary` (коротко для UI).
 
 **discovery**:
 - `query` (обязательно): поисковый запрос
@@ -452,6 +474,7 @@ Always respond with structured plan in JSON format:
 
 **analyst**:
 - `description` (обязательно): что нужно проанализировать
+- `summary` (обязательно): короткий заголовок для прогресса UI
 - Опционально указывай ожидаемую структуру: "columns: name, price, rating"
 - Для расчётов: описывай формулу или логику
 
@@ -657,6 +680,7 @@ class PlannerAgent(BaseAgent):
             plan = self._sanitize_suggestions_plan(plan, context, user_request)
             plan = self._ensure_widget_codex_in_plan(plan, context, user_request)
             plan = self._ensure_transform_codex_in_plan(plan, context, user_request)
+            plan = self._constrain_transformation_plan_to_local_data(plan, context, user_request)
             plan = self._inject_context_filter_step(plan, context, user_request)
             if plan.get("steps"):
                 self.logger.info(
@@ -715,6 +739,18 @@ ORIGINAL PLAN:
 
 FAILED STEP: {failed_step}
 REASON: {reason}
+"""
+            if context and isinstance(context.get("pipeline_memory"), dict):
+                pm = context.get("pipeline_memory") or {}
+                replan_prompt += f"""
+PIPELINE MEMORY (prioritize over long raw history):
+{json.dumps({
+    "goal": pm.get("goal"),
+    "constraints": (pm.get("constraints") or [])[:6],
+    "decisions": (pm.get("decisions") or [])[:6],
+    "open_questions": (pm.get("open_questions") or [])[:6],
+    "evidence": (pm.get("evidence") or [])[:6],
+}, ensure_ascii=False, indent=2)}
 """
 
             # FIX: передаём INPUT DATA SCHEMA в replan-промпт, чтобы LLM знал
@@ -787,6 +823,8 @@ Consider the ACCUMULATED AGENT RESULTS when deciding — agents may have already
 gathered data, extracted tables, or produced code that should be preserved or built upon.
 
 Return updated plan in the same JSON format.
+Use only valid agent keys:
+["context_filter","discovery","research","structurizer","analyst","transform_codex","widget_codex","reporter","validator"].
 """
             
             messages = [
@@ -875,10 +913,11 @@ Return updated plan in the same JSON format.
 
             def _parse(response: Any) -> Dict[str, Any]:
                 text = response if isinstance(response, str) else str(response)
-                json_match = re.search(r"\{[\s\S]*\}", text)
-                if not json_match:
-                    raise ValueError("No JSON object in response")
-                data = json.loads(json_match.group())
+                json_text = self._extract_json_object_text(text)
+                try:
+                    data = json.loads(json_text)
+                except json.JSONDecodeError:
+                    data = json.loads(self._repair_json(json_text))
                 if "atomic" not in data:
                     raise ValueError("Response must contain 'atomic'")
                 if data.get("atomic") is False and "sub_steps" in data:
@@ -932,6 +971,18 @@ Return updated plan in the same JSON format.
 
 РЕЗУЛЬТАТЫ ВЫПОЛНЕННЫХ ШАГОВ (контекст):
 {json.dumps(results_summary, ensure_ascii=False, indent=2)[:4000]}
+"""
+            if context and isinstance(context.get("pipeline_memory"), dict):
+                pm = context.get("pipeline_memory") or {}
+                prompt += f"""
+PIPELINE MEMORY (high-priority context):
+{json.dumps({
+    "goal": pm.get("goal"),
+    "constraints": (pm.get("constraints") or [])[:6],
+    "decisions": (pm.get("decisions") or [])[:6],
+    "open_questions": (pm.get("open_questions") or [])[:6],
+    "evidence": (pm.get("evidence") or [])[:6],
+}, ensure_ascii=False, indent=2)}
 """
             if last_error or failed_agent:
                 prompt += f"""
@@ -1004,10 +1055,11 @@ Return updated plan in the same JSON format.
 
             def _parse(response: Any) -> Dict[str, Any]:
                 text = response if isinstance(response, str) else str(response)
-                json_match = re.search(r"\{[\s\S]*\}", text)
-                if not json_match:
-                    raise ValueError("No JSON object in response")
-                data = json.loads(json_match.group())
+                json_text = self._extract_json_object_text(text)
+                try:
+                    data = json.loads(json_text)
+                except json.JSONDecodeError:
+                    data = json.loads(self._repair_json(json_text))
                 if "remaining_steps" not in data:
                     raise ValueError("Response must contain 'remaining_steps'")
                 steps = data["remaining_steps"]
@@ -1201,12 +1253,36 @@ Return updated plan in the same JSON format.
             "НЕ вставляй в JSON списки таблиц, требования к коду и весь USER REQUEST — это ломает JSON.",
             "",
         ]
+        from app.services.multi_agent.tabular_tool_contract import (
+            planner_task_summary_hint_block,
+            planner_tools_hint_block,
+        )
+
+        prompt_parts.append(planner_task_summary_hint_block())
+
+        if context and isinstance(context.get("pipeline_memory"), dict):
+            pm = context.get("pipeline_memory") or {}
+            compact_pm = {
+                "goal": pm.get("goal"),
+                "constraints": (pm.get("constraints") or [])[:6],
+                "decisions": (pm.get("decisions") or [])[:6],
+                "open_questions": (pm.get("open_questions") or [])[:6],
+                "evidence": (pm.get("evidence") or [])[:6],
+            }
+            prompt_parts.append("PIPELINE MEMORY:")
+            prompt_parts.append(json.dumps(compact_pm, ensure_ascii=False, default=str))
+            prompt_parts.append("")
         
         if board_id:
             prompt_parts.append(f"BOARD ID: {board_id}")
         
         if selected_node_ids:
             prompt_parts.append(f"SELECTED NODES: {', '.join(selected_node_ids)}")
+        if context and isinstance(context.get("transformation_scope"), dict):
+            prompt_parts.append("\nTRANSFORMATION SCOPE:")
+            prompt_parts.append(
+                json.dumps(context.get("transformation_scope"), ensure_ascii=False)
+            )
         
         # Существующий код трансформации (если редактируются существующие данные)
         if context and context.get("existing_code"):
@@ -1316,12 +1392,17 @@ Return updated plan in the same JSON format.
                 [
                     "",
                     "CONTROLLER: TransformController — пользователь ждёт **готовый Python/pandas-код трансформации**.",
+                    "Источник данных по умолчанию: существующие таблицы выбранных ContentNode (локальные данные доски).",
                     "Обязательно:",
                     "- При необходимости шаги **structurizer** / **analyst** (данные уже в INPUT DATA SCHEMA —",
                     "  structurizer только если нужно доформатировать; часто достаточно analyst + transform_codex).",
                     "- После подготовки данных ОБЯЗАТЕЛЬНО шаг **transform_codex** — единственный агент, который",
                     "  генерирует исполняемый код трансформации (df → df_result).",
                     "- Завершающий шаг **reporter** (widget_type: text) — краткое описание результата.",
+                    "",
+                    "По умолчанию НЕ добавляй discovery/research: это веб-пайплайн, он не нужен для трансформации",
+                    "локальных таблиц ContentNode.",
+                    "Добавляй discovery/research только если пользователь ЯВНО просит внешние/интернет-данные.",
                     "",
                     "ЗАПРЕЩЕНО заканчивать план только analyst/structurizer без transform_codex — иначе кода не будет.",
                     "НЕ используй widget_codex для трансформаций данных.",
@@ -1337,7 +1418,12 @@ Return updated plan in the same JSON format.
                     "Think step-by-step about what needs to be done and which agent is best suited for each task.",
                 ]
             )
-        
+
+        if context:
+            hint = planner_tools_hint_block(context)
+            if hint:
+                prompt_parts.append(hint)
+
         return "\n".join(prompt_parts)
 
     @staticmethod
@@ -1385,19 +1471,8 @@ Return updated plan in the same JSON format.
             self.logger.error("❌ Empty content after extraction")
             raise ValueError("Empty response from GigaChat")
         
-        # Удаляем markdown code blocks если есть
-        if content.startswith("```json"):
-            content = content[7:]
-            self.logger.info("🔧 Removed ```json prefix")
-        elif content.startswith("```"):
-            content = content[3:]
-            self.logger.info("🔧 Removed ``` prefix")
-        
-        if content.endswith("```"):
-            content = content[:-3]
-            self.logger.info("🔧 Removed ``` suffix")
-        
-        content = content.strip()
+        # Нормализуем ответ до JSON-объекта (с учётом markdown/code-fence).
+        content = self._extract_json_object_text(content)
         
         # Remove Python-style comments from JSON (GigaChat sometimes adds them)
         lines = content.split('\n')
@@ -1447,6 +1522,64 @@ Return updated plan in the same JSON format.
                 self.logger.error(f"❌ JSON decode error after repair: {e2}")
                 self.logger.error(f"📋 Repaired content: {repaired}")
                 raise
+
+    @staticmethod
+    def _extract_json_object_text(text: str) -> str:
+        """
+        Извлекает первую валидную JSON-область-объект из произвольного текста LLM.
+
+        Поддерживает:
+        - markdown code fences ```json ... ```
+        - префиксы/суффиксы вокруг JSON
+        - поиск парных фигурных скобок с учётом строк/экранирования
+        """
+        content = (text or "").strip()
+        if not content:
+            raise ValueError("Empty response from GigaChat")
+
+        # 1) Приоритет: JSON внутри code fence (```json ...``` / ``` ... ```)
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", content, flags=re.IGNORECASE)
+        if fence_match:
+            fenced = fence_match.group(1).strip()
+            if fenced:
+                content = fenced
+
+        # 2) Найти первую область {...} с балансом скобок
+        start = content.find("{")
+        if start < 0:
+            raise ValueError("No JSON object in response")
+
+        depth = 0
+        in_string = False
+        escape_next = False
+        end = -1
+
+        for i in range(start, len(content)):
+            ch = content[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\" and in_string:
+                escape_next = True
+                continue
+            if ch == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+
+        if end < 0:
+            # Возвращаем до конца строки; дальше _repair_json попробует восстановить.
+            return content[start:].strip()
+
+        return content[start : end + 1].strip()
     
     def _repair_json(self, content: str) -> str:
         """
@@ -1624,6 +1757,12 @@ Return updated plan in the same JSON format.
                 raise ValueError(f"Step {i} missing 'agent' field")
             if "task" not in step:
                 raise ValueError(f"Step {i} missing 'task' field")
+            agent_name = str(step.get("agent") or "").strip().lower()
+            if agent_name == "planner":
+                raise ValueError(
+                    "Planner cannot be an execution step in plan; "
+                    "use Planner only for create_plan/replan/expand/revise control flow"
+                )
 
     def _build_transformation_fallback_plan(self, user_request: str) -> Dict[str, Any]:
         """
@@ -1643,6 +1782,7 @@ Return updated plan in the same JSON format.
                             "Проверь схему входных таблиц и релевантность колонок запросу; "
                             "кратко зафиксируй findings (без генерации Python-кода)."
                         ),
+                        "summary": "Проверка схемы данных",
                     },
                     "depends_on": [],
                 },
@@ -1650,6 +1790,7 @@ Return updated plan in the same JSON format.
                     "agent": "transform_codex",
                     "task": {
                         "description": codex_desc,
+                        "summary": "Генерация кода трансформации",
                         "purpose": "transformation",
                     },
                     "depends_on": ["1"],
@@ -1658,6 +1799,7 @@ Return updated plan in the same JSON format.
                     "agent": "reporter",
                     "task": {
                         "description": "Кратко опиши результат трансформации для пользователя.",
+                        "summary": "Итоговое описание",
                         "widget_type": "text",
                     },
                     "depends_on": ["2"],
@@ -1700,13 +1842,17 @@ Return updated plan in the same JSON format.
             filtered = [
                 {
                     "agent": "analyst",
-                    "task": {"description": desc},
+                    "task": {
+                        "description": desc,
+                        "summary": "Анализ и рекомендации",
+                    },
                     "depends_on": [],
                 },
                 {
                     "agent": "reporter",
                     "task": {
                         "description": "Сформулируй краткие рекомендации для UI.",
+                        "summary": "Текст для UI",
                         "widget_type": "text",
                     },
                     "depends_on": [],
@@ -1761,7 +1907,10 @@ Return updated plan in the same JSON format.
         steps.append(
             {
                 "agent": "widget_codex",
-                "task": {"description": codex_task},
+                "task": {
+                    "description": codex_task,
+                    "summary": "Генерация HTML/JS виджета",
+                },
                 "depends_on": [last_dep],
             }
         )
@@ -1770,6 +1919,7 @@ Return updated plan in the same JSON format.
                 "agent": "reporter",
                 "task": {
                     "description": "Кратко опиши итог виджета для пользователя.",
+                    "summary": "Описание виджета",
                     "widget_type": "text",
                 },
                 "depends_on": [],
@@ -1999,8 +2149,92 @@ Return updated plan in the same JSON format.
             if chosen and step.get("step_id") != chosen:
                 step["depends_on"] = [chosen]
 
+        for step in normalized_steps:
+            t = step.get("task")
+            if isinstance(t, dict):
+                PlannerAgent._ensure_task_summary_field(t, step.get("agent"))
+
         plan["steps"] = normalized_steps
         return plan
+
+    @staticmethod
+    def _ensure_task_summary_field(task: Dict[str, Any], agent: Any) -> None:
+        """Краткий summary для UI прогресса; при отсутствии — из первой строки description."""
+        s = str(task.get("summary") or "").strip()
+        if s:
+            task["summary"] = s[:160]
+            return
+        desc = str(task.get("description") or "").strip()
+        if desc:
+            line = desc.split("\n")[0].strip()
+            if len(line) > 120:
+                line = line[:117] + "..."
+            task["summary"] = line
+        else:
+            ag = str(agent or "шаг").strip() or "шаг"
+            task["summary"] = ag[:80]
+
+    def _constrain_transformation_plan_to_local_data(
+        self,
+        plan: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+        user_request: str,
+    ) -> Dict[str, Any]:
+        """
+        In transformation mode, keep planning local to ContentNode tables by default.
+        Allow discovery/research only when user explicitly asks for external/web data.
+        """
+        if not context:
+            return plan
+        if context.get("controller") != "transformation" and context.get("mode") != "transformation":
+            return plan
+
+        raw_request = (
+            (context or {}).get("controller_user_request")
+            or user_request
+            or ""
+        )
+        request_lower = str(raw_request).lower()
+        explicit_external = any(
+            marker in request_lower
+            for marker in (
+                "интернет",
+                "веб",
+                "web",
+                "online",
+                "онлайн",
+                "http://",
+                "https://",
+                "внешн",
+                "external",
+                "api",
+                "url",
+                "research",
+                "discovery",
+            )
+        )
+        if explicit_external:
+            return plan
+
+        steps_in = plan.get("steps") or []
+        if not isinstance(steps_in, list):
+            return plan
+        filtered: List[Dict[str, Any]] = []
+        removed = 0
+        for raw_step in steps_in:
+            step = dict(raw_step) if isinstance(raw_step, dict) else {}
+            if step.get("agent") in {"discovery", "research"}:
+                removed += 1
+                continue
+            filtered.append(step)
+        if removed:
+            self.logger.info(
+                "Removed %s web-step(s) from transformation plan (local ContentNode mode)",
+                removed,
+            )
+        out = dict(plan)
+        out["steps"] = filtered
+        return self._normalize_plan_steps(out)
 
     def _inject_context_filter_step(
         self,

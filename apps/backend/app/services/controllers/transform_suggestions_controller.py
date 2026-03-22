@@ -75,6 +75,58 @@ class TransformSuggestionsController(BaseController):
 
     controller_name = "transform_suggestions"
 
+    @staticmethod
+    def _content_nodes_data_from_input_schemas(
+        *,
+        content_node_id: str,
+        node_name: str,
+        input_schemas: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Таблицы и текст для content_nodes_data (как у TransformationController)."""
+        tables: List[Dict[str, Any]] = []
+        text_chunks: List[str] = []
+        for schema in input_schemas:
+            if schema.get("is_text_only"):
+                ct = (schema.get("content_text") or "").strip()
+                if ct:
+                    text_chunks.append(ct)
+                continue
+            name = schema.get("name", "df")
+            cols_raw = schema.get("columns", [])
+            col_objs: List[Dict[str, Any]] = []
+            for c in cols_raw:
+                if isinstance(c, dict):
+                    col_objs.append(
+                        {
+                            "name": c.get("name", "?"),
+                            "type": c.get("type"),
+                        }
+                    )
+                else:
+                    col_objs.append({"name": str(c), "type": None})
+            rows = schema.get("sample_rows", [])
+            rc = schema.get("row_count", len(rows))
+            tables.append(
+                {
+                    "name": name,
+                    "columns": col_objs,
+                    "rows": rows,
+                    "row_count": int(rc) if isinstance(rc, (int, float)) else len(rows),
+                }
+            )
+        merged_text = "\n\n".join(text_chunks)
+        if not merged_text and input_schemas:
+            merged_text = (input_schemas[0].get("content_text") or "") or ""
+        return [
+            {
+                "id": content_node_id,
+                "node_id": content_node_id,
+                "name": node_name,
+                "tables": tables,
+                "text": merged_text,
+            }
+        ]
+
     async def process_request(
         self,
         user_message: str,
@@ -133,15 +185,49 @@ class TransformSuggestionsController(BaseController):
                 "sample_rows": sample_rows[:20],
             }
 
+        primary_content_node_id = str(ctx.get("content_node_id") or "").strip()
+        selected_ids = [
+            str(item).strip()
+            for item in (ctx.get("selected_node_ids", []) or [])
+            if str(item).strip()
+        ]
+        if primary_content_node_id and primary_content_node_id not in selected_ids:
+            selected_ids.insert(0, primary_content_node_id)
+        if not primary_content_node_id and selected_ids:
+            primary_content_node_id = selected_ids[0]
+
         orchestrator_context: Dict[str, Any] = {
             "controller": self.controller_name,
             "mode": f"transform_suggestions_{mode}",
-            # Изменение #4: input_schemas убран, агенты читают input_data_preview
             "input_data_preview": input_data_preview,
             "existing_code": existing_code,
             "chat_history": chat_history,
             "max_suggestions": max_suggestions,
+            "keep_tabular_context_in_prompt": True,
         }
+        if primary_content_node_id:
+            orchestrator_context["content_node_id"] = primary_content_node_id
+            orchestrator_context["transformation_scope"] = {
+                "primary_content_node_id": primary_content_node_id,
+                "selected_node_ids": selected_ids or [primary_content_node_id],
+                "local_content_only": True,
+                "prefer_tools_for_tables": True,
+                "disallow_external_sources_unless_explicit": True,
+            }
+        if selected_ids:
+            orchestrator_context["selected_node_ids"] = selected_ids
+            orchestrator_context["content_node_ids"] = selected_ids
+            orchestrator_context["contentNodeIds"] = selected_ids
+        if primary_content_node_id and input_schemas:
+            orchestrator_context["content_nodes_data"] = (
+                TransformSuggestionsController._content_nodes_data_from_input_schemas(
+                    content_node_id=primary_content_node_id,
+                    node_name=str(ctx.get("content_node_name") or "content_node"),
+                    input_schemas=input_schemas,
+                )
+            )
+        if isinstance(ctx.get("content_nodes_data"), list) and ctx.get("content_nodes_data"):
+            orchestrator_context["content_nodes_data"] = ctx.get("content_nodes_data")
 
         # Вызвать Orchestrator
         try:

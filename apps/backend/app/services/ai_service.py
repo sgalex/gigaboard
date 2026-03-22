@@ -126,7 +126,8 @@ class AIService:
             n for n in all_nodes
             if isinstance(n, ContentNode) and not isinstance(n, SourceNode)
         ]
-        # Для AI-контекста источники и content-ноды обрабатываются одинаково как data-bearing nodes.
+        # SourceNode наследует ContentNode — в табличный payload попадают и источники, и ноды аналитики.
+        # Приоритет ответа (ContentNode vs первоисточник) задаётся в промпте AIAssistantController.
         data_nodes = [
             n for n in all_nodes
             if isinstance(n, ContentNode)

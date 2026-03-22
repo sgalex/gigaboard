@@ -2,12 +2,12 @@
 
 ## 🎯 Executive Summary
 
-**GigaBoard** — AI-powered платформа для создания data pipelines с концепцией **Data-Centric Canvas**. Ключевая особенность: явное разделение источников данных (SourceNode) и результатов обработки (ContentNode), что обеспечивает прозрачность data lineage, поддержку streaming данных и автоматическое обновление визуализаций.
+**GigaBoard** — клиент-серверное **рабочее приложение** для **аналитики и обработки данных с помощью ИИ**: на **Data-Centric Canvas** задан **граф пайплайна** (источники → трансформации → виджеты и выводы), а **LLM и мультиагентная оркестрация** выполняют пользовательские запросы, генерируют код и ведут диалог в контексте доски; дополнительно — **дашборды**, **фильтрация** по измерениям, **real-time** коллаборация. Ключевая модель данных: явное разделение **SourceNode** и **ContentNode**, что даёт **lineage**, streaming и **replay** при пересчёте.
 
 ### Ключевые архитектурные решения
 - **4 типа узлов**: SourceNode (источники) → ContentNode (данные) → WidgetNode (визуализации) + CommentNode (аннотации)
 - **5 типов связей**: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
-- **Multi-Agent система**: 9 специализированных AI агентов для автоматизации аналитики
+- **Multi-Agent система**: единый Orchestrator, **9 ролей в плане** (planner … reporter) плюс служебные шаги (`context_filter` и др.); финальная проверка качества — **QualityGateAgent** под ключом плана `validator` (см. [`MULTI_AGENT.md`](MULTI_AGENT.md))
 - **Real-time first**: Socket.IO + Redis pub/sub для мгновенной синхронизации
 - **Streaming support**: WebSocket/SSE источники с аккумуляцией и архивированием
 
@@ -15,9 +15,11 @@
 
 ## Общий обзор
 
-GigaBoard — AI-powered платформа для создания и автоматизации data pipelines с клиент-серверной архитектурой и real-time взаимодействием.
+GigaBoard — клиент-серверное **приложение-инструмент**: визуальный канвас, REST и Socket.IO связывают пользователя, **граф пайплайна** и слой **ИИ** (ассистент, оркестратор агентов, контроллеры сценариев).
 
-### Ключевая концепция: Data-Centric Canvas
+### Ключевая концепция: манипуляция данными через ИИ на Data-Centric Canvas
+
+Пользователь управляет данными **через ИИ-инструменты** (ассистент, генерация кода трансформаций и виджетов, исследовательские сценарии и т.д.) и через явный граф на доске. **Data-Centric Canvas** — это полотно, на котором **закреплены** результаты: узлы и рёбра показывают, **что** произошло с данными и **в каком порядке**.
 
 UI представляет бесконечное полотно (React Flow), где на канвасе размещаются **узлы четырёх типов**:
 
@@ -100,12 +102,12 @@ flowchart TB
     subgraph Orchestrator["Orchestrator (Single Path)"]
         O["process_request()"]
         P["PlannerAgent → Plan"]
-        E["Execute Steps (zero-mapping)"]
-        V["ValidatorAgent → Validate"]
+        E["Execute Steps"]
+        V["QualityGateAgent\n(plan key: validator)"]
         O --> P --> E --> V
     end
 
-    subgraph Agents["9 Core Agents"]
+    subgraph Agents["Core (реестр оркестратора)"]
         A1["PlannerAgent"]
         A2["StructurizerAgent"]
         A3["AnalystAgent"]
@@ -114,7 +116,8 @@ flowchart TB
         A5["ReporterAgent"]
         A6["DiscoveryAgent"]
         A7["ResearchAgent"]
-        A8["ValidatorAgent"]
+        A8["ContextFilterAgent"]
+        A9["QualityGateAgent\n(→ ключ validator)"]
     end
 
     R1 --> C1 & C2
@@ -122,7 +125,7 @@ flowchart TB
     R3 --> C6
     R4 --> C6
     C1 & C2 & C3 & C4 & C5 & C6 --> O
-    E --> A1 & A2 & A3 & A4 & A4b & A5 & A6 & A7 & A8
+    E --> A1 & A2 & A3 & A4 & A4b & A5 & A6 & A7 & A8 & A9
 ```
 
 #### Ключевые компоненты
@@ -141,21 +144,22 @@ flowchart TB
 1. PlannerAgent создаёт план (список шагов с агентами)
 2. Последовательное выполнение шагов: каждый агент получает `pipeline_context` (мутабельный dict) и `agent_results` (хронологический list всех предыдущих AgentPayload)
 3. `execution_context` — отдельный канал для тяжёлых данных (DataFrame), не попадающих в промпты
-4. ValidatorAgent проверяет результат
+4. **QualityGateAgent** (в реестре и плане под ключом `validator`) проверяет итог пайплайна; отдельный **`ValidatorAgent`** (`validator.py`) используется для проверки сгенерированного Python-кода в сценариях трансформаций, не как замена Quality Gate в оркестраторе
 5. Adaptive replanning при необходимости
 
-**9 Core Agents**:
-| Агент        | Класс                 | Роль                                         |
+**Основные агенты оркестратора** (см. также [`MULTI_AGENT.md`](MULTI_AGENT.md)):
+| Ключ плана   | Класс                 | Роль                                         |
 | ------------ | --------------------- | -------------------------------------------- |
 | planner      | `PlannerAgent`        | Декомпозиция запроса на план выполнения      |
 | structurizer | `StructurizerAgent`   | Извлечение таблиц из текста/данных           |
 | analyst      | `AnalystAgent`        | Анализ данных, инсайты, паттерны             |
-| codex        | `TransformCodexAgent` | Генерация Python кода (трансформации данных) |
+| transform_codex | `TransformCodexAgent` | Генерация Python кода (трансформации данных) |
 | widget_codex | `WidgetCodexAgent`    | Генерация HTML/CSS/JS виджетов               |
 | reporter     | `ReporterAgent`       | Финальный отчёт в markdown                   |
 | discovery    | `DiscoveryAgent`      | Поиск и каталогизация источников данных      |
 | research     | `ResearchAgent`       | Загрузка контента по URL из результатов Discovery (не путать с типом SourceNode `research`) |
-| validator    | `ValidatorAgent`      | Валидация результатов pipeline               |
+| context_filter | `ContextFilterAgent` | Подготовка контекста (в т.ч. для кросс-фильтра и тулов) |
+| validator    | `QualityGateAgent`    | Финальная проверка качества ответа / `suggested_replan` |
 
 **Satellite Controllers** (обёртки → Orchestrator; в таблице — основные сценарии мультиагента):
 | Контроллер                       | Роль                                      |
@@ -176,7 +180,7 @@ flowchart TB
 - Генерация HTML/CSS/JS виджетов (WidgetCodexAgent)
 - Анализ данных и генерация инсайтов (AnalystAgent)
 - Структуризация данных в таблицы (StructurizerAgent)
-- Валидация результатов (ValidatorAgent)
+- Валидация итога пайплайна (QualityGateAgent, ключ `validator`)
 - Adaptive replanning при неудачных шагах
 - Retry с exponential backoff для агентов
 - Сохранение истории диалога, метрик выполнения
@@ -232,7 +236,7 @@ apps/backend/app/services/
 - Миграции: Alembic
 
 ### 6. Tool Sandbox & Execution Environment
-**Назначение**: Безопасное выполнение кода трансформаций и инструментов, написанных Transformation Agent и Developer Agent (Python, SQL, JavaScript).
+**Назначение**: Безопасное выполнение кода трансформаций (Python в sandbox; см. `PythonExecutor` и контроллеры трансформаций).
 **Технологии**: Docker контейнеры OR процессная изоляция с resource limits.
 **Ответственность**:
 - Валидация и линтинг кода трансформаций перед выполнением
@@ -265,8 +269,8 @@ apps/backend/app/services/
 
 **Ответственность**:
 - Позволяет пользователю создавать SourceNode (в т.ч. тип **`research`** — данные из мультиагентного исследования через `ResearchController`)
-- Позволяет Transformation Agent создавать ContentNode с результатами трансформаций
-- Позволяет Reporter Agent создавать WidgetNode с визуализациями ContentNode
+- Позволяет пользователю и **TransformCodex** / pipeline создавать ContentNode с результатами трансформаций
+- Позволяет **WidgetCodex** / **WidgetController** создавать WidgetNode с визуализациями ContentNode
 - Валидирует создание связей (проверка типов, циклические зависимости)
 - Управляет графом зависимостей (data lineage): SourceNode → ContentNode → WidgetNode
 - Отслеживает изменения SourceNode и триггерит refresh ContentNode
@@ -311,7 +315,7 @@ flowchart TB
     MA --> CX[TransformCodexAgent]
     MA --> WC[WidgetCodexAgent]
     MA --> REP[ReporterAgent]
-    MA --> VA[ValidatorAgent]
+    MA --> QG[QualityGate\n(plan: validator)]
     
     MA -->|LangChain| GC[GigaChat API]
     
@@ -328,23 +332,12 @@ flowchart TB
 2) Orchestrator → Planner → шаги по плану (при необходимости Discovery → Research → Structurizer → Analyst → Reporter)
 3) Результат → отчёт/таблицы/виджет на доске в зависимости от сценария
 
-### Пример 2: Сложный запрос с динамическим инструментом (новая модель)
-1) Пользователь: "Загрузи цены с сайта конкурента и сравни с нашими"
+### Пример 2: Исследование с внешними источниками (соответствует текущему пайплайну)
+1) Пользователь: "Найди публичные данные по теме X и сравни с нашими продажами"
 2) Orchestration → Planner (разбивает на подзадачи)
-3) Developer Agent:
-   - Анализирует требование
-   - Пишет код web scraper
-   - Тестирует в sandbox
-   - Регистрирует инструмент
-4) Executor Agent:
-   - Выполняет scraper
-   - Возвращает цены
-5) Analyst Agent:
-   - Сравнивает цены
-   - Находит отличия
-6) Reporter Agent:
-   - Создает таблицу/график
-   - Добавляет widget на доску
+3) **Discovery** → **Research** (загрузка страниц) → **Structurizer** → **Analyst** → **Reporter**
+4) При необходимости — шаг **validator** (`QualityGateAgent`), **replan**
+5) Результат — narrative, таблицы, при необходимости код виджета через **WidgetCodex** в отдельном сценарии
 
 ## Технологический стек
 

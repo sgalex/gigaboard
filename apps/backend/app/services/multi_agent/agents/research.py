@@ -10,8 +10,9 @@ AgentPayload(sources=[Source(fetched=True, content=...)]).
 import logging
 import json
 import re as _re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
+from urllib.parse import urlparse
 
 import httpx
 
@@ -22,6 +23,15 @@ from app.services.gigachat_service import GigaChatService
 
 
 logger = logging.getLogger(__name__)
+
+# Не тратить HTTP на заведомо нерелевантные справочные порталы (совпадает с DiscoveryAgent).
+_SKIP_FETCH_DOMAIN_FRAGMENTS = (
+    "support.google.com",
+    "support.google.ru",
+    "play.google.com",
+    "maps.google.com",
+    "accounts.google.com",
+)
 
 
 RESEARCH_SYSTEM_PROMPT = """
@@ -113,6 +123,20 @@ class ResearchAgent(BaseAgent):
     def _get_default_system_prompt(self) -> str:
         return RESEARCH_SYSTEM_PROMPT
 
+    @staticmethod
+    def _should_skip_url(url: str) -> Tuple[bool, Optional[str]]:
+        """Пропуск загрузки для доменов-справок — экономия времени и трафика."""
+        if not url or not url.startswith("http"):
+            return False, None
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except ValueError:
+            return False, None
+        for frag in _SKIP_FETCH_DOMAIN_FRAGMENTS:
+            if frag in host:
+                return True, f"skipped low-value domain ({frag})"
+        return False, None
+
     # ------------------------------------------------------------------
     # process_task — единая точка входа (V2)
     # ------------------------------------------------------------------
@@ -146,6 +170,31 @@ class ResearchAgent(BaseAgent):
                     elif isinstance(u, dict) and u.get("url"):
                         unfetched.append(Source(url=u["url"], title=u.get("title"), fetched=False))
 
+            # 2.1 Дедупликация + пропуск URL, которые уже успешно/неуспешно
+            # обрабатывались в текущей сессии (чтобы не ретраить заведомо провальные страницы).
+            if context and isinstance(context.get("agent_results"), list):
+                history_results = context.get("agent_results") or []
+                already_fetched, already_failed = self._collect_research_url_history(history_results)
+                deduped: List[Source] = []
+                seen_now: set[str] = set()
+                skipped_failed = 0
+                for src in unfetched:
+                    nu = self._normalize_url(src.url)
+                    if nu in seen_now:
+                        continue
+                    if nu in already_fetched or nu in already_failed:
+                        if nu in already_failed:
+                            skipped_failed += 1
+                        continue
+                    seen_now.add(nu)
+                    deduped.append(src)
+                if skipped_failed:
+                    self.logger.info(
+                        "♻️ Skip %s previously failed URL(s) in current session",
+                        skipped_failed,
+                    )
+                unfetched = deduped
+
             # 3. SQL-запрос (fallback)
             if not unfetched and task.get("query") and task.get("database"):
                 return await self._query_database(task)
@@ -170,6 +219,27 @@ class ResearchAgent(BaseAgent):
             errors: List[str] = []
 
             for i, src in enumerate(unfetched, 1):
+                skip, skip_reason = self._should_skip_url(src.url or "")
+                if skip:
+                    self.logger.info(
+                        "⏭️ Skip fetch [%s/%s]: %s — %s",
+                        i,
+                        len(unfetched),
+                        (src.url or "")[:80],
+                        skip_reason,
+                    )
+                    fetched_sources.append(
+                        Source(
+                            url=src.url,
+                            title=src.title,
+                            snippet=src.snippet,
+                            fetched=False,
+                            source_type=src.source_type,
+                            status_code=None,
+                        )
+                    )
+                    errors.append(f"{src.url}: {skip_reason}")
+                    continue
                 result_src = await self._fetch_single(src, i, len(unfetched))
                 if result_src.fetched:
                     fetched_sources.append(result_src)
@@ -237,20 +307,7 @@ class ResearchAgent(BaseAgent):
         # Изменение #2: agent_results — list (см. docs/CONTEXT_ARCHITECTURE_PROPOSAL.md)
         agent_results = context["agent_results"]
 
-        def _norm(u: str) -> str:
-            return (u or "").split("#")[0].rstrip("/").lower()
-
-        already_fetched: set[str] = set()
-        for result in agent_results:
-            if not isinstance(result, dict):
-                continue
-            if result.get("agent") != "research":
-                continue
-            if result.get("status") not in ("success", None):
-                continue
-            for s in result.get("sources") or []:
-                if isinstance(s, dict) and s.get("fetched") and s.get("url"):
-                    already_fetched.add(_norm(s["url"]))
+        already_fetched, already_failed = self._collect_research_url_history(agent_results)
 
         seen_in_batch: set[str] = set()
         for result in agent_results:
@@ -263,8 +320,8 @@ class ResearchAgent(BaseAgent):
                 for s in sources_raw:
                     if isinstance(s, dict):
                         if not s.get("fetched", False) and s.get("url"):
-                            nu = _norm(s["url"])
-                            if nu in already_fetched or nu in seen_in_batch:
+                            nu = self._normalize_url(s["url"])
+                            if nu in already_fetched or nu in already_failed or nu in seen_in_batch:
                                 continue
                             seen_in_batch.add(nu)
                             unfetched.append(Source(
@@ -275,6 +332,10 @@ class ResearchAgent(BaseAgent):
                                 source_type=s.get("source_type", "web"),  # type: ignore[arg-type]
                             ))
                     elif isinstance(s, str) and s.startswith("http"):
+                        nu = self._normalize_url(s)
+                        if nu in already_fetched or nu in already_failed or nu in seen_in_batch:
+                            continue
+                        seen_in_batch.add(nu)
                         unfetched.append(Source(url=s, fetched=False))
 
             # V1 fallback: results[] с url
@@ -282,8 +343,8 @@ class ResearchAgent(BaseAgent):
             if isinstance(results_raw, list) and not sources_raw:
                 for r in results_raw:
                     if isinstance(r, dict) and r.get("url"):
-                        nu = _norm(r["url"])
-                        if nu in already_fetched or nu in seen_in_batch:
+                        nu = self._normalize_url(r["url"])
+                        if nu in already_fetched or nu in already_failed or nu in seen_in_batch:
                             continue
                         seen_in_batch.add(nu)
                         unfetched.append(Source(
@@ -297,6 +358,43 @@ class ResearchAgent(BaseAgent):
             f"📦 Collected {len(unfetched)} unfetched sources from agent_results"
         )
         return unfetched
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        return (url or "").split("#")[0].rstrip("/").lower()
+
+    def _collect_research_url_history(
+        self, agent_results: List[Dict[str, Any]]
+    ) -> tuple[set[str], set[str]]:
+        """
+        Собирает URL-историю из уже выполненных шагов research:
+        - already_fetched: успешно загруженные URL
+        - already_failed: URL с неуспешной загрузкой (fetched=False)
+        """
+        already_fetched: set[str] = set()
+        already_failed: set[str] = set()
+
+        for result in agent_results:
+            if not isinstance(result, dict):
+                continue
+            if result.get("agent") != "research":
+                continue
+            # Учитываем также error-результаты research: они содержат sources c fetched=False
+            # и должны блокировать бессмысленные повторные попытки в рамках сессии.
+            if result.get("status") not in ("success", "error", None):
+                continue
+
+            for s in result.get("sources") or []:
+                if not isinstance(s, dict) or not s.get("url"):
+                    continue
+                nu = self._normalize_url(s["url"])
+                if s.get("fetched"):
+                    already_fetched.add(nu)
+                    already_failed.discard(nu)
+                else:
+                    already_failed.add(nu)
+
+        return already_fetched, already_failed
 
     # ------------------------------------------------------------------
     # Single URL fetch

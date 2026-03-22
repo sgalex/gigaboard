@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from .base import BaseAgent
 from ..message_bus import AgentMessageBus
-from ..schemas.agent_payload import CodeBlock, Narrative
+from ..schemas.agent_payload import CodeBlock, Narrative, ToolRequest, AgentPayload
 from app.services.gigachat_service import GigaChatService
 
 logger = logging.getLogger(__name__)
@@ -56,10 +56,15 @@ class WidgetCodexAgent(BaseAgent):
 
     # ── default prompt ───────────────────────────────────────────────
     def _get_default_system_prompt(self) -> str:
+        from app.services.multi_agent.tabular_tool_contract import (
+            TOOL_MODE_AGENT_SYSTEM_APPENDIX_RU,
+        )
+
         return (
             "You are WidgetCodexAgent — a data visualization specialist in GigaBoard.\n"
             "You generate interactive HTML/CSS/JS widgets using ECharts and other libraries.\n"
-            "Always return valid JSON."
+            "Always return valid JSON.\n"
+            + TOOL_MODE_AGENT_SYSTEM_APPENDIX_RU
         )
 
     # ── main entry ───────────────────────────────────────────────────
@@ -101,6 +106,63 @@ class WidgetCodexAgent(BaseAgent):
         # Existing widget code for iterative refinement
         existing_widget_code = (context or {}).get("existing_widget_code")
         chat_history = (context or {}).get("chat_history", [])
+        tools_enabled = bool((context or {}).get("tools_enabled")) if context else False
+        force_tool_data_access = bool(
+            (context or {}).get("force_tool_data_access")
+        ) if context else False
+        tool_results = (context or {}).get("tool_results", []) if context else []
+        tool_request_cache_digest_lines: Optional[List[str]] = None
+        if context and isinstance(context.get("tool_request_cache_digest_lines"), list):
+            tool_request_cache_digest_lines = context["tool_request_cache_digest_lines"]
+        content_node_id = str((context or {}).get("content_node_id") or "").strip()
+        selected_node_ids = []
+        if context and isinstance(context.get("selected_node_ids"), list):
+            selected_node_ids = [
+                str(item).strip()
+                for item in context.get("selected_node_ids", [])
+                if str(item).strip()
+            ]
+        if not selected_node_ids and context and isinstance(context.get("content_node_ids"), list):
+            selected_node_ids = [
+                str(item).strip()
+                for item in context.get("content_node_ids", [])
+                if str(item).strip()
+            ]
+        if not selected_node_ids and context and isinstance(context.get("contentNodeIds"), list):
+            selected_node_ids = [
+                str(item).strip()
+                for item in context.get("contentNodeIds", [])
+                if str(item).strip()
+            ]
+        if not content_node_id and selected_node_ids:
+            content_node_id = selected_node_ids[0]
+        node_ids_for_tools: List[str] = []
+        for _id in [content_node_id, *selected_node_ids]:
+            _text = str(_id or "").strip()
+            if _text and _text not in node_ids_for_tools:
+                node_ids_for_tools.append(_text)
+        keep_tabular = bool((context or {}).get("keep_tabular_context_in_prompt"))
+        if (
+            tools_enabled
+            and force_tool_data_access
+            and not keep_tabular
+            and not tool_results
+            and node_ids_for_tools
+        ):
+            return AgentPayload.partial(
+                agent=self.agent_name,
+                tool_requests=[
+                    ToolRequest(
+                        tool_name="readTableListFromContentNodes",
+                        arguments={"nodeIds": node_ids_for_tools},
+                        reason="force_tool_data_access: table context is removed from prompt",
+                    )
+                ],
+                narrative=Narrative(
+                    text="Запрашиваю таблицы через инструменты перед генерацией виджета."
+                ),
+                metadata={"tool_mode": "forced_bootstrap"},
+            )
 
         self.logger.info(f"🎨 WidgetCodex: {description[:100]}…")
         if user_request:
@@ -116,6 +178,9 @@ class WidgetCodexAgent(BaseAgent):
             analyst_context=analyst_context,
             existing_widget_code=existing_widget_code,
             chat_history=chat_history,
+            tools_enabled=tools_enabled,
+            tool_results=tool_results,
+            tool_request_cache_digest_lines=tool_request_cache_digest_lines,
         )
 
         total_chars = sum(len(m.get("content", "")) for m in messages)
@@ -143,6 +208,16 @@ class WidgetCodexAgent(BaseAgent):
             parsed = self._parse_structured_response(response) or {}
             if not parsed:
                 parsed = self._parse_json_from_llm(response)
+            tool_requests = self._extract_tool_requests(parsed)
+            if tool_requests:
+                return AgentPayload.partial(
+                    agent=self.agent_name,
+                    tool_requests=tool_requests,
+                    narrative=Narrative(
+                        text="Для генерации виджета требуется догрузка табличных данных."
+                    ),
+                    metadata={"tool_mode": "request"},
+                )
 
             # On retry: merge metadata from first attempt if missing
             if attempt > 0 and first_parsed:
@@ -241,8 +316,13 @@ class WidgetCodexAgent(BaseAgent):
                 render_body = render_body.lstrip("\ufeff")
             scripts = self._sanitize_scripts_section(scripts)
             scripts = self._ensure_scripts_for_libs(render_body, scripts)
+            head_links = self._ensure_head_links_for_libs(
+                render_body, scripts, custom_styles,
+            )
 
-            widget_code = self._assemble_widget(render_body, custom_styles, scripts)
+            widget_code = self._assemble_widget(
+                render_body, custom_styles, scripts, head_links,
+            )
             widget_code = self._sanitize_srcdoc_inline_script(widget_code)
 
             # ── Diagnostic: dump suspicious lines after assembly ──
@@ -330,6 +410,9 @@ class WidgetCodexAgent(BaseAgent):
         analyst_context: str = "",
         existing_widget_code: Optional[str] = None,
         chat_history: Optional[List[Dict[str, Any]]] = None,
+        tools_enabled: bool = False,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        tool_request_cache_digest_lines: Optional[List[str]] = None,
     ) -> List[Dict[str, str]]:
         """Build LLM messages array.
 
@@ -345,11 +428,15 @@ class WidgetCodexAgent(BaseAgent):
                 self._build_iterative_messages(
                     description, data_summary, user_request,
                     analyst_context, existing_widget_code, chat_history,
+                    tool_results=tool_results,
+                    tool_request_cache_digest_lines=tool_request_cache_digest_lines,
                 )
             )
         else:
             prompt = self._build_new_widget_prompt(
                 description, data_summary, user_request, analyst_context,
+                tools_enabled=tools_enabled, tool_results=tool_results,
+                tool_request_cache_digest_lines=tool_request_cache_digest_lines,
             )
             messages.append({"role": "user", "content": prompt})
 
@@ -363,6 +450,9 @@ class WidgetCodexAgent(BaseAgent):
         analyst_context: str,
         existing_widget_code: str,
         chat_history: List[Dict[str, Any]],
+        *,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        tool_request_cache_digest_lines: Optional[List[str]] = None,
     ) -> List[Dict[str, str]]:
         """Build multi-turn messages for iterative widget refinement.
 
@@ -395,6 +485,31 @@ class WidgetCodexAgent(BaseAgent):
         if analyst_context:
             data_parts.append(f"КОНТЕКСТ АНАЛИЗА:\n{analyst_context}")
         data_preamble = "\n\n".join(data_parts) + "\n\n" if data_parts else ""
+        digest_lines = tool_request_cache_digest_lines or []
+        if digest_lines:
+            digest_txt = (
+                "УЖЕ ВЫПОЛНЕННЫЕ ЗАПРОСЫ К ДАННЫМ (не дублируй идентичные tool_requests; "
+                "данные уже получены — см. TOOL RESULTS ниже):\n"
+            )
+            for line in digest_lines[-25:]:
+                digest_txt += f"  • {line}\n"
+            data_preamble = digest_txt + "\n" + data_preamble
+        if tool_results:
+            rendered: List[str] = []
+            for item in tool_results[-4:]:
+                if not isinstance(item, dict):
+                    continue
+                tname = item.get("tool_name", "tool")
+                if item.get("success"):
+                    rendered.append(
+                        f"- {tname}: {json.dumps(item.get('data', {}), ensure_ascii=False, default=str)[:2500]}"
+                    )
+                else:
+                    rendered.append(f"- {tname}: ERROR={item.get('error', 'unknown')}")
+            if rendered:
+                data_preamble = (
+                    "TOOL RESULTS (latest):\n" + "\n".join(rendered) + "\n\n" + data_preamble
+                )
 
         # 3. Extract render_body from existing widget → structured block for assistant msg
         dynamic = self._extract_dynamic_parts(existing_widget_code)
@@ -485,6 +600,10 @@ class WidgetCodexAgent(BaseAgent):
         data_summary: str,
         user_request: str = "",
         analyst_context: str = "",
+        *,
+        tools_enabled: bool = False,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+        tool_request_cache_digest_lines: Optional[List[str]] = None,
     ) -> str:
         """Build single-turn prompt for NEW widget creation."""
         parts: List[str] = []
@@ -513,6 +632,28 @@ class WidgetCodexAgent(BaseAgent):
 
         if data_summary:
             parts.append(f"\nDATA CONTEXT:\n{data_summary}")
+        digest_lines = tool_request_cache_digest_lines or []
+        if digest_lines:
+            parts.append(
+                "\nУЖЕ ВЫПОЛНЕННЫЕ ЗАПРОСЫ К ДАННЫМ (не дублируй идентичные tool_requests; "
+                "данные уже получены — см. TOOL RESULTS ниже):"
+            )
+            for line in digest_lines[-25:]:
+                parts.append(f"  • {line}")
+        if tool_results:
+            rendered = []
+            for item in tool_results[-4:]:
+                if not isinstance(item, dict):
+                    continue
+                tname = item.get("tool_name", "tool")
+                if item.get("success"):
+                    rendered.append(
+                        f"- {tname}: {json.dumps(item.get('data', {}), ensure_ascii=False, default=str)[:2500]}"
+                    )
+                else:
+                    rendered.append(f"- {tname}: ERROR={item.get('error', 'unknown')}")
+            if rendered:
+                parts.append("\nTOOL RESULTS (latest):\n" + "\n".join(rendered))
 
         parts.append(
             '\n📋 ФОРМАТ ОТВЕТА: используй СТРУКТУРИРОВАННЫЕ СЕКЦИИ (НЕ корневой JSON-объект!).\n'
@@ -545,7 +686,59 @@ class WidgetCodexAgent(BaseAgent):
             '===SCRIPTS===\n'
             '<script src="/libs/echarts.min.js"></script>'
         )
+        if tools_enabled:
+            parts.append(
+                "\nTOOL MODE ENABLED.\n"
+                "Доступ к данным таблиц: readTableListFromContentNodes (table_id в ответе), при необходимости строк — "
+                "readTableData с jsonDecl.table_id из первого тула. Если виджету нужны фактические значения из строк, "
+                "вызови readTableData.\n"
+                "Если данных недостаточно, верни JSON:\n"
+                "{\n"
+                '  "tool_requests": [\n'
+                "    {\n"
+                '      "tool_name": "readTableListFromContentNodes",\n'
+                '      "arguments": {"nodeIds": ["<uuid1>", "<uuid2>"]},\n'
+                '      "reason": "optional"\n'
+                "    },\n"
+                "    {\n"
+                '      "tool_name": "readTableData",\n'
+                '      "arguments": {"jsonDecl": {"contentNodeId":"<uuid>","table_id":"<id_or_name>","offset":0,"limit":50}},\n'
+                '      "reason": "optional"\n'
+                "    }\n"
+                "  ]\n"
+                "}\n"
+                "Если данных достаточно — верни структурированные секции widget-ответа."
+            )
         return "\n".join(parts)
+
+    @staticmethod
+    def _extract_tool_requests(parsed: Dict[str, Any]) -> List[ToolRequest]:
+        if not isinstance(parsed, dict):
+            return []
+        items = parsed.get("tool_requests")
+        if not isinstance(items, list):
+            return []
+        out: List[ToolRequest] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool_name") or item.get("name") or "").strip()
+            if not tool_name:
+                continue
+            args = item.get("arguments") or item.get("args") or {}
+            if not isinstance(args, dict):
+                args = {}
+            try:
+                out.append(
+                    ToolRequest(
+                        tool_name=tool_name,
+                        arguments=args,
+                        reason=item.get("reason"),
+                    )
+                )
+            except Exception:
+                continue
+        return out
 
     def _build_data_summary_for_widget(
         self,
@@ -555,6 +748,12 @@ class WidgetCodexAgent(BaseAgent):
     ) -> str:
         """Собирает краткое описание доступных данных для виджета."""
         parts: List[str] = []
+        table_names: set[str] = set()
+
+        def _remember_table_name(tbl: Dict[str, Any]) -> None:
+            n = tbl.get("name")
+            if isinstance(n, str) and n.strip():
+                table_names.add(n.strip())
 
         # input_data из task (ContentNode tables) — элементы могут быть dict или str (ID и т.д.)
         input_data = task.get("input_data", [])
@@ -565,6 +764,7 @@ class WidgetCodexAgent(BaseAgent):
                 for tbl in node.get("tables", []):
                     if not isinstance(tbl, dict):
                         continue
+                    _remember_table_name(tbl)
                     cols = tbl.get("columns", [])
                     rows = tbl.get("rows", [])
                     parts.append(
@@ -580,6 +780,8 @@ class WidgetCodexAgent(BaseAgent):
         if not parts and context:
             input_preview = context.get("input_data_preview", {})
             for table_name, info in input_preview.items():
+                if isinstance(table_name, str) and table_name.strip():
+                    table_names.add(table_name.strip())
                 cols = info.get("columns", [])
                 sample = info.get("sample_rows", [])[:5]
                 parts.append(
@@ -599,6 +801,7 @@ class WidgetCodexAgent(BaseAgent):
             for tbl in tables:
                 if not isinstance(tbl, dict):
                     continue
+                _remember_table_name(tbl)
                 cols = tbl.get("columns", [])
                 rows = tbl.get("rows", [])
                 tbl_name = tbl.get("name", "?")
@@ -624,6 +827,7 @@ class WidgetCodexAgent(BaseAgent):
             agent = result.get("agent", "unknown")
             for tbl in result.get("tables", []):
                 if isinstance(tbl, dict):
+                    _remember_table_name(tbl)
                     col_names = []
                     for c in tbl.get("columns", []):
                         if isinstance(c, dict):
@@ -634,6 +838,16 @@ class WidgetCodexAgent(BaseAgent):
                         f"[{agent}] Table '{tbl.get('name','')}': "
                         f"columns={col_names}"
                     )
+
+        if table_names:
+            ordered = ", ".join(sorted(table_names))
+            parts.append("")
+            parts.append(
+                "ПРАВИЛА ИМЁН ТАБЛИЦ В КОДЕ ВИДЖЕТА (обязательно): "
+                f"в данных доступны только имена: {ordered}. "
+                "В Python используйте только tables['<имя>'] для этих имён. "
+                "Не выдумывайте другие ключи (например oil_prices), если такого имени нет в списке выше."
+            )
 
         return "\n".join(parts)
 
@@ -773,7 +987,15 @@ class WidgetCodexAgent(BaseAgent):
             re.compile(r'\bnew\s+Chart\b|\bChart\.register\b'),
             '<script src="/libs/chart.min.js"></script>',
         ),
+        (
+            re.compile(
+                r'\bL\.(?:map|tileLayer|marker|circle|polygon|geoJSON|latLng|circleMarker|divIcon)\b'
+            ),
+            '<script src="/libs/leaflet.js"></script>',
+        ),
     ]
+
+    _LEAFLET_HEAD_CSS = "/libs/leaflet.css"
 
     def _ensure_scripts_for_libs(
         self, render_body: str, scripts: str,
@@ -808,6 +1030,25 @@ class WidgetCodexAgent(BaseAgent):
             scripts = (scripts.strip() + "".join(added)).strip()
 
         return scripts
+
+    @staticmethod
+    def _ensure_head_links_for_libs(
+        render_body: str,
+        scripts: str,
+        custom_styles: str,
+    ) -> str:
+        """Подставляет <link> на /libs/leaflet.css при использовании API Leaflet (L.*) в render_body."""
+        combined = (scripts or "") + (custom_styles or "")
+        if WidgetCodexAgent._LEAFLET_HEAD_CSS in combined:
+            return ""
+        if not re.search(
+            r"\bL\.(?:map|tileLayer|marker|circle|polygon|geoJSON|latLng|circleMarker|divIcon)\b",
+            render_body,
+        ):
+            return ""
+        return (
+            f'  <link rel="stylesheet" href="{WidgetCodexAgent._LEAFLET_HEAD_CSS}">'
+        )
 
     @staticmethod
     def _detect_js_string_issues(widget_code: str) -> list:
@@ -872,10 +1113,12 @@ class WidgetCodexAgent(BaseAgent):
         render_body: str,
         custom_styles: str = "",
         scripts: str = "",
+        head_links: str = "",
     ) -> str:
         """Собирает виджет из статического каркаса + динамических частей (render_body, styles, scripts)."""
         styles_block = f"    {custom_styles}" if custom_styles.strip() else ""
         scripts_block = f"  {scripts}" if scripts.strip() else ""
+        head_block = head_links.strip() if (head_links or "").strip() else ""
 
         # Indent render_body to match scaffold (8 spaces inside render() try block)
         indented_lines = []
@@ -891,6 +1134,7 @@ class WidgetCodexAgent(BaseAgent):
             .replace("%%CUSTOM_STYLES%%", styles_block)
             .replace("%%CUSTOM_SCRIPTS%%", scripts_block)
             .replace("%%RENDER_BODY%%", indented_body)
+            .replace("%%CUSTOM_HEAD_LINKS%%", head_block)
         )
 
     @classmethod
@@ -2286,6 +2530,7 @@ WIDGET_SCAFFOLD = """\
 <head>
   <meta charset="utf-8">
   <link rel="stylesheet" href="/libs/fonts/inter.css">
+%%CUSTOM_HEAD_LINKS%%
   <style>
     * { box-sizing: border-box; }
     html { overflow: hidden; }
@@ -2396,7 +2641,7 @@ WIDGET_SYSTEM_PROMPT = '''
 КРИТИЧЕСКИЕ ПРАВИЛА (следуй им ВСЕГДА):
 1. Всегда возвращай ответ КАК ТЕКСТ со структурированными секциями: widget_name / widget_type / description + ===RENDER_BODY=== [+ опциональные ===STYLES=== и ===SCRIPTS===]. НЕ корневой JSON-объект.
 2. В секции ===RENDER_BODY=== допускается ТОЛЬКО JS-код. ⚠️ Никаких сырых HTML-тегов; HTML — только внутри строковых литералов JS (например, template literal для innerHTML).
-3. Используй ТОЛЬКО локальные библиотеки /libs/*. НЕ подключай CDN.
+3. Подключение библиотек: **внешние CDN разрешены** (jsdelivr, unpkg, cdnjs и т.п.) для всего, чего нет среди встроенных копий. **Если библиотека уже поставляется приложением** (список ниже — ECharts, D3, Chart.js, Leaflet, шрифт Inter), подключай её **только** с локального сервера по путям `/libs/...`, **не** с CDN (не дублируй одну и ту же библиотеку из двух источников).
 4. Доступ к данным ТОЛЬКО через tables["name"]; не используй несуществующие переменные table/rows/colNames и не переопределяй data/tables.
 5. Для ECharts ВСЕГДА инициализируй/освобождай window.chartInstance и задавай xAxis + yAxis; не выдумывай несуществующие API.
 6. **Одна главная визуализация по умолчанию**: если пользователь не просит явно «несколько графиков», «дашборд», «две диаграммы рядом» — делай **один** график ECharts в #chart (один setOption на window.chartInstance). Таблица с несколькими числовыми колонками (mean_salary, median_salary, vacancy_count и т.п.) **не требует** нескольких отдельных «половинок-виджетов»: объединяй метрики в **одной** диаграмме — grouped/stacked bar, несколько series в одном option, или bar+line на двух осях (yAxisIndex). Два и более независимых крупных графика (два init, два div-контейнера с отдельными диаграммами) — только когда запрос явно про сравнение разных представлений.
@@ -2486,22 +2731,24 @@ const firstTbl = tables[first.name];
  БИБЛИОТЕКИ ВИЗУАЛИЗАЦИИ
 ═══════════════════════════════════════════════════════════
 
-**Доступные библиотеки (локальные копии, НЕ CDN):**
+**Встроены в проект — подключать только с локального сервера (`/libs/...`), не с CDN:**
 - ECharts v6: <script src="/libs/echarts.min.js"></script>
 - D3 v7: <script src="/libs/d3.min.js"></script>
 - Chart.js v4: <script src="/libs/chart.min.js"></script>
+- Leaflet v1.9: <link rel="stylesheet" href="/libs/leaflet.css"> + <script src="/libs/leaflet.js"></script> (иконки маркеров: /libs/images/*)
+- Шрифт Inter: уже в каркасе (`/libs/fonts/inter.css`)
 
-🚨 **ИСПОЛЬЗУЙ ТОЛЬКО локальные библиотеки!**
-- ✅ ECharts — для графиков (bar, line, pie, scatter, heatmap, gauge и т.п.)
-- ✅ D3 — для продвинутых визуализаций (force graph, treemap, chord, geo и т.п.)
-- ✅ Chart.js — альтернатива ECharts для canvas-графиков (bar, line, pie, doughnut, radar и т.п.)
+**Всё остальное** (Plotly, Three.js, ApexCharts, другие версии или библиотеки) — можно подключать с **внешних CDN**; указывай стабильные URL с явной версией где возможно; перед вызовом API дождись загрузки (`waitForLib` / проверка глобала). Стили с CDN, если нужны: в ===STYLES=== через `@import url('https://...');` (теги `<link>` в ===SCRIPTS=== не используй — санитайзер оставляет только `<script>`).
+
+- ✅ ECharts — для графиков (bar, line, pie, scatter, heatmap, gauge и т.п.) — при выборе ECharts **только** `/libs/echarts.min.js`
+- ✅ D3 — для продвинутых визуализаций — **только** `/libs/d3.min.js`
+- ✅ Chart.js — canvas-графики — **только** `/libs/chart.min.js`
+- ✅ Leaflet — карты — **только** `/libs/leaflet.*` (см. выше)
   • Клик / кросс-фильтр: только **options.onClick** (сигнатура (event, elements)), например:
     onClick: function(ev, els) { if (els.length && window.toggleFilter) window.toggleFilter(dimCol, labels[els[0].index]); }
   • **ЗАПРЕЩЕНО** для Chart.js: window.chartInstance.on('click', …) — это API **только ECharts**.
   • В new Chart(ctx, { … }) проверь баланс **{ }**: после plugins: { … } закрываешь options одной **}**, конфиг графика — **});** без лишних скобок.
-- ✅ Библиотеки можно комбинировать (например, D3 для обработки данных + ECharts для рендера)
-- ❌ НЕ используй Plotly или другие внешние библиотеки
-- ❌ НЕ указывай CDN-ссылки — только /libs/ пути
+- ✅ Библиотеки можно комбинировать (локальные + CDN, или несколько CDN), соблюдая правило: **встроенная копия → только `/libs/`**
 
 ═══════════════════════════════════════════════════════════
  КАРКАС ВИДЖЕТА (SCAFFOLD)
@@ -2650,12 +2897,12 @@ REMINDER: Вся сложная логика уже в каркасе — сте
 8. 🚫 **ЗАПРЕЩЕНО** использовать ECharts `type: 'custom'` с renderItem — это продвинутый API
    с крайне сложной сигнатурой. GigaChat выдумывает несуществующие поля (customDraw, events,
    painting и т.п.). Для карточек, списков, таблиц используй **plain HTML** (правило 7).
-9. **scripts**: укажи нужные библиотеки из /libs/:
-   - ECharts: `<script src="/libs/echarts.min.js"></script>`
-   - D3: `<script src="/libs/d3.min.js"></script>`
-   - Chart.js: `<script src="/libs/chart.min.js"></script>`
-   - Можно несколько: `<script src="/libs/echarts.min.js"></script><script src="/libs/d3.min.js"></script>`
-   - Plain HTML: пустая строка.
+9. **scripts** (===SCRIPTS===): перечисли нужные `<script src="...">`. Санитайзер сохраняет **только** теги script — CSS с CDN добавляй в ===STYLES=== (`@import url(...)`).
+   - **ECharts, D3, Chart.js, Leaflet** — только `/libs/...` как в списке «встроены в проект» (не CDN для этих имён).
+   - **Любые другие** JS-библиотеки — допускаются URL с внешних CDN с явной версией в пути.
+   - Leaflet: `<script src="/libs/leaflet.js"></script>`; `/libs/leaflet.css` в &lt;head&gt; подставляется автоматически при `L.map` / `L.marker` и т.п. в render_body
+   - Можно смешивать локальные и CDN-скрипты в одной секции.
+   - Plain HTML без библиотек: пустая строка.
 10. 🚨 **ОБЯЗАТЕЛЬНО ОПРЕДЕЛЯЙ ВСЕ ПЕРЕМЕННЫЕ** перед использованием!
    Доступные переменные: data, tables. Всё остальное — определяй сам.
    ✅ ПРАВИЛЬНО: const tbl = tables["name"]; tbl.rows.map(r => r['brand'])

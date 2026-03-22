@@ -57,16 +57,29 @@ export interface LLMConfigUpdate {
 export interface SystemLLMSettingsResponse {
     default_llm_config_id: string | null
     configs: LLMConfigResponse[]
-    agent_overrides: { agent_key: string; llm_config_id: string }[]
+    agent_overrides: AgentLLMOverrideItem[]
 }
 
 export interface SystemLLMSettingsUpdate {
     default_llm_config_id?: string | null
 }
 
+export interface AgentRuntimeTaskOptions {
+    timeout_sec?: number
+    max_retries?: number
+    context_ladder?: string[]
+    max_items?: number
+    max_total_chars?: number
+}
+
+export interface AgentRuntimeOptions extends AgentRuntimeTaskOptions {
+    task_overrides?: Record<string, AgentRuntimeTaskOptions>
+}
+
 export interface AgentLLMOverrideItem {
     agent_key: string
     llm_config_id: string
+    runtime_options?: AgentRuntimeOptions | null
 }
 
 export interface TestSystemLLMResponse {
@@ -236,6 +249,38 @@ export interface PlaygroundChatMessage {
     content: string
 }
 
+type PlaygroundStreamEvent = {
+    type: 'start' | 'progress' | 'plan' | 'result' | 'error' | 'done'
+    agent_label?: string
+    task?: string
+    steps?: string[]
+    completed_count?: number
+    source?: string
+    result?: Record<string, unknown>
+    error?: string
+}
+
+export interface RunPlaygroundStreamHandlers {
+    onProgress?: (
+        agentLabel: string,
+        task: string,
+        meta?: {
+            phase?: string
+            stepIndex?: number
+            totalSteps?: number
+        }
+    ) => void
+    onPlanUpdate?: (
+        steps: string[],
+        meta?: {
+            completedCount?: number
+            source?: string
+        }
+    ) => void
+    onResult?: (result: Record<string, unknown>) => void
+    onError?: (error: string) => void
+}
+
 export async function runPlayground(
     prompt: string,
     chatHistory?: PlaygroundChatMessage[],
@@ -255,6 +300,88 @@ export async function runPlayground(
         throw new Error(errorText || 'Запуск Playground не удался')
     }
     return resp.json()
+}
+
+export async function runPlaygroundStream(
+    prompt: string,
+    chatHistory: PlaygroundChatMessage[] | undefined,
+    handlers: RunPlaygroundStreamHandlers
+): Promise<void> {
+    const resp = await fetch(`${API_BASE}/llm-playground/run-stream`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+            prompt,
+            chat_history: chatHistory && chatHistory.length > 0 ? chatHistory : undefined,
+        }),
+    })
+
+    if (!resp.ok) {
+        if (resp.status === 403) throw new Error('Доступ только для администратора')
+        if (resp.status === 503) throw new Error('Orchestrator недоступен (Redis или GigaChat не настроены)')
+        const errorText = await resp.text()
+        throw new Error(errorText || 'Запуск Playground не удался')
+    }
+
+    if (!resp.body) {
+        throw new Error('Пустой поток ответа от Playground')
+    }
+
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buffer = ''
+
+    while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed) continue
+
+            let event: PlaygroundStreamEvent
+            try {
+                event = JSON.parse(trimmed) as PlaygroundStreamEvent
+            } catch {
+                continue
+            }
+
+            if (event.type === 'progress') {
+                handlers.onProgress?.(
+                    event.agent_label || 'Агент',
+                    event.task || 'Выполнение шага',
+                    {
+                        phase: typeof (event as Record<string, unknown>).phase === 'string'
+                            ? ((event as Record<string, unknown>).phase as string)
+                            : undefined,
+                        stepIndex: typeof (event as Record<string, unknown>).step_index === 'number'
+                            ? ((event as Record<string, unknown>).step_index as number)
+                            : undefined,
+                        totalSteps: typeof (event as Record<string, unknown>).total_steps === 'number'
+                            ? ((event as Record<string, unknown>).total_steps as number)
+                            : undefined,
+                    }
+                )
+            } else if (event.type === 'plan') {
+                handlers.onPlanUpdate?.(
+                    Array.isArray(event.steps) ? event.steps : [],
+                    {
+                        completedCount:
+                            typeof event.completed_count === 'number' ? event.completed_count : undefined,
+                        source: typeof event.source === 'string' ? event.source : undefined,
+                    }
+                )
+            } else if (event.type === 'result' && event.result) {
+                handlers.onResult?.(event.result)
+            } else if (event.type === 'error') {
+                handlers.onError?.(event.error || 'Запуск Playground не удался')
+            }
+        }
+    }
 }
 
 export const AGENT_KEYS = [

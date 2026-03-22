@@ -4,8 +4,10 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useAuthStore } from '@/store/authStore'
-import { User, Settings2 } from 'lucide-react'
+import { User, Settings2, Workflow, Sparkles } from 'lucide-react'
 import { SystemLLMSettingsPanel } from '@/components/settings/SystemLLMSettingsPanel'
+import { MultiAgentUserSettingsPanel } from '@/components/settings/MultiAgentUserSettingsPanel'
+import { MultiAgentPlaygroundPanel } from '@/components/settings/MultiAgentPlaygroundPanel'
 
 export function UserProfilePage() {
     const { user } = useAuthStore()
@@ -18,7 +20,8 @@ export function UserProfilePage() {
                 <header className="mb-6 space-y-1">
                     <h1 className="text-2xl font-bold tracking-tight">Настройки</h1>
                     <p className="text-sm text-muted-foreground">
-                        Профиль и параметры системы. Настройки LLM доступны только администратору.
+                        Профиль и параметры системы. Разделы Multi-Agent, LLM и Playground — только для
+                        администратора.
                     </p>
                 </header>
 
@@ -37,13 +40,29 @@ export function UserProfilePage() {
                             Общие
                         </TabsTrigger>
                         {isAdmin && (
-                            <TabsTrigger
-                                value="llm"
-                                className="w-full justify-start gap-2 text-left data-[state=active]:bg-background data-[state=active]:shadow-sm"
-                            >
-                                <Settings2 className="h-4 w-4 shrink-0" />
-                                Настройки LLM
-                            </TabsTrigger>
+                            <>
+                                <TabsTrigger
+                                    value="multi-agent"
+                                    className="w-full justify-start gap-2 text-left data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                                >
+                                    <Workflow className="h-4 w-4 shrink-0" />
+                                    Multi-Agent
+                                </TabsTrigger>
+                                <TabsTrigger
+                                    value="llm"
+                                    className="w-full justify-start gap-2 text-left data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                                >
+                                    <Settings2 className="h-4 w-4 shrink-0" />
+                                    Настройки LLM
+                                </TabsTrigger>
+                                <TabsTrigger
+                                    value="playground"
+                                    className="w-full justify-start gap-2 text-left data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                                >
+                                    <Sparkles className="h-4 w-4 shrink-0" />
+                                    Playground
+                                </TabsTrigger>
+                            </>
                         )}
                     </TabsList>
 
@@ -65,18 +84,30 @@ export function UserProfilePage() {
                         </TabsContent>
 
                         {isAdmin && (
-                            <TabsContent value="llm" className="mt-0">
-                                <section className="rounded-lg border border-border bg-card p-6">
-                                    <SystemLLMSettingsPanel />
-                                </section>
-                            </TabsContent>
+                            <>
+                                <TabsContent value="multi-agent" className="mt-0">
+                                    <section className="rounded-lg border border-border bg-card p-6">
+                                        <MultiAgentUserSettingsPanel />
+                                    </section>
+                                </TabsContent>
+                                <TabsContent value="llm" className="mt-0">
+                                    <section className="rounded-lg border border-border bg-card p-6">
+                                        <SystemLLMSettingsPanel />
+                                    </section>
+                                </TabsContent>
+                                <TabsContent value="playground" className="mt-0">
+                                    <section className="rounded-lg border border-border bg-card p-6">
+                                        <MultiAgentPlaygroundPanel />
+                                    </section>
+                                </TabsContent>
+                            </>
                         )}
                     </div>
                 </Tabs>
 
                 {!isAdmin && (
                     <p className="mt-4 text-sm text-muted-foreground">
-                        Настройки LLM задаёт администратор системы.
+                        Параметры Multi-Agent, LLM и Playground настраивает администратор системы.
                     </p>
                 )}
             </div>

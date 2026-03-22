@@ -74,7 +74,7 @@ export function TopBar() {
                             <Button
                                 variant="outline"
                                 size="sm"
-                                title="Системные настройки LLM и Playground"
+                                title="Системные настройки LLM (Профиль /admin/llm)"
                                 onClick={() => navigate('/admin/llm')}
                             >
                                 Настройки LLM

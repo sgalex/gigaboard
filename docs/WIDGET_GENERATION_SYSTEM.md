@@ -2,10 +2,10 @@
 
 ## Executive Summary
 
-**WidgetNode Generation System** — система автоматической генерации интерактивных визуализаций из данных ContentNode с помощью Reporter Agent и GigaChat.
+**WidgetNode Generation System** — система автоматической генерации интерактивных визуализаций из данных ContentNode с помощью **WidgetCodexAgent** (и **WidgetController**), LLM через **`LLMRouter`**. **Reporter** формирует итоговый текст пайплайна, но не является основным генератором HTML/CSS/JS виджета.
 
 **Ключевые концепции:**
-- **Reporter Agent** генерирует полный HTML/CSS/JS код визуализации (без шаблонов)
+- **WidgetCodexAgent** генерирует полный HTML/CSS/JS код визуализации (без шаблонов)
 - **WidgetNode** создаётся из **ContentNode** через VISUALIZATION edge
 - **Итеративная генерация** — чат-интерфейс для уточнения визуализации
 - **Автообновление** при изменении родительского ContentNode
@@ -21,7 +21,7 @@
 flowchart TB
   subgraph "1. Анализ данных"
     A["ContentNode\n(text + tables)"]
-    B["Reporter Agent\nАнализирует данные"]
+    B["WidgetCodexAgent\nАнализирует данные"]
   end
   
   subgraph "2. Генерация виджета"
@@ -329,7 +329,7 @@ async function createVisualization(contentNodeId: string) {
 
 ## Примеры AI-генерированного кода
 
-> Все примеры ниже — AI-генерированный HTML/CSS/JS. Reporter Agent генерирует код с нуля для каждой визуализации.
+> Все примеры ниже — AI-генерированный HTML/CSS/JS. **WidgetCodexAgent** генерирует код с нуля для каждой визуализации.
 
 <details>
 <summary>📊 Метрика (KPI Card)</summary>
