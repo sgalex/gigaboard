@@ -71,6 +71,10 @@ export function buildWidgetApiScript(params: {
 
             // Global error handler — show errors visually instead of blank screen
             window.onerror = function(msg, src, line) {
+                // Chromium quirk: RO callback + layout in same turn; not a real failure (см. gigaboardEchartsIframeGuard ResizeObserver)
+                if (typeof msg === 'string' && msg.indexOf('ResizeObserver loop') !== -1) {
+                    return true;
+                }
                 console.error('Widget error:', msg, 'at', src, 'line', line);
                 var el = document.getElementById('chart') || document.body;
                 if (el) {
@@ -297,30 +301,70 @@ export function buildWidgetApiScript(params: {
                 if (intervalId) clearInterval(intervalId);
             };
 
-            // ECharts в about:srcdoc: init до layout → canvas 0×0 → InvalidStateError drawImage.
-            // Патчим init (echarts подключается отдельным script — опрос), min-height на контейнер, resize после layout.
+            // ECharts в about:srcdoc: при движении по доске iframe временно 0×0 — ZRender всё равно крутит rAF и падает в drawImage.
+            // 1) Не шлём window.resize. 2) resize() только при ненулевом getDom(). 3) Патч drawImage для нулевого canvas (только iframe).
             (function gigaboardEchartsIframeGuard() {
+                try {
+                    if (typeof CanvasRenderingContext2D !== 'undefined' && !CanvasRenderingContext2D.prototype.__gigaboardDrawImagePatched) {
+                        CanvasRenderingContext2D.prototype.__gigaboardDrawImagePatched = true;
+                        var _drawImage = CanvasRenderingContext2D.prototype.drawImage;
+                        CanvasRenderingContext2D.prototype.drawImage = function() {
+                            var img = arguments[0];
+                            try {
+                                if (img && typeof (img).width === 'number' && typeof (img).height === 'number' && img.width === 0 && img.height === 0) {
+                                    return;
+                                }
+                            } catch (e) {}
+                            return _drawImage.apply(this, arguments);
+                        };
+                    }
+                } catch (e) {}
+
                 var resizeTimer = null;
+                var RO_DEBOUNCE_MS = 120;
+
+                function domOk(el) {
+                    if (!el || el.nodeType !== 1) return false;
+                    return el.clientWidth > 0 && el.clientHeight > 0;
+                }
+
+                function wrapChartResize(inst) {
+                    if (!inst || inst.__gigaboardResizeWrapped) return inst;
+                    inst.__gigaboardResizeWrapped = true;
+                    var origResize = inst.resize;
+                    inst.resize = function(opts) {
+                        var dom = inst.getDom && inst.getDom();
+                        if (!domOk(dom)) return;
+                        try {
+                            return origResize.apply(this, arguments);
+                        } catch (err) {
+                            console.warn('echarts.resize skipped:', err && err.message);
+                        }
+                    };
+                    return inst;
+                }
+
                 function gigaboardResizeAllCharts() {
                     if (resizeTimer) return;
                     resizeTimer = setTimeout(function() {
                         resizeTimer = null;
                         try {
-                            if (window.dispatchEvent) window.dispatchEvent(new Event('resize'));
-                        } catch (e) {}
-                        try {
                             if (typeof echarts === 'undefined' || !echarts.getInstanceByDom) return;
+                            var doc = document.documentElement;
+                            if (!doc || doc.clientWidth === 0 || doc.clientHeight === 0) return;
                             var divs = document.getElementsByTagName('div');
                             for (var i = 0; i < divs.length; i++) {
                                 var el = divs[i];
+                                if (!domOk(el)) continue;
                                 var inst = echarts.getInstanceByDom(el);
                                 if (inst && typeof inst.resize === 'function') {
                                     try { inst.resize(); } catch (err) {}
                                 }
                             }
                         } catch (e) {}
-                    }, 32);
+                    }, RO_DEBOUNCE_MS);
                 }
+
                 var poll = 0;
                 function patchEchartsInit() {
                     if (typeof echarts === 'undefined' || typeof echarts.init !== 'function') {
@@ -342,7 +386,8 @@ export function buildWidgetApiScript(params: {
                                 }
                             }
                         } catch (e) {}
-                        return origInit.call(echarts, dom, theme, opts);
+                        var chart = origInit.call(echarts, dom, theme, opts);
+                        return wrapChartResize(chart);
                     };
                 }
                 patchEchartsInit();
@@ -354,7 +399,11 @@ export function buildWidgetApiScript(params: {
                 if (typeof ResizeObserver !== 'undefined') {
                     function roObserve() {
                         if (!document.body) return;
-                        var ro = new ResizeObserver(function() { gigaboardResizeAllCharts(); });
+                        var ro = new ResizeObserver(function() {
+                            requestAnimationFrame(function() {
+                                gigaboardResizeAllCharts();
+                            });
+                        });
                         ro.observe(document.body);
                     }
                     if (document.body) roObserve();
