@@ -7,6 +7,9 @@
  *
  * В production, если в образ ошибочно зашит `http://localhost:8000`, а UI открыт с nginx (`:3000` и т.д.),
  * запросы уходят на закрытый порт хоста → «сетевая ошибка». В этом случае принудительно используем относительные URL.
+ *
+ * Страница по HTTPS, а в бандле `http://тот-же-хост/...` → Mixed Content (браузер блокирует). Для того же host
+ * что и у страницы возвращаем относительный базис (запросы пойдут на https через nginx).
  */
 export function getViteApiBaseUrl(): string {
     const v = import.meta.env.VITE_API_URL
@@ -22,6 +25,17 @@ export function getViteApiBaseUrl(): string {
             if (
                 u.origin !== pageOrigin &&
                 (u.hostname === 'localhost' || u.hostname === '127.0.0.1')
+            ) {
+                return ''
+            }
+
+            const sameHost =
+                u.hostname === window.location.hostname &&
+                String(u.port || '') === String(window.location.port || '')
+            if (
+                window.location.protocol === 'https:' &&
+                u.protocol === 'http:' &&
+                sameHost
             ) {
                 return ''
             }
