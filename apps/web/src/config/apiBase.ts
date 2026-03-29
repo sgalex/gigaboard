@@ -1,15 +1,12 @@
 /**
  * Базовый URL API и Socket.IO.
  *
- * - Не задан `VITE_API_URL` (или пусто) — один origin с nginx (Docker / прод): REST через относительные пути,
- *   Socket.IO на `window.location.origin`.
- * - Задан явно — прямой backend (локальный dev на :8000, отдельный домен API и т.д.).
+ * **Важно (Mixed Content):** пустой `baseURL` в axios + относительный путь `/api/...` в XHR разрешается
+ * относительно document base URL. Если на странице есть `<base href="http://...">` (прокси, CMS, старый шаблон),
+ * браузер соберёт **http://** даже при открытой **https://** вкладке → блокировка Mixed Content.
+ * Поэтому при работе в браузере без явного внешнего API используем **абсолютный** `window.location.origin`.
  *
- * В production, если в образ ошибочно зашит `http://localhost:8000`, а UI открыт с nginx (`:3000` и т.д.),
- * запросы уходят на закрытый порт хоста → «сетевая ошибка». В этом случае принудительно используем относительные URL.
- *
- * Страница по HTTPS, а в бандле `http://тот-же-хост/...` → Mixed Content. Сравниваем hostname без учёта регистра,
- * убираем кавычки из env. Возвращаем `window.location.origin` (явный https), чтобы axios не собирал `http://...`.
+ * Явный `VITE_API_URL` (другой хост / только HTTP backend) — после проверок ниже.
  */
 function stripEnvQuotes(s: string): string {
     const t = s.trim()
@@ -28,47 +25,50 @@ function sameHostHttpAsHttpsPage(apiUrl: URL, win: Window & typeof globalThis): 
 }
 
 export function getViteApiBaseUrl(): string {
-    const v = import.meta.env.VITE_API_URL
-    if (v === undefined || v === null) {
-        return ''
-    }
-    let trimmed = stripEnvQuotes(String(v))
-    if (trimmed === '') {
-        return ''
+    const win = typeof window !== 'undefined' ? window : undefined
+    const raw = import.meta.env.VITE_API_URL
+    const trimmedFromEnv =
+        raw === undefined || raw === null ? '' : stripEnvQuotes(String(raw))
+
+    // Нет явного API в env — тот же origin, что и SPA (nginx / Vite). Только абсолютный origin.
+    if (trimmedFromEnv === '') {
+        return win ? win.location.origin : ''
     }
 
-    if (typeof window !== 'undefined') {
+    let trimmed = trimmedFromEnv
+
+    if (win) {
         try {
             const u = new URL(trimmed)
-            if (sameHostHttpAsHttpsPage(u, window)) {
-                return window.location.origin
+            if (sameHostHttpAsHttpsPage(u, win)) {
+                return win.location.origin
             }
         } catch {
             /* ignore malformed URL */
         }
     }
 
-    if (typeof window !== 'undefined' && import.meta.env.PROD) {
+    if (win && import.meta.env.PROD) {
         try {
             const u = new URL(trimmed)
-            const pageOrigin = window.location.origin
+            const pageOrigin = win.location.origin
             if (
                 u.origin !== pageOrigin &&
                 (u.hostname === 'localhost' || u.hostname === '127.0.0.1')
             ) {
-                return ''
+                // Образ с localhost:8000, UI на nginx :3000 / https на домене — ходим на origin страницы
+                return win.location.origin
             }
         } catch {
             /* ignore malformed URL */
         }
     }
 
-    // Последняя линия: страница HTTPS, в env всё ещё http://тот же хост (например parse падал раньше)
-    if (typeof window !== 'undefined' && window.location.protocol === 'https:' && trimmed.startsWith('http://')) {
+    if (win && win.location.protocol === 'https:' && trimmed.startsWith('http://')) {
         try {
             const u = new URL(trimmed)
-            if (u.hostname.toLowerCase() === window.location.hostname.toLowerCase()) {
-                return window.location.origin
+            if (u.hostname.toLowerCase() === win.location.hostname.toLowerCase()) {
+                return win.location.origin
             }
         } catch {
             /* ignore */
@@ -78,14 +78,11 @@ export function getViteApiBaseUrl(): string {
     return trimmed
 }
 
-/** Origin для socket.io-client (пустой env → текущий хост страницы). */
+/** Origin для socket.io-client — тот же базис, что и REST (см. getViteApiBaseUrl). */
 export function getSocketIoUrl(): string {
     const base = getViteApiBaseUrl()
     if (base) {
         return base
-    }
-    if (typeof window !== 'undefined') {
-        return window.location.origin
     }
     return 'http://localhost:8000'
 }

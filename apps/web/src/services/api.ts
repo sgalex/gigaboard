@@ -43,7 +43,7 @@ import type {
     PublicDashboard,
 } from '@/types/dashboard'
 
-/** Пустой env → относительные URL (Vite proxy / nginx в Docker). Не использовать `|| localhost:8000`: пустая строка falsy и уводила бы UI на хостовый :8000. */
+/** baseURL из getViteApiBaseUrl() — в браузере обычно window.location.origin (см. apiBase.ts), не пустая строка. */
 const api: AxiosInstance = axios.create({
     baseURL: getViteApiBaseUrl(),
 })
