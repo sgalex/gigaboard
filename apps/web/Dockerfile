@@ -27,6 +27,7 @@ RUN npm run build
 FROM nginx:alpine
 
 COPY --from=builder /workspace/apps/web/dist /usr/share/nginx/html
+COPY apps/web/nginx-forwarded-map.conf /etc/nginx/conf.d/00-forwarded-map.conf
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
