@@ -32,7 +32,7 @@ WIDGET_SUGGESTIONS_SYSTEM_PROMPT = '''
 
 ## ВАША РОЛЬ:
 ✅ Анализ структуры и содержания данных
-✅ Генерация 8-10 РАЗНООБРАЗНЫХ рекомендаций по визуализации
+✅ Генерация 12–20 РАЗНООБРАЗНЫХ рекомендаций по визуализации (полный пул для последующего отбора top-N)
 ✅ Покрытие РАЗНЫХ категорий: chart, table, kpi, map
 ✅ Оценка актуальности каждой визуализации для конкретных данных
 
@@ -84,7 +84,7 @@ WIDGET_SUGGESTIONS_SYSTEM_PROMPT = '''
 
 2. **insights** — 1-2 ключевых вывода о данных (краткие).
 
-3. **recommendations** — ОБЯЗАТЕЛЬНО. Массив из 8-10 рекомендаций по ВИЗУАЛИЗАЦИИ:
+3. **recommendations** — ОБЯЗАТЕЛЬНО. Массив из 12–20 рекомендаций по ВИЗУАЛИЗАЦИИ:
    - action: ЧТО построить (название визуализации + описание)
    - columns: какие колонки использовать
    - rationale: ПОЧЕМУ эта визуализация подходит для данных
@@ -108,7 +108,7 @@ WIDGET_SUGGESTIONS_SYSTEM_PROMPT = '''
    - prompt: текст запроса для генерации виджета
 
    ВАЖНО:
-   - Генерируй МИНИМУМ 8 рекомендаций
+   - Генерируй МИНИМУМ 12 рекомендаций (целевой максимум — 20, если данных достаточно)
    - Покрывай МИНИМУМ 3-4 РАЗНЫХ категории (chart, table, kpi, map)
    - Используй КОНКРЕТНЫЕ названия колонок из данных!
    - Для каждой рекомендации давай ГОТОВЫЙ prompt для генерации
@@ -201,11 +201,23 @@ TRANSFORM_SUGGESTIONS_SYSTEM_PROMPT = '''
    - merge — объединение таблиц (JOIN по ключу)
    - reshape — изменение формы (PIVOT, UNPIVOT, агрегирующие сводные таблицы)
 
+## ОБЪЕДИНЕНИЕ ТАБЛИЦ (type: merge) — ПРИОРИТЕТ КЛЮЧЕЙ:
+
+Объединение по общему полю — одна из самых частых операций аналитика; относитесь к таким рекомендациям серьёзно.
+
+- **В первую очередь** предлагайте JOIN, если в схеме видны **суррогатные ключи**, которые источники часто добавляют специально для связей:
+  - столбцы с **GUID/UUID** (в имени или типе: uuid, guid, uniqueidentifier и т.п.);
+  - столбцы с суффиксом **`_id`** (например `order_id`, `customer_id`, `entity_id`) — технические идентификаторы, а не «человеческие» названия;
+  - **имена полей как подсказка связей**: если в наборе таблиц есть, например, `company`, то столбец вида **`company_id`** в другой таблице — вероятный внешний ключ на `company`; составные имена через подчёркивание (**`product_company_id`**, `order_customer_id`) часто означают связь **двух** сущностей — сопоставляйте с именами таблиц в схеме и предлагайте merge с высоким relevance, когда имена согласуются;
+  - одинаковое имя и совместимый тип у колонки в **двух и более таблицах** — сильный сигнал к merge с **высоким relevance** (0.75–1.0), если это не очевидный дубликат ошибки.
+- **Снижайте приоритет** объединений по «смысловым» полям (ФИО, адрес, произвольный текст, даты без явного ключа), если для тех же сущностей в данных уже есть суррогатный `_id` или GUID — в action/rationale явно укажите предпочтение технического ключа.
+- В **rationale** для merge кратко поясняйте: по какому столбцу(ам) связать и почему это **идентификатор из источника**, а не догадка по названию.
+
 2. Каждая рекомендация ДОЛЖНА ссылаться на реальные колонки из данных ("columns" и "column_refs").
    НЕЛЬЗЯ придумывать несуществующие колонки.
 
-3. Генерируйте минимум 8 РАЗНООБРАЗНЫХ рекомендаций, покрывая разные типы трансформаций
-   (filter, aggregation, calculation, cleaning, sorting, merge/reshape и т.п.).
+3. Генерируйте минимум 12 РАЗНООБРАЗНЫХ рекомендаций (целевой максимум — 20 при достаточных данных),
+   покрывая разные типы трансформаций (filter, aggregation, calculation, cleaning, sorting, merge/reshape и т.п.).
 
 4. НЕ предлагайте визуализации (chart, dashboard, pie chart, bar chart и т.п.) —
    это задача других агентов. Здесь нужны именно ИДЕИ ТРАНСФОРМАЦИЙ.
@@ -219,6 +231,63 @@ TRANSFORM_SUGGESTIONS_SYSTEM_PROMPT = '''
 7. Числа (confidence, relevance) — это ЧИСЛА, а не строки.
 
 8. НЕ оборачивайте JSON в ```json ... ``` и не добавляйте текст до/после JSON.
+'''
+
+# ══════════════════════════════════════════════════════════════════
+# System Prompt для Document Suggestions (промпты для чата извлечения)
+# context.controller == "document_suggestions"
+# ══════════════════════════════════════════════════════════════════
+DOCUMENT_SUGGESTIONS_SYSTEM_PROMPT = '''
+Вы — Analyst Agent в режиме ПОДСКАЗОК ДЛЯ ИЗВЛЕЧЕНИЯ ДАННЫХ ИЗ ДОКУМЕНТА (GigaBoard).
+Ваша задача — по фрагменту текста документа и схемам уже извлечённых таблиц предложить
+РАЗНООБРАЗНЫЕ готовые формулировки запросов (промптов), которые пользователь может
+отправить в чат извлечения.
+
+## ВАЖНО:
+- В пользовательском запросе (TASK) обязательно есть раздел с **фрагментом извлечённого текста документа** — опирайтесь на него; не выдумывайте темы, которых нет в этом фрагменте (если фрагмент узкий — укажите это в поле "text").
+- Данные документа также могут дублироваться в блоке AVAILABLE INPUT DATA.
+- НЕ предлагайте поиск в интернете и не описывайте загрузку файла — только работа с текстом документа.
+- Рекомендации — это не Python-код, а **короткие задачи на русском** для чата извлечения.
+
+## ФОРМАТ ВЫВОДА — только чистый JSON:
+
+{
+  "text": "Кратко: о чём документ и какие направления извлечения уместны.",
+  "insights": [],
+  "recommendations": [
+    {
+      "action": "Готовый промпт одной строкой: что извлечь или уточнить",
+      "columns": [],
+      "rationale": "Зачем это пользователю",
+      "type": "filter | aggregation | calculation | sorting | cleaning | merge | reshape",
+      "relevance": 0.0-1.0,
+      "priority": "high | medium | low",
+      "confidence": 0.0-1.0
+    }
+  ],
+  "data_quality_issues": [],
+  "tables": [],
+  "confidence": 0.0-1.0
+}
+
+## ПРАВИЛА:
+
+1. Типы (type) используйте в смысле **извлечения из документа**:
+   - filter — сфокусироваться на разделе, вложении, странице, типе строк
+   - aggregation — свести показатели, итоги, срезы по периодам
+   - calculation — вывести производные величины, доли, дельты из таблиц в тексте
+   - sorting — упорядочить извлечённое (рейтинги, топы)
+   - cleaning — нормализовать единицы, форматы дат, дубликаты
+   - merge — сопоставить две таблицы/блока по ключу из документа
+   - reshape — развернуть/свернуть структуру (поквартально, по SKU и т.д.)
+
+2. Минимум 12 рекомендаций при достаточном объёме контекста (цель до 20).
+
+3. НЕ предлагайте графики, дашборды и визуализации — только извлечение и структурирование.
+
+4. Поле "action" должно быть готовым к вставке в чат (как пользовательский запрос).
+
+5. НЕ оборачивайте JSON в markdown.
 '''
 
 
@@ -497,7 +566,7 @@ class AnalystAgent(BaseAgent):
                 )
                 lines.append(f"~{rc} строк, полей {len(cols)}: {col_desc}")
         lines.append(
-            "\nНужно 8 идей визуализации (график, таблица или KPI). "
+            "\nНужно 12–20 идей визуализации (график, таблица или KPI). "
             "В columns — только имена из списка полей. "
             'JSON: {"text":"кратко","recommendations":['
             '{"action":"...","columns":["..."],"rationale":"...","type":"bar_chart","category":"chart"}]}. '
@@ -521,10 +590,39 @@ class AnalystAgent(BaseAgent):
                 )
                 lines.append(f"~{rc} строк: {col_desc}")
         lines.append(
-            "\n6 идей обработки в pandas (groupby, фильтр, производный столбец). "
+            "\n12–20 идей обработки в pandas (groupby, фильтр, производный столбец, merge/join). "
+            "Для join предпочитай столбцы GUID/UUID и суффикс _id; по имени поля (company_id, product_company_id) сопоставляй с таблицами в схеме. "
             'JSON: {"text":"...","recommendations":['
             '{"action":"...","rationale":"...","priority":"medium","type":"aggregation"}]}. '
             "type: filter|aggregation|join|derived_column."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _neutral_schema_user_document(context: Dict[str, Any]) -> Optional[str]:
+        """Нейтральный запрос для document_suggestions; включает короткий фрагмент текста из контекста."""
+        fn = str(context.get("filename") or "document")
+        dt = str(context.get("document_type") or "?")
+        nchars = int(context.get("document_text_chars") or 0)
+        summary = str(context.get("existing_tables_summary") or "").strip()
+        preview = str(context.get("document_excerpt_preview") or "").strip()
+        lines = [
+            f"Документ: {fn} ({dt}), ~{nchars} символов текста.",
+        ]
+        if preview:
+            lines.append("")
+            lines.append("Фрагмент извлечённого текста (начало):")
+            lines.append(preview[:10_000])
+        if summary:
+            lines.append("")
+            lines.append("Уже извлечённые таблицы (кратко):")
+            lines.append(summary[:4000])
+        lines.append(
+            "\nНужно 12–20 коротких промптов на русском для чата извлечения данных из этого документа; "
+            "формулировки должны отражать реальное содержание фрагмента выше. "
+            'JSON: {"text":"кратко","recommendations":['
+            '{"action":"...","rationale":"...","type":"filter","relevance":0.8}]}. '
+            "type: filter|aggregation|calculation|sorting|cleaning|merge|reshape."
         )
         return "\n".join(lines)
 
@@ -906,17 +1004,21 @@ class AnalystAgent(BaseAgent):
             controller = (context or {}).get("controller", "")
             is_widget_mode = controller == "widget_suggestions"
             is_transform_suggestions_mode = controller == "transform_suggestions"
+            is_document_suggestions_mode = controller == "document_suggestions"
 
             if is_widget_mode:
                 effective_prompt = WIDGET_SUGGESTIONS_SYSTEM_PROMPT
-                effective_max_tokens = 3000
+                effective_max_tokens = 4000
                 self.logger.info("🎨 Using WIDGET_SUGGESTIONS system prompt for visualization recommendations")
             elif is_transform_suggestions_mode:
                 effective_prompt = TRANSFORM_SUGGESTIONS_SYSTEM_PROMPT
-                # Подсказки по трансформациям могут быть чуть короче, чем виджетные,
-                # но всё равно требуют места для 8–10 рекомендаций.
-                effective_max_tokens = 2500
+                # Длинный JSON с 12–20 рекомендациями
+                effective_max_tokens = 3500
                 self.logger.info("🧮 Using TRANSFORM_SUGGESTIONS system prompt for transformation recommendations")
+            elif is_document_suggestions_mode:
+                effective_prompt = DOCUMENT_SUGGESTIONS_SYSTEM_PROMPT
+                effective_max_tokens = 3500
+                self.logger.info("📄 Using DOCUMENT_SUGGESTIONS system prompt for document extraction prompts")
             else:
                 # AI Assistant: style should follow user intent (concise vs detailed),
                 # not always a verbose report-like analysis.
@@ -957,7 +1059,7 @@ class AnalystAgent(BaseAgent):
                     "⚠️ Analyst returned JSON-like text that failed parsing; retrying with strict JSON correction"
                 )
                 try:
-                    raw = await self._call_gigachat_with_json_retry(
+                    raw = await self._call_llm_with_json_retry(
                         [dict(m) for m in messages],
                         parse_fn=self._parse_generic_response_strict,
                         context=context,
@@ -991,16 +1093,29 @@ class AnalystAgent(BaseAgent):
 
             # GigaChat blacklist на спец. промптах (зарплаты/вакансии и т.п.) — повтор с нейтральным системным промптом
             rec_count = sum(1 for f in findings if f.type == "recommendation")
-            if rec_count == 0 and (is_transform_suggestions_mode or is_widget_mode):
-                suffix = (
-                    "\n\nПредложи 5–8 вариантов трансформации табличных данных (pandas: groupby, агрегаты, фильтры, производные столбцы). "
-                    "Ответ — только JSON: {\"text\": \"...\", \"recommendations\": [{\"action\", \"rationale\", \"priority\", \"type\"}]}. "
-                    "type: filter | aggregation | join | derived_column."
-                    if is_transform_suggestions_mode
-                    else "\n\nПредложи 6–10 вариантов визуализации. Ответ — только JSON: "
-                    "{\"text\": \"...\", \"recommendations\": [{\"action\", \"columns\", \"rationale\", \"type\", \"category\"}]}. "
-                    "category: chart | table | kpi | map."
-                )
+            if rec_count == 0 and (
+                is_transform_suggestions_mode or is_widget_mode or is_document_suggestions_mode
+            ):
+                if is_transform_suggestions_mode:
+                    suffix = (
+                        "\n\nПредложи 12–20 вариантов трансформации табличных данных (pandas: groupby, агрегаты, фильтры, производные столбцы, JOIN). "
+                        "Для объединения таблиц в первую очередь используй суррогатные ключи: GUID/UUID и столбцы с суффиксом _id; имена вроде company_id или product_company_id сопоставляй с именами таблиц в схеме. "
+                        "Ответ — только JSON: {\"text\": \"...\", \"recommendations\": [{\"action\", \"rationale\", \"priority\", \"type\"}]}. "
+                        "type: filter | aggregation | join | derived_column."
+                    )
+                elif is_document_suggestions_mode:
+                    suffix = (
+                        "\n\nПредложи 12–20 коротких промптов на русском для чата извлечения данных из документа "
+                        "(что извлечь из текста и таблиц). Без кода и без графиков. "
+                        "Ответ — только JSON: {\"text\": \"...\", \"recommendations\": [{\"action\", \"rationale\", \"type\", \"relevance\"}]}. "
+                        "type: filter | aggregation | calculation | sorting | cleaning | merge | reshape."
+                    )
+                else:
+                    suffix = (
+                        "\n\nПредложи 12–20 вариантов визуализации. Ответ — только JSON: "
+                        "{\"text\": \"...\", \"recommendations\": [{\"action\", \"columns\", \"rationale\", \"type\", \"category\"}]}. "
+                        "category: chart | table | kpi | map."
+                    )
                 self.logger.warning(
                     "Suggestions mode: 0 recommendations (возможен blacklist); повтор с базовым промптом аналитика"
                 )
@@ -1020,12 +1135,15 @@ class AnalystAgent(BaseAgent):
 
             rec_count = sum(1 for f in findings if f.type == "recommendation")
             neutral: Optional[str] = None
-            if rec_count == 0 and (is_transform_suggestions_mode or is_widget_mode):
-                neutral = (
-                    self._neutral_schema_user_widget(input_data_for_prompt)
-                    if is_widget_mode
-                    else self._neutral_schema_user_transform(input_data_for_prompt)
-                )
+            if rec_count == 0 and (
+                is_transform_suggestions_mode or is_widget_mode or is_document_suggestions_mode
+            ):
+                if is_widget_mode:
+                    neutral = self._neutral_schema_user_widget(input_data_for_prompt)
+                elif is_document_suggestions_mode:
+                    neutral = AnalystAgent._neutral_schema_user_document(context or {})
+                else:
+                    neutral = self._neutral_schema_user_transform(input_data_for_prompt)
                 if neutral:
                     self.logger.warning(
                         "Suggestions mode: 3rd attempt (схема без sample_rows / нейтральный промпт)"
@@ -1051,7 +1169,7 @@ class AnalystAgent(BaseAgent):
             # сформировать ответ пользователю.
             if not narrative_text and findings:
                 parts = []
-                for f in findings[:10]:
+                for f in findings[:20]:
                     prefix = {"insight": "📊", "recommendation": "💡", "data_quality_issue": "⚠️"}.get(f.type, "•")
                     parts.append(f"{prefix} {f.text}")
                 narrative_text = "## Результаты анализа\n\n" + "\n".join(parts)
@@ -1062,6 +1180,7 @@ class AnalystAgent(BaseAgent):
                 and self._is_policy_refusal_narrative(narrative_text)
                 and not is_widget_mode
                 and not is_transform_suggestions_mode
+                and not is_document_suggestions_mode
             ):
                 fb = self._fallback_narrative_from_structurizer_tables(agent_results)
                 if fb:
@@ -1450,6 +1569,20 @@ class AnalystAgent(BaseAgent):
                             else:
                                 prompt_parts.append(f"Content: {content}")
                             prompt_parts.append("")
+
+                    drs = result.get("discovered_resources") or []
+                    if isinstance(drs, list) and drs:
+                        prompt_parts.append(
+                            f"Discovered resources (URLs + kind; from research): {len(drs)}"
+                        )
+                        for dr in drs[:40]:
+                            if isinstance(dr, dict):
+                                u = dr.get("url", "")
+                                prompt_parts.append(
+                                    f"  • {u} | kind={dr.get('resource_kind')} "
+                                    f"origin={dr.get('origin')} parent={dr.get('parent_url')}"
+                                )
+                        prompt_parts.append("")
                     
                     # tables — структурированные данные (structurizer)
                     tables = result.get("tables", [])

@@ -35,7 +35,7 @@ class SourceType(str, Enum):
     # Other sources
     API = "api"                 # REST API endpoint with pagination
     DATABASE = "database"       # Database connection (PostgreSQL, MySQL, SQLite)
-    RESEARCH = "research"       # AI Research — deep research via multi-agent (search → research → analyze)
+    RESEARCH = "research"       # Поиск с ИИ — deep research via multi-agent (search → research → analyze)
     MANUAL = "manual"           # Manual data entry — table constructor
     STREAM = "stream"           # Streaming source (Phase 4: WebSocket, SSE, Kafka)
 

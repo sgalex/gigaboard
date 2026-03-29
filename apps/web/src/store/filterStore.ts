@@ -10,6 +10,8 @@ import { notify } from './notificationStore'
 import type {
     Dimension,
     DimensionColumnMapping,
+    DimensionColumnMappingCreate,
+    DimensionCreate,
     FilterCondition,
     FilterExpression,
     FilterPreset,
@@ -39,8 +41,9 @@ interface FilterState {
     // Dimensions & mappings
     dimensions: Dimension[]
     nodeMappings: Record<string, DimensionColumnMapping[]> // nodeId → mappings
-    dimMappings: Record<string, DimensionColumnMapping[]>  // dimId → mappings (for explorer UI)
-    isLoadingDimMappings: Record<string, boolean>          // dimId → loading flag
+    /** Кэш маппингов по dimension id (ProjectExplorer — лениво при раскрытии измерения). */
+    dimMappings: Record<string, DimensionColumnMapping[]>
+    isLoadingDimMappings: Record<string, boolean>
 
     // Presets
     presets: FilterPreset[]
@@ -57,17 +60,13 @@ interface FilterState {
     isLoadingDimensions: boolean
     isLoadingPresets: boolean
 
-    // Пересчитанные данные нод (не сохраняются в БД, только для отображения). Всегда отфильтрованные — для карточек ContentNode.
+    // Пересчитанные данные нод (не сохраняются в БД, только для отображения)
     filteredNodeData: Record<string, FilteredNodeEntry> | null
-    /** Полные (не отфильтрованные) данные только для initiator ContentNode — для виджета (highlight full vs filtered). */
-    initiatorFullNodeData: Record<string, FilteredNodeEntry>
     isComputingFiltered: boolean
 
-    // Content node IDs, для которых возвращать полные данные в initiatorFullNodeData — виджеты-инициаторы
     initiatorContentNodeIds: string[]
-
-    // Стек предыдущих датасетов по виджету-инициатору (для отрисовки «предыдущее состояние + выделенный текущий»)
-    dataStackByWidgetId: Record<string, Array<{ tables: any[] }>>
+    initiatorFullNodeData: Record<string, FilteredNodeEntry>
+    widgetDataStacks: Record<string, { tables: any[] }[]>
 }
 
 interface FilterActions {
@@ -76,25 +75,35 @@ interface FilterActions {
 
     // Filter mutations
     setFilters: (filters: FilterExpression | null) => void
-    addCondition: (condition: FilterCondition, initiatorWidgetId?: string, contentNodeId?: string) => void
+    addCondition: (condition: FilterCondition) => void
     removeCondition: (dimName: string) => void
-
-    /** Стек предыдущих датасетов для виджета-инициатора (только если виджет инициировал фильтр) */
-    getDataStack: (widgetId: string) => Array<{ tables: any[] }>
-    /** Виджет при клике кладёт текущие данные в стек (вызывается из оснастки по postMessage) */
-    pushToDataStack: (widgetId: string, tables: any[]) => void
     clearFilters: () => void
 
-    // Content node IDs для виджетов-инициаторов (полные данные для highlight)
-    setInitiatorContentNodeIds: (ids: string[]) => void
-
-    // Click-to-filter from widget (nodeId = contentNodeId, widgetNodeId = widget that initiated)
-    handleWidgetClick: (field: string, value: any, contentNodeId: string, widgetNodeId?: string) => void
-    handleWidgetToggleFilter: (dimension: string, value: any, contentNodeId: string, widgetNodeId?: string) => void
+    // Click-to-filter from widget
+    handleWidgetClick: (
+        field: string,
+        value: any,
+        contentNodeId: string,
+        initiatorWidgetId?: string
+    ) => void
+    handleWidgetToggleFilter: (
+        dimension: string,
+        value: any,
+        contentNodeId: string,
+        widgetId?: string
+    ) => void
     handleWidgetRemoveFilter: (dimension: string) => void
 
-    // Условия, добавленные конкретным виджетом (для мини-фильтра на карточке)
+    /** Условия фильтра, добавленные указанным виджетом (мини-фильтр на карточке). */
     getConditionsByInitiator: (widgetNodeId: string) => FilterCondition[]
+
+    setInitiatorContentNodeIds: (ids: string[]) => void
+
+    getDataStack: (widgetNodeId: string) => { tables: any[] }[]
+    pushToDataStack: (widgetNodeId: string, tables: any[]) => void
+
+    /** Резолв имени измерения по полю и content node (4-tier, см. CROSS_FILTER_SYSTEM). */
+    resolveDimensionForWidget: (field: string, contentNodeId: string) => string
 
     // Presets
     loadPresets: (projectId: string) => Promise<void>
@@ -105,13 +114,15 @@ interface FilterActions {
     loadDimensions: (projectId: string) => Promise<void>
     loadMappingsForNode: (nodeId: string) => Promise<void>
     loadMappingsForDimension: (projectId: string, dimId: string) => Promise<void>
-    deleteDimensionMapping: (projectId: string, mappingId: string, dimId: string) => Promise<void>
-    createDimensionMapping: (projectId: string, dimId: string, data: {
-        node_id: string; table_name: string; column_name: string
-    }) => Promise<void>
+    createDimension: (projectId: string, data: DimensionCreate) => Promise<void>
     deleteDimension: (projectId: string, dimId: string) => Promise<void>
-    createDimension: (projectId: string, data: { name: string; display_name?: string; dim_type?: string }) => Promise<Dimension | null>
     mergeDimensions: (projectId: string, sourceIds: string[], targetId: string) => Promise<void>
+    createDimensionMapping: (
+        projectId: string,
+        dimId: string,
+        data: Omit<DimensionColumnMappingCreate, 'dimension_id'>
+    ) => Promise<void>
+    deleteDimensionMapping: (projectId: string, mappingId: string, dimId: string) => Promise<void>
 
     // UI
     setFilterBarVisible: (v: boolean) => void
@@ -152,27 +163,12 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
     isLoadingDimensions: false,
     isLoadingPresets: false,
     filteredNodeData: null,
-    initiatorFullNodeData: {},
     isComputingFiltered: false,
     initiatorContentNodeIds: [],
-    dataStackByWidgetId: {},
+    initiatorFullNodeData: {},
+    widgetDataStacks: {},
 
     // ── Context ────────────────────────────────────────────────────
-
-    getDataStack: (widgetId) => {
-        return get().dataStackByWidgetId[widgetId] ?? []
-    },
-
-    pushToDataStack: (widgetId, tables) => {
-        if (!widgetId || !Array.isArray(tables) || tables.length === 0) return
-        const stack = get().dataStackByWidgetId[widgetId] ?? []
-        set({
-            dataStackByWidgetId: {
-                ...get().dataStackByWidgetId,
-                [widgetId]: [...stack, { tables: tables }],
-            },
-        })
-    },
 
     setContext: (ctx) => {
         const prev = get().context
@@ -189,9 +185,11 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
                 activePresetId: null,
                 filterStats: [],
                 filteredNodeData: null,
-                initiatorFullNodeData: {},
                 initiatorContentNodeIds: [],
-                dataStackByWidgetId: {},
+                initiatorFullNodeData: {},
+                widgetDataStacks: {},
+                dimMappings: {},
+                isLoadingDimMappings: {},
             })
         } else {
             set({ context: ctx })
@@ -206,53 +204,30 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
         get().computeFiltered()
     },
 
-    addCondition: (condition, initiatorWidgetId, contentNodeId) => {
+    addCondition: (condition) => {
         const { activeFilters } = get()
         const existing = flattenConditions(activeFilters)
-        const withInitiator =
-            initiatorWidgetId && contentNodeId
-                ? { ...condition, initiatorWidgetId, initiatorContentNodeId: contentNodeId }
-                : initiatorWidgetId
-                  ? { ...condition, initiatorWidgetId }
-                  : condition
-        // Стек заполняется виджетом при вызове toggleFilter (pushCurrentDataToStack в оснастке)
-        const filtered = existing.filter((c) => c.dim !== withInitiator.dim)
-        filtered.push(withInitiator as FilterCondition)
-        const newFilters = buildAndGroup(filtered)
-        const initiatorIds = [...new Set((filtered as FilterCondition[]).map((c) => c.initiatorContentNodeId).filter(Boolean))] as string[]
-        set({
-            activeFilters: newFilters,
-            activePresetId: null,
-            initiatorContentNodeIds: initiatorIds,
+        const filtered = existing.filter((c) => {
+            if (c.dim !== condition.dim) return true
+            const a = condition.initiatorWidgetId
+            const b = c.initiatorWidgetId
+            const sameInitiator =
+                (a == null && b == null) || (a != null && b != null && a === b)
+            return !sameInitiator
         })
+        filtered.push(condition)
+        const newFilters = buildAndGroup(filtered)
+        set({ activeFilters: newFilters, activePresetId: null })
         get().syncFiltersToBackend()
         get().computeFiltered()
     },
 
-    setInitiatorContentNodeIds: (ids) => set({ initiatorContentNodeIds: ids }),
-
     removeCondition: (dimName) => {
-        const { activeFilters, dataStackByWidgetId } = get()
+        const { activeFilters } = get()
         const existing = flattenConditions(activeFilters)
-        const removed = existing.find((c) => c.dim === dimName) as FilterCondition | undefined
-        // Оснастка: при снятии фильтра убираем одну запись из стека виджета-инициатора
-        let nextStack = dataStackByWidgetId
-        if (removed?.initiatorWidgetId) {
-            const stack = dataStackByWidgetId[removed.initiatorWidgetId]
-            if (stack?.length) {
-                const newStack = stack.slice(0, -1)
-                nextStack = { ...dataStackByWidgetId, [removed.initiatorWidgetId]: newStack }
-            }
-        }
         const filtered = existing.filter((c) => c.dim !== dimName)
         const newFilters = buildAndGroup(filtered)
-        const initiatorIds = [...new Set((filtered as FilterCondition[]).map((c) => c.initiatorContentNodeId).filter(Boolean))] as string[]
-        set({
-            activeFilters: newFilters,
-            activePresetId: null,
-            dataStackByWidgetId: nextStack,
-            initiatorContentNodeIds: initiatorIds,
-        })
+        set({ activeFilters: newFilters, activePresetId: null })
         get().syncFiltersToBackend()
         get().computeFiltered()
     },
@@ -263,80 +238,91 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
             activePresetId: null,
             filterStats: [],
             filteredNodeData: null,
-            initiatorFullNodeData: {},
-            dataStackByWidgetId: {},
             initiatorContentNodeIds: [],
+            initiatorFullNodeData: {},
+            widgetDataStacks: {},
         })
         get().syncFiltersToBackend()
     },
 
     // ── Click-to-filter ────────────────────────────────────────────
 
-    handleWidgetClick: (field, value, contentNodeId, widgetNodeId) => {
-        let dimName = get().resolveFieldToDimension(field, contentNodeId)?.name
-
-        if (!dimName) {
-            const allMappings = Object.values(get().nodeMappings).flat() as any[]
-            const m = allMappings.find((m) => m.column_name === field)
-            if (m) dimName = m.dim_name
+    resolveDimensionForWidget: (field, contentNodeId) => {
+        const direct = get().resolveFieldToDimension(field, contentNodeId)
+        if (direct) return direct.name
+        for (const maps of Object.values(get().nodeMappings)) {
+            const mapping = maps.find((m) => m.column_name === field)
+            if (mapping) {
+                const dim = get().dimensions.find((d) => d.name === mapping.dim_name)
+                if (dim) return dim.name
+            }
         }
-        if (!dimName) dimName = get().dimensions.find((d) => d.name === field)?.name
-        if (!dimName) dimName = field  // last resort: use column name directly
+        const byName = get().dimensions.find((d) => d.name === field)
+        if (byName) return byName.name
+        return field
+    },
 
-        if (!get().nodeMappings[contentNodeId]) get().loadMappingsForNode(contentNodeId)
+    handleWidgetClick: (field, value, contentNodeId, initiatorWidgetId) => {
+        void get().loadMappingsForNode(contentNodeId)
+        const dimName = get().resolveDimensionForWidget(field, contentNodeId)
+        get().addCondition({
+            type: 'condition',
+            dim: dimName,
+            op: '==',
+            value,
+            initiatorWidgetId,
+            initiatorContentNodeId: contentNodeId,
+        })
+    },
 
-        get().addCondition(
-            { type: 'condition', dim: dimName, op: '==', value },
-            widgetNodeId,
-            contentNodeId,
+    handleWidgetToggleFilter: (dimension, value, contentNodeId, widgetId) => {
+        void get().loadMappingsForNode(contentNodeId)
+        const dimName = get().resolveDimensionForWidget(dimension, contentNodeId)
+        const flat = flattenConditions(get().activeFilters)
+        const idx = flat.findIndex(
+            (c) =>
+                c.dim === dimName &&
+                c.op === '==' &&
+                c.value === value &&
+                (widgetId != null ? c.initiatorWidgetId === widgetId : !c.initiatorWidgetId)
         )
+        if (idx >= 0) {
+            const rest = flat.filter((_, i) => i !== idx)
+            set({ activeFilters: buildAndGroup(rest), activePresetId: null })
+            get().syncFiltersToBackend()
+            get().computeFiltered()
+            return
+        }
+        get().handleWidgetClick(dimension, value, contentNodeId, widgetId)
     },
 
-    handleWidgetToggleFilter: (dimension, value, contentNodeId, widgetNodeId) => {
-        // 1. Try to resolve via loaded nodeMappings
-        let dimName = get().resolveFieldToDimension(dimension, contentNodeId)?.name
-
-        // 2. Fallback: search all loaded nodeMappings for any node that has this column
-        if (!dimName) {
-            const allMappings = Object.values(get().nodeMappings).flat() as any[]
-            const m = allMappings.find((m) => m.column_name === dimension)
-            if (m) dimName = m.dim_name
-        }
-
-        // 3. Fallback: find dimension by name directly
-        if (!dimName) {
-            dimName = get().dimensions.find((d) => d.name === dimension)?.name
-        }
-
-        // 4. Last resort: use the column name as-is
-        if (!dimName) dimName = dimension
-
-        // Lazily load mappings for this node so future clicks resolve faster
-        if (!get().nodeMappings[contentNodeId]) get().loadMappingsForNode(contentNodeId)
-
-        const existing = flattenConditions(get().activeFilters)
-        const match = existing.find((c) => c.dim === dimName && c.value === value)
-        if (match) {
-            get().removeCondition(dimName)
-        } else {
-            get().addCondition(
-                { type: 'condition', dim: dimName, op: '==', value },
-                widgetNodeId,
-                contentNodeId,
-            )
-        }
+    handleWidgetRemoveFilter: (dimension: string) => {
+        get().removeCondition(dimension)
     },
 
-    getConditionsByInitiator: (widgetNodeId) => {
-        const conditions = flattenConditions(get().activeFilters)
-        return conditions.filter((c) => c.initiatorWidgetId === widgetNodeId)
+    getConditionsByInitiator: (widgetNodeId: string) =>
+        flattenConditions(get().activeFilters).filter((c) => c.initiatorWidgetId === widgetNodeId),
+
+    setInitiatorContentNodeIds: (ids) => {
+        const fnd = get().filteredNodeData
+        const nextFull: Record<string, FilteredNodeEntry> = {}
+        if (fnd && ids.length) {
+            for (const id of ids) {
+                if (fnd[id]) nextFull[id] = fnd[id]
+            }
+        }
+        set({ initiatorContentNodeIds: ids, initiatorFullNodeData: nextFull })
     },
 
-    handleWidgetRemoveFilter: (dimension) => {
-        const dimName = get().dimensions.find((d) => d.name === dimension)?.name
-        if (dimName) {
-            get().removeCondition(dimName)
-        }
+    getDataStack: (widgetNodeId: string) => get().widgetDataStacks[widgetNodeId] ?? [],
+
+    pushToDataStack: (widgetNodeId, tables) => {
+        set((s) => ({
+            widgetDataStacks: {
+                ...s.widgetDataStacks,
+                [widgetNodeId]: [...(s.widgetDataStacks[widgetNodeId] ?? []), { tables }],
+            },
+        }))
     },
 
     // ── Presets ────────────────────────────────────────────────────
@@ -387,7 +373,7 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
     // ── Dimensions ─────────────────────────────────────────────────
 
     loadDimensions: async (projectId) => {
-        set({ isLoadingDimensions: true })
+        set({ isLoadingDimensions: true, dimMappings: {}, isLoadingDimMappings: {} })
         try {
             const res = await dimensionsAPI.list(projectId)
             set({ dimensions: res.data })
@@ -395,6 +381,100 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
             console.error('Failed to load dimensions', e)
         } finally {
             set({ isLoadingDimensions: false })
+        }
+    },
+
+    loadMappingsForDimension: async (projectId, dimId) => {
+        set((s) => ({
+            isLoadingDimMappings: { ...s.isLoadingDimMappings, [dimId]: true },
+        }))
+        try {
+            const res = await dimensionsAPI.listMappings(projectId, dimId)
+            set((s) => ({
+                dimMappings: { ...s.dimMappings, [dimId]: res.data },
+                isLoadingDimMappings: { ...s.isLoadingDimMappings, [dimId]: false },
+            }))
+        } catch (e) {
+            console.error('Failed to load dimension mappings', dimId, e)
+            set((s) => ({
+                isLoadingDimMappings: { ...s.isLoadingDimMappings, [dimId]: false },
+            }))
+        }
+    },
+
+    createDimension: async (projectId, data) => {
+        try {
+            const res = await dimensionsAPI.create(projectId, data)
+            set((s) => ({ dimensions: [...s.dimensions, res.data] }))
+            notify.success(`Измерение «${data.display_name || data.name}» создано`)
+        } catch (e) {
+            console.error('Failed to create dimension', e)
+            notify.error('Не удалось создать измерение')
+        }
+    },
+
+    deleteDimension: async (projectId, dimId) => {
+        try {
+            await dimensionsAPI.delete(projectId, dimId)
+            set((s) => {
+                const { [dimId]: _removed, ...restMaps } = s.dimMappings
+                const { [dimId]: _loading, ...restLoading } = s.isLoadingDimMappings
+                return {
+                    dimensions: s.dimensions.filter((d) => d.id !== dimId),
+                    dimMappings: restMaps,
+                    isLoadingDimMappings: restLoading,
+                }
+            })
+            notify.success('Измерение удалено')
+        } catch (e) {
+            console.error('Failed to delete dimension', e)
+            notify.error('Не удалось удалить измерение')
+        }
+    },
+
+    mergeDimensions: async (projectId, sourceIds, targetId) => {
+        try {
+            const res = await dimensionsAPI.mergeDimensions(projectId, {
+                source_ids: sourceIds,
+                target_id: targetId,
+            })
+            await get().loadDimensions(projectId)
+            await get().loadMappingsForDimension(projectId, targetId)
+            notify.success(
+                `Объединено: перенесено связей ${res.data.transferred_count}, удалено измерений ${res.data.deleted_count}`,
+            )
+        } catch (e) {
+            console.error('Failed to merge dimensions', e)
+            notify.error('Не удалось объединить измерения')
+        }
+    },
+
+    createDimensionMapping: async (projectId, dimId, data) => {
+        try {
+            await dimensionsAPI.createMapping(projectId, dimId, {
+                ...data,
+                dimension_id: dimId,
+            })
+            await get().loadMappingsForDimension(projectId, dimId)
+            notify.success('Поле связано с измерением')
+        } catch (e) {
+            console.error('Failed to create dimension mapping', e)
+            notify.error('Не удалось добавить связь')
+        }
+    },
+
+    deleteDimensionMapping: async (projectId, mappingId, dimId) => {
+        try {
+            await dimensionsAPI.deleteMapping(projectId, mappingId)
+            set((s) => ({
+                dimMappings: {
+                    ...s.dimMappings,
+                    [dimId]: (s.dimMappings[dimId] ?? []).filter((m) => m.id !== mappingId),
+                },
+            }))
+        } catch (e) {
+            console.error('Failed to delete dimension mapping', e)
+            notify.error('Не удалось удалить связь')
         }
     },
 
@@ -412,116 +492,6 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
         }
     },
 
-    loadMappingsForDimension: async (projectId, dimId) => {
-        set((state) => ({
-            isLoadingDimMappings: { ...state.isLoadingDimMappings, [dimId]: true },
-        }))
-        try {
-            const res = await dimensionsAPI.listMappings(projectId, dimId)
-            set((state) => ({
-                dimMappings: { ...state.dimMappings, [dimId]: res.data },
-            }))
-        } catch (e) {
-            console.error('Failed to load mappings for dimension', dimId, e)
-        } finally {
-            set((state) => ({
-                isLoadingDimMappings: { ...state.isLoadingDimMappings, [dimId]: false },
-            }))
-        }
-    },
-
-    deleteDimensionMapping: async (projectId, mappingId, dimId) => {
-        // Optimistic update
-        set((state) => ({
-            dimMappings: {
-                ...state.dimMappings,
-                [dimId]: (state.dimMappings[dimId] ?? []).filter((m) => m.id !== mappingId),
-            },
-        }))
-        try {
-            await dimensionsAPI.deleteMapping(projectId, mappingId)
-        } catch (e) {
-            console.error('Failed to delete mapping', mappingId, e)
-            notify.error('Не удалось удалить ассоциацию')
-            // Reload to restore consistent state
-            await get().loadMappingsForDimension(projectId, dimId)
-        }
-    },
-
-    createDimensionMapping: async (projectId, dimId, data) => {
-        try {
-            const res = await dimensionsAPI.createMapping(projectId, dimId, {
-                dimension_id: dimId,
-                node_id: data.node_id,
-                table_name: data.table_name,
-                column_name: data.column_name,
-                mapping_source: 'manual',
-                confidence: 1.0,
-            })
-            set((state) => ({
-                dimMappings: {
-                    ...state.dimMappings,
-                    [dimId]: [...(state.dimMappings[dimId] ?? []), res.data],
-                },
-            }))
-        } catch (e) {
-            console.error('Failed to create mapping', e)
-            notify.error('Не удалось добавить ассоциацию')
-        }
-    },
-
-    // ── Dimension CRUD ─────────────────────────────────────────────
-
-    deleteDimension: async (projectId, dimId) => {
-        // Optimistic update
-        set((state) => ({
-            dimensions: state.dimensions.filter((d) => d.id !== dimId),
-            dimMappings: Object.fromEntries(
-                Object.entries(state.dimMappings).filter(([k]) => k !== dimId)
-            ),
-        }))
-        try {
-            await dimensionsAPI.delete(projectId, dimId)
-        } catch (e) {
-            console.error('Failed to delete dimension', dimId, e)
-            notify.error('Не удалось удалить измерение')
-            // Reload to restore consistent state
-            await get().loadDimensions(projectId)
-        }
-    },
-
-    createDimension: async (projectId, data) => {
-        try {
-            const res = await dimensionsAPI.create(projectId, data)
-            set((state) => ({ dimensions: [...state.dimensions, res.data] }))
-            return res.data
-        } catch (e) {
-            console.error('Failed to create dimension', e)
-            notify.error('Не удалось создать измерение')
-            return null
-        }
-    },
-
-    mergeDimensions: async (projectId, sourceIds, targetId) => {
-        try {
-            await dimensionsAPI.merge(projectId, sourceIds, targetId)
-            // Refresh dimensions and mappings after merge
-            await get().loadDimensions(projectId)
-            // Clear stale mapping caches for merged dims
-            const cleaned: Record<string, DimensionColumnMapping[]> = {}
-            for (const [k, v] of Object.entries(get().dimMappings)) {
-                if (!sourceIds.includes(k)) cleaned[k] = v
-            }
-            set({ dimMappings: cleaned })
-            // Reload target mappings to get transferred ones
-            await get().loadMappingsForDimension(projectId, targetId)
-            notify.success('Измерения объединены')
-        } catch (e) {
-            console.error('Failed to merge dimensions', e)
-            notify.error('Не удалось объединить измерения')
-        }
-    },
-
     // ── UI ─────────────────────────────────────────────────────────
 
     setFilterBarVisible: (v) => set({ isFilterBarVisible: v }),
@@ -531,25 +501,27 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
     // ── Пересчёт pandas-цепочки ────────────────────────────────────
 
     computeFiltered: async () => {
-        const { context, activeFilters, initiatorContentNodeIds, isComputingFiltered } = get()
-        if (!context) return
-        if (isComputingFiltered) return
+        const { context, activeFilters, isComputingFiltered } = get()
+        // Пересчёт только для досок (не для дашбордов)
+        if (!context || context.type !== 'board') return
+        if (isComputingFiltered) return  // уже считаем
 
         set({ isComputingFiltered: true })
         try {
-            const body = {
-                filters: activeFilters,
-                initiator_content_node_ids: initiatorContentNodeIds.length > 0 ? initiatorContentNodeIds : undefined,
+            const res = await filtersAPI.computeFiltered(context.id, activeFilters)
+            const nodes = res.data.nodes as Record<string, FilteredNodeEntry>
+            set({ filteredNodeData: nodes })
+            const ids = get().initiatorContentNodeIds
+            if (ids.length && nodes) {
+                const nextFull: Record<string, FilteredNodeEntry> = {}
+                for (const id of ids) {
+                    if (nodes[id]) nextFull[id] = nodes[id]
+                }
+                set({ initiatorFullNodeData: nextFull })
             }
-            const res = context.type === 'board'
-                ? await filtersAPI.computeFiltered(context.id, body)
-                : await filtersAPI.computeFilteredDashboard(context.id, body)
-            set({
-                filteredNodeData: res.data.nodes,
-                initiatorFullNodeData: res.data.initiator_full_data ?? {},
-            })
         } catch (e) {
             console.error('Failed to compute filtered pipeline', e)
+            // При ошибке сбрасываем — карточки покажут исходные данные
             set({ filteredNodeData: null, initiatorFullNodeData: {} })
         } finally {
             set({ isComputingFiltered: false })

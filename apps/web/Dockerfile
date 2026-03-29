@@ -1,4 +1,13 @@
-# Multi-stage: production build. Контекст — корень репозитория (npm workspaces + copy-libs).
+# Multi-stage: production build.
+# Контекст сборки — корень репозитория (npm workspaces: package.json + apps/web/package.json;
+# node_modules и lockfile на корне; copy-libs.cjs читает echarts/leaflet из корневого node_modules).
+#
+# После изменений в apps/web ОБЯЗАТЕЛЬНО пересоберите образ, иначе в nginx останется старый dist:
+#   docker compose build frontend && docker compose up -d frontend
+# При подозрении на кэш слоёв: docker compose build --no-cache frontend
+#
+# VITE_API_URL: по умолчанию пусто — в бандле относительные /api (nginx проксирует на backend).
+# Задавайте в .env только если API на другом origin; после смены — пересборка frontend.
 FROM node:20-alpine AS builder
 
 WORKDIR /workspace
@@ -11,7 +20,6 @@ RUN npm ci
 COPY apps/web ./apps/web
 
 WORKDIR /workspace/apps/web
-# Пусто = REST и Socket.IO с того же origin, что и nginx (см. apps/web/src/config/apiBase.ts)
 ARG VITE_API_URL=
 ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build

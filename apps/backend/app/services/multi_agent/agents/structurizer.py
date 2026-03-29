@@ -15,6 +15,7 @@ import uuid
 from typing import Dict, Any, Optional, List
 
 from .base import BaseAgent
+from ..runtime_overrides import ma_int
 from ..message_bus import AgentMessageBus
 from ..schemas.agent_payload import (
     Column,
@@ -61,6 +62,15 @@ STRUCTURIZER_SYSTEM_PROMPT = '''
 ✅ ПРАВИЛЬНО:
 {"tables": [...], "entities": [...], "extraction_confidence": 0.85}
 
+## ЗАПРЕТ YAML И ПСЕВДОКОДА ДЛЯ ТАБЛИЦ (КРИТИЧЕСКИ)
+
+- **Никогда** не оформляй таблицу как YAML (`tables:`, `- columns:`, `- rows:`) и не вставляй такой текст в `notes` вместо JSON.
+- Весь табличный результат — только внутри JSON: `"tables": [ { "name", "columns", "rows" } ]`.
+- Поле **`rows`** — это JSON-массив **массивов значений** в порядке колонок: `[ ["Строка1 кол1", 10], ["Строка2 кол1", null] ]`.
+- Если отдаёшь строку как **объект** (редко), ключи полей должны **точно совпадать** с `"name"` из `columns` (те же символы). Предпочтительно всегда использовать **массивы значений** по порядку колонок — так меньше ошибок.
+- **Нельзя** отдавать строки категорий отдельным списком строк в `rows` без массивов — каждая строка таблицы **обязана** быть массивом: `[["Cat A"], ["Cat B"]]` при одной колонке, `[["Cat A", null], ["Cat B", 3]]` при двух.
+- Краткое пояснение — только в `notes` (обычный текст), без дублирования таблицы в виде YAML.
+
 ## ОБЯЗАТЕЛЬНАЯ СТРУКТУРА ОТВЕТА:
 
 {
@@ -92,6 +102,26 @@ STRUCTURIZER_SYSTEM_PROMPT = '''
   "notes": "Extracted 1 table with 5 rows from HTML content"
 }
 
+## ДВУХФАЗНАЯ МОДЕЛЬ ТАБЛИЦ (ОБЯЗАТЕЛЬНО)
+
+Когда из текста или по **задаче пользователя** нужно получить табличные данные (в т.ч. если в документе **нет** готовой HTML/markdown-таблицы, но есть перечень, вложения, разделы с однотипными блоками):
+
+1. **Сначала — схема (структура)**  
+   Зафиксируй **имя таблицы** и **полный список колонок** `columns` с типами. Колонки выводи из **семантики задачи** (что пользователь просит извлечь) и из фрагмента текста (какие поля логично различать).  
+   Не сокращай число колонок «из удобства» — лучше лишняя колонка с `null`, чем потеря структуры.
+
+2. **Затем — заполнение**  
+   Заполни массив `rows`: каждая строка — массив значений **в том же порядке**, что и `columns`. Значения бери из текста по смыслу.
+
+3. **Пустые ячейки**  
+   Если для колонки в источнике нет значения — ставь **`null`** (не удаляй колонку, не обрезай строку). Частично заполненная таблица **лучше**, чем отсутствие строк при наличии схемы.
+
+4. **Таблица как артефакт**  
+   Если пользователь явно просит «таблицу», «список полей», «сводку по строкам» — в ответе **должна быть хотя бы одна** запись в `tables` с осмысленными `columns`; `rows` могут быть пустым массивом `[]` **только** если в тексте действительно нет ни одной строки данных под эту схему. Если данные есть частично — заполни сколько можешь, остальное `null`.
+
+5. **Не переносить данные только в `notes` или narrative downstream**  
+   Итоговые извлекаемые значения для предпросмотра и пайплайна — в **`tables[].rows`**. Текстовое резюме в `notes` — дополнение, не замена строк таблицы.
+
 ## ПРАВИЛА ИЗВЛЕЧЕНИЯ:
 
 ### Таблицы:
@@ -99,6 +129,7 @@ STRUCTURIZER_SYSTEM_PROMPT = '''
 2. Определяй типы: int (числа без дробной части), float (с дробной), string (текст), date, bool
 3. Давай осмысленные имена таблицам на основе контекста
 4. Если данные представлены списком — преобразуй в таблицу
+5. Если готовой таблицы в тексте нет, но задача однозначно задаёт измерения (столбцы) — **создай таблицу по правилам двухфазной модели выше**
 
 ### Сущности:
 - company: названия компаний, брендов
@@ -176,8 +207,33 @@ STRUCTURIZER_SYSTEM_PROMPT = '''
   "notes": "Extracted smartphone releases, Samsung date approximate"
 }
 
-### Пример 3: Данные не найдены
-Вход: "Сегодня хорошая погода. Люблю программировать."
+### Пример 3: В тексте нет таблицы, но пользователь просит таблицу по смыслу
+Задача: «Извлеки перечень ключевых функций в виде таблицы: функция, описание».  
+Вход (фрагмент): перечисление функций обычным текстом без pipe-таблицы.
+
+Ответ (схема + заполнение; при невозможности значения — null):
+{
+  "tables": [
+    {
+      "name": "key_functions",
+      "columns": [
+        {"name": "Функция", "type": "string"},
+        {"name": "Описание", "type": "string"}
+      ],
+      "rows": [
+        ["Always-on помощник", "краткое описание из текста или null"],
+        ["Нативные мессенджеры", null]
+      ]
+    }
+  ],
+  "entities": [],
+  "key_value_pairs": {},
+  "extraction_confidence": 0.75,
+  "notes": "Schema fixed from user request; rows filled where text allows"
+}
+
+### Пример 4: Данные не найдены (общий текст без запроса на структуру)
+Вход: "Сегодня хорошая погода. Люблю программировать." (без задачи на таблицу)
 
 Ответ:
 {
@@ -187,6 +243,11 @@ STRUCTURIZER_SYSTEM_PROMPT = '''
   "extraction_confidence": 0.0,
   "notes": "No structured data found in input text"
 }
+
+**К примеру 4:** если по **TASK** нужна таблица или структурированный список, а во входном тексте есть абзацы,
+маркированные списки, HTML/markdown-таблицы или перечисления — **не** своди ответ к пустому `tables: []`
+по аналогии с примером 4: извлекай строки в `tables[].rows`; пустые `rows` допустимы только если под колонки
+по смыслу задачи нет ни одного факта в тексте.
 
 ## ОГРАНИЧЕНИЯ:
 - НЕ оборачивай JSON в markdown-блоки
@@ -305,7 +366,12 @@ class StructurizerAgent(BaseAgent):
             
             content_length = len(raw_content)
             self.logger.info(f"🔍 Structurizing {content_length} characters of content")
-            
+
+            _research_satellite = (
+                str((context or {}).get("controller") or "").strip() == "research"
+                and str((context or {}).get("mode") or "").strip() == "research"
+            )
+
             # Формируем промпт и вызываем LLM
             user_prompt = self._build_prompt(
                 description,
@@ -313,14 +379,20 @@ class StructurizerAgent(BaseAgent):
                 tool_results=tool_results,
                 tools_enabled=tools_enabled,
                 tool_request_cache_digest_lines=tool_request_cache_digest_lines,
+                research_satellite=_research_satellite,
             )
             messages = [
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
             
+            _max_tok = (
+                ma_int("MULTI_AGENT_STRUCTURIZER_RESEARCH_MAX_TOKENS", 5500)
+                if _research_satellite
+                else 4000
+            )
             response = await self._call_llm(
-                messages, context=context, temperature=0.3, max_tokens=4000
+                messages, context=context, temperature=0.3, max_tokens=_max_tok
             )
 
             self.logger.info(
@@ -330,15 +402,28 @@ class StructurizerAgent(BaseAgent):
             # Парсим ответ LLM (старый dict формат)
             raw_result = self._parse_response(response)
             tool_requests = self._extract_tool_requests(raw_result)
+            _doc_extraction = (
+                str((context or {}).get("task_type") or "").strip()
+                == "document_extraction"
+            )
             if tool_requests:
-                return AgentPayload.partial(
-                    agent=self.agent_name,
-                    tool_requests=tool_requests,
-                    narrative=Narrative(
-                        text="Для структуризации требуется догрузка данных таблиц."
-                    ),
-                    metadata={"tool_mode": "request"},
-                )
+                if not tools_enabled or _doc_extraction or _research_satellite:
+                    self.logger.info(
+                        "Structurizer: ignoring %d tool_request(s) from LLM "
+                        "(tools disabled, document_extraction, or research)",
+                        len(tool_requests),
+                    )
+                    if isinstance(raw_result, dict):
+                        raw_result.pop("tool_requests", None)
+                else:
+                    return AgentPayload.partial(
+                        agent=self.agent_name,
+                        tool_requests=tool_requests,
+                        narrative=Narrative(
+                            text="Для структуризации требуется догрузка данных таблиц."
+                        ),
+                        metadata={"tool_mode": "request"},
+                    )
             raw_result = self._add_row_ids(raw_result)
             
             # V2: Конвертируем в PayloadContentTable + entities/kv в таблицы
@@ -388,8 +473,16 @@ class StructurizerAgent(BaseAgent):
         # 3. Из agent_results (Изменение #2)
         if context:
             agent_results = context.get("agent_results", [])
+            is_research_sat = (
+                str((context or {}).get("controller") or "").strip() == "research"
+                and str((context or {}).get("mode") or "").strip() == "research"
+            )
             content_parts: List[str] = []
-            _max_per_source = 4500
+            _max_per_source = (
+                ma_int("MULTI_AGENT_STRUCTURIZER_RESEARCH_MAX_PER_SOURCE_CHARS", 2800)
+                if is_research_sat
+                else 4500
+            )
             for result in agent_results:
                 if not isinstance(result, dict):
                     continue
@@ -400,10 +493,15 @@ class StructurizerAgent(BaseAgent):
                     for s in sources:
                         if isinstance(s, dict) and s.get("fetched") and s.get("content"):
                             url = s.get("url", "unknown")
+                            mt = s.get("mime_type")
+                            rk = s.get("resource_kind")
+                            extra = ""
+                            if mt or rk:
+                                extra = f" [MIME={mt or '-'} kind={rk or '-'}]"
                             block = s["content"]
                             if len(block) > _max_per_source:
                                 block = block[:_max_per_source] + "\n\n... (truncated per source)"
-                            content_parts.append(f"=== Source: {url} ===\n{block}")
+                            content_parts.append(f"=== Source: {url}{extra} ===\n{block}")
 
                 # V1 fallback: pages[]
                 pages = result.get("pages", [])
@@ -415,10 +513,59 @@ class StructurizerAgent(BaseAgent):
                             )
 
             if content_parts:
-                joined = "\n\n".join(content_parts)
-                if len(joined) > 14000:
-                    joined = joined[:14000] + "\n\n... (truncated total)"
-                return joined
+                text_joined = "\n\n".join(content_parts)
+                dr_block = StructurizerAgent._format_discovered_resources_block(
+                    agent_results
+                )
+                if is_research_sat and dr_block:
+                    combined = (
+                        dr_block
+                        + "\n\n=== ИЗВЛЕЧЁННЫЙ ТЕКСТ СТРАНИЦ (ниже) ===\n\n"
+                        + text_joined
+                    )
+                elif dr_block:
+                    combined = text_joined + "\n\n" + dr_block
+                else:
+                    combined = text_joined
+
+                max_total = (
+                    ma_int("MULTI_AGENT_STRUCTURIZER_RESEARCH_MAX_TOTAL_CHARS", 52000)
+                    if is_research_sat
+                    else 14000
+                )
+                if len(combined) > max_total:
+                    if is_research_sat and dr_block:
+                        sep = "\n\n=== ИЗВЛЕЧЁННЫЙ ТЕКСТ СТРАНИЦ (ниже) ===\n\n"
+                        overhead = len(dr_block) + len(sep)
+                        tail_budget = max_total - overhead
+                        if tail_budget < 800:
+                            if overhead >= max_total:
+                                combined = (
+                                    dr_block[: max_total - 80]
+                                    + "\n\n... (truncated: сокращён JSON URL; уменьши список в research)"
+                                )
+                            else:
+                                combined = combined[:max_total] + "\n\n... (truncated total)"
+                        else:
+                            combined = (
+                                dr_block
+                                + sep
+                                + text_joined[:tail_budget]
+                                + "\n\n... (truncated: хвост страниц обрезан; блок URL выше сохранён)"
+                            )
+                    else:
+                        combined = combined[:max_total] + "\n\n... (truncated total)"
+                return combined
+
+        # 3b. document_extraction (файл на доске): не подставлять псевдо-таблицу input_data_preview —
+        # тот же обогащённый запрос, что видит Planner, либо плоский текст из content_nodes_data.
+        if context and str(context.get("task_type") or "").strip() == "document_extraction":
+            ur = context.get("user_request")
+            if isinstance(ur, str) and ur.strip():
+                return ur
+            plain = self._plain_document_text_from_content_nodes(context)
+            if plain:
+                return plain
         
         # 4. data поле в task
         if task.get("data"):
@@ -447,22 +594,105 @@ class StructurizerAgent(BaseAgent):
                 return json.dumps(cn_data, indent=2, ensure_ascii=False)
 
         return ""
+
+    @staticmethod
+    def _format_discovered_resources_block(agent_results: Any) -> str:
+        """Каталог URL из research (страницы + embedded), для structurizer помимо текста страниц."""
+        if not isinstance(agent_results, list):
+            return ""
+        max_n = ma_int("MULTI_AGENT_STRUCTURIZER_DISCOVERED_RESOURCES_MAX", 80)
+        max_url = ma_int("MULTI_AGENT_STRUCTURIZER_DISCOVERED_RESOURCE_URL_CHARS", 2000)
+        slim: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for result in agent_results:
+            if not isinstance(result, dict):
+                continue
+            if result.get("agent") != "research":
+                continue
+            drs = result.get("discovered_resources") or []
+            if not isinstance(drs, list):
+                continue
+            for r in drs:
+                if not isinstance(r, dict):
+                    continue
+                u = r.get("url")
+                if not u or not isinstance(u, str):
+                    continue
+                u = u.strip()
+                if u in seen:
+                    continue
+                seen.add(u)
+                slim.append(
+                    {
+                        "url": u[:max_url],
+                        "resource_kind": r.get("resource_kind"),
+                        "mime_type": r.get("mime_type"),
+                        "parent_url": (str(r.get("parent_url"))[:max_url])
+                        if r.get("parent_url")
+                        else None,
+                        "origin": r.get("origin"),
+                        "tag": r.get("tag"),
+                        "title": r.get("title"),
+                    }
+                )
+                if len(slim) >= max_n:
+                    break
+            if len(slim) >= max_n:
+                break
+        if not slim:
+            return ""
+        return (
+            "=== DISCOVERED_RESOURCES (from research; используй URL для фактов о медиа/страницах) ===\n"
+            + json.dumps(slim, ensure_ascii=False, indent=2)
+        )
+
+    @staticmethod
+    def _plain_document_text_from_content_nodes(context: Dict[str, Any]) -> str:
+        """Плоский текст файла из content_nodes_data (без JSON-обёртки)."""
+        cn_data = context.get("content_nodes_data")
+        if not isinstance(cn_data, list) or not cn_data:
+            return ""
+        first = cn_data[0]
+        if isinstance(first, dict):
+            c = first.get("content")
+            if isinstance(c, dict):
+                t = c.get("text")
+                if isinstance(t, str) and t.strip():
+                    return t
+        return ""
     
-    def _sanitize_content_for_llm(self, content: str) -> str:
+    def _sanitize_content_for_llm(
+        self,
+        content: str,
+        *,
+        preserve_urls: bool = False,
+    ) -> str:
         """
         Уменьшает риск срабатывания blacklist/moderation GigaChat:
-        ограничение длины, замена длинных URL на плейсхолдер.
+        ограничение длины; для обычных режимов — замена URL на плейсхолдер.
+
+        Для Research Chat (preserve_urls=True) URL не маскируем: в DISCOVERED_RESOURCES
+        нужны реальные адреса для колонок «Фото» и т.п.
         """
-        max_content_length = 8000
+        if preserve_urls:
+            max_content_length = ma_int(
+                "MULTI_AGENT_STRUCTURIZER_RESEARCH_MAX_LLM_CONTENT_CHARS",
+                52000,
+            )
+        else:
+            max_content_length = ma_int(
+                "MULTI_AGENT_STRUCTURIZER_MAX_CONTENT_CHARS",
+                20000,
+            )
         if len(content) > max_content_length:
             content = content[:max_content_length] + "\n\n... (truncated)"
-        # Замена URL на плейсхолдер — часто триггерит модерацию
-        content = re.sub(
-            r"https?://[^\s\]\)\}\"']+",
-            "[URL]",
-            content,
-            flags=re.IGNORECASE,
-        )
+        if not preserve_urls:
+            content = re.sub(
+                r"https?://[^\s\]\)\}\"']+",
+                "[URL]",
+                content,
+                flags=re.IGNORECASE,
+            )
         return content
 
     def _build_prompt(
@@ -473,23 +703,37 @@ class StructurizerAgent(BaseAgent):
         tool_results: Optional[List[Dict[str, Any]]] = None,
         tools_enabled: bool = False,
         tool_request_cache_digest_lines: Optional[List[str]] = None,
+        research_satellite: bool = False,
     ) -> str:
-        """Формирует промпт для LLM."""
-        content = self._sanitize_content_for_llm(content)
-        prompt = f"""**TASK**: {description}
+        """Формирует user-промпт для LLM (единый для всех режимов: документ, research, preview нод и т.д.)."""
+        content = self._sanitize_content_for_llm(
+            content, preserve_urls=research_satellite
+        )
+        research_extra = ""
+        if research_satellite:
+            research_extra = """
+**РЕЖИМ RESEARCH (обязательно учти):**
+- В начале входного текста блок `DISCOVERED_RESOURCES` — JSON с **реальными URL** страниц (`html_page`) и медиа (`image` и др.). Это не выдумка, их можно копировать в таблицу.
+- Если в TASK есть колонки вроде «Фото», «URL», «Изображение», «Ссылка» — заполняй их **точными URL из DISCOVERED_RESOURCES** (для фото обычно `resource_kind: image`). Сопоставляй по смыслу с именами/фрагментами текста ниже; при сомнении — ближайший URL с той же страницы (`parent_url`).
+- Возраст, фильмы, биографию — **только из извлечённого текста**; если факта нет — `null`. Не придумывай числа и названия фильмов.
+- Таблица с именами из текста и URL фото из JSON **лучше**, чем ноль строк, когда имена в тексте есть, а в JSON есть кандидаты для колонки про медиа.
 
-**RAW CONTENT TO STRUCTURE**:
+"""
+        prompt = f"""**TASK (шаг плана / формулировка извлечения):**
+{description}
+{research_extra}
+**ВХОДНОЙ ТЕКСТ ДЛЯ СТРУКТУРИРОВАНИЯ** (фрагмент документа, HTML, ответ research, выгрузка в виде таблицы, JSON-превью и т.п.):
 {content}
 
-**INSTRUCTIONS**:
-1. Carefully analyze the raw content above
-2. Extract ALL tables, lists, and structured data
-3. Identify entities (companies, dates, numbers, etc.)
-4. Create key-value pairs for metadata
-5. Assign appropriate data types to columns
-6. Return ONLY valid JSON with the required structure
+**ИНСТРУКЦИИ:**
+1. Только извлечение структуры из текста выше — без аналитики, выводов и рекомендаций (это другие агенты).
+2. Следуй TASK: извлеки таблицы, сущности (`entities`), при необходимости `key_value_pairs`; типы колонок — см. system prompt.
+3. Не утверждай в `notes`, что «данных нет» / «фрагмент пуст», если из текста (списки, абзацы, таблицы HTML/markdown, ячейки) можно заполнить колонки по смыслу TASK. Пустой `tables` или пустой `rows` — только если в тексте действительно нет фактов под запрошенную схему.
+4. Списки и перечисления преобразуй в строки `tables[].rows` (двухфазная модель в system prompt: схема колонок, затем значения; пропуски — `null`).
+5. Верни **только** валидный JSON без markdown-обёрток; `notes` — кратко, без YAML-копии таблицы. Итог для UI и пайплайна — в `tables[].rows`, не подменяй строки таблицы длинным текстом только в `notes`.
+6. Формат `rows` — JSON-массив массивов значений в порядке колонок (см. system prompt).
 
-Remember: Your job is ONLY to extract structure, not to analyze or make recommendations."""
+**INSTRUCTIONS (English summary):** Extract structure only; fill `tables[].rows` from the input; return pure JSON as specified in the system prompt."""
         digest_lines = tool_request_cache_digest_lines or []
         if digest_lines:
             prompt += (
@@ -671,6 +915,15 @@ Remember: Your job is ONLY to extract structure, not to analyze or make recommen
             result["extraction_confidence"] = 0.5
         if "notes" not in result:
             result["notes"] = ""
+        # Модель иногда кладёт текст в narrative вместо notes
+        nar = result.get("narrative")
+        if isinstance(nar, str) and nar.strip() and (
+            not str(result.get("notes", "")).strip()
+        ):
+            result["notes"] = nar
+        elif isinstance(nar, dict) and isinstance(nar.get("text"), str):
+            if not str(result.get("notes", "")).strip():
+                result["notes"] = nar["text"]
         return result
 
     def _empty_result(self, notes: str) -> Dict[str, Any]:
@@ -739,6 +992,43 @@ Remember: Your job is ONLY to extract structure, not to analyze or make recommen
                 if pos >= 0:
                     repaired = repaired[:pos] + repaired[pos + 1:]
         return repaired
+
+    @staticmethod
+    def _align_row_dicts_to_column_names(
+        rows: List[Dict[str, Any]], names: List[str]
+    ) -> List[Dict[str, Any]]:
+        """Ключи в строках совпадают с `names` (exact / trim / регистр / порядок значений).
+
+        LLM нередко отдаёт rows как list[list] (уже обработано выше) или dict с «чужими» ключами.
+        """
+        if not names:
+            return rows
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                out.append({})
+                continue
+            rebuilt: Dict[str, Any] = {}
+            matched_all = True
+            for n in names:
+                if n in row:
+                    rebuilt[n] = row[n]
+                elif (sk := next((k for k in row if str(k).strip() == n.strip()), None)) is not None:
+                    rebuilt[n] = row[sk]
+                elif (sk2 := next((k for k in row if str(k).strip().lower() == n.lower()), None)) is not None:
+                    rebuilt[n] = row[sk2]
+                else:
+                    matched_all = False
+                    break
+            if matched_all and len(rebuilt) == len(names):
+                out.append(rebuilt)
+                continue
+            vals = list(row.values())
+            if len(vals) == len(names):
+                out.append({names[i]: vals[i] for i in range(len(names))})
+            else:
+                out.append(row)
+        return out
     
     def _add_row_ids(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Нормализует таблицы в unified формат: columns=[{name,type}], rows=[{col:val}]."""
@@ -761,16 +1051,42 @@ Remember: Your job is ONLY to extract structure, not to analyze or make recommen
                     typed_columns.append({"name": str(c), "type": "string"})
                     col_names.append(str(c))
             table["columns"] = typed_columns
+
+            # Стабильные имена колонок (пустое имя ломает dict и UI)
+            names_for_keys: List[str] = []
+            for idx, c in enumerate(typed_columns):
+                raw_n = str(c.get("name", "")).strip() if isinstance(c, dict) else str(c).strip()
+                stable = raw_n or f"col_{idx}"
+                names_for_keys.append(stable)
+                if isinstance(c, dict) and not raw_n:
+                    c["name"] = stable
             
-            # Ensure rows are dicts
+            # Ensure rows are dicts (LLM иногда отдаёт одну колонку списком строк — иначе строки терялись)
             rows = table.get("rows", [])
-            new_rows = []
+            new_rows: List[Dict[str, Any]] = []
             for row in rows:
                 if isinstance(row, dict):
                     new_rows.append(row)
                 elif isinstance(row, list):
-                    new_rows.append({col_names[j]: v for j, v in enumerate(row) if j < len(col_names)})
-            
+                    new_rows.append(
+                        {
+                            names_for_keys[j]: row[j]
+                            for j in range(min(len(row), len(names_for_keys)))
+                        }
+                    )
+                elif isinstance(row, str) and names_for_keys:
+                    rdict = {names_for_keys[0]: row}
+                    for c in names_for_keys[1:]:
+                        rdict[c] = None
+                    new_rows.append(rdict)
+                else:
+                    new_rows.append({})
+
+            # Ключи в dict-строках должны совпадать с columns[].name (LLM часто отдаёт другие имена)
+            new_rows = StructurizerAgent._align_row_dicts_to_column_names(
+                new_rows, names_for_keys
+            )
+
             table["rows"] = new_rows
             table["row_count"] = len(new_rows)
             table["column_count"] = len(typed_columns)

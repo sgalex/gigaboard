@@ -131,7 +131,7 @@ class DatabaseSourceConfig(BaseModel):
 
 
 class ResearchSourceConfig(BaseModel):
-    """Configuration for AI Research source."""
+    """Configuration for research source (Поиск с ИИ)."""
     initial_prompt: str = Field(..., description="Research query/prompt")
     context: dict[str, Any] = Field(default_factory=dict, description="Additional context for research")
 

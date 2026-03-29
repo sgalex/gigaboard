@@ -80,10 +80,16 @@ class TestStructurizerParseResponse:
 
 class TestStructurizerSanitize:
     def test_truncates_long_content(self, agent):
-        long_text = "x" * 20000
+        long_text = "x" * 25000
         out = agent._sanitize_content_for_llm(long_text)
-        assert len(out) <= 10000 + len("\n\n... (truncated)")
+        assert len(out) <= 21000
         assert "truncated" in out
+
+    def test_under_limit_not_truncated(self, agent):
+        long_text = "y" * 15000
+        out = agent._sanitize_content_for_llm(long_text)
+        assert "truncated" not in out
+        assert len(out) == 15000
 
     def test_replaces_urls(self, agent):
         s = "See https://example.com/path and http://t.ru/a?q=1 for more"
@@ -134,6 +140,37 @@ class TestStructurizerExtractRawContent:
             ctx,
         )
         assert raw == "direct payload"
+
+    def test_document_extraction_prefers_user_request_over_input_preview(self, agent):
+        ctx = {
+            "task_type": "document_extraction",
+            "user_request": "### Полный запрос\nс документом внутри",
+            "input_data_preview": {
+                "document_text": {
+                    "columns": ["document_text"],
+                    "sample_rows": [{"document_text": "wrapped only"}],
+                }
+            },
+        }
+        raw = agent._extract_raw_content({"description": "x"}, ctx)
+        assert raw == "### Полный запрос\nс документом внутри"
+        assert "wrapped only" not in raw
+
+    def test_document_extraction_fallback_plain_text_from_content_nodes(self, agent):
+        ctx = {
+            "task_type": "document_extraction",
+            "content_nodes_data": [
+                {"name": "readme.txt", "content": {"text": "plain body line"}}
+            ],
+            "input_data_preview": {
+                "document_text": {
+                    "columns": ["document_text"],
+                    "sample_rows": [{"document_text": "pseudo table"}],
+                }
+            },
+        }
+        raw = agent._extract_raw_content({"description": "x"}, ctx)
+        assert raw == "plain body line"
 
 
 class TestStructurizerProcessTaskIntegration:
@@ -204,6 +241,46 @@ class TestStructurizerProcessTaskIntegration:
         assert result.status == "success"
         assert result.has_tables
         assert (result.metadata or {}).get("extraction_confidence") == 0.88
+
+
+class TestStructurizerRowAlignment:
+    """Строки таблицы согласованы с columns[].name (list[list] и «чужие» ключи в dict)."""
+
+    def test_align_exact_keys(self):
+        rows = [{"a": 1, "b": 2}]
+        out = StructurizerAgent._align_row_dicts_to_column_names(rows, ["a", "b"])
+        assert out[0] == {"a": 1, "b": 2}
+
+    def test_align_positional_when_keys_differ(self):
+        rows = [{"Skill": "S1", "Note": "N1"}]
+        out = StructurizerAgent._align_row_dicts_to_column_names(
+            rows, ["Колонка A", "Колонка B"]
+        )
+        assert out[0]["Колонка A"] == "S1"
+        assert out[0]["Колонка B"] == "N1"
+
+    def test_add_row_ids_list_and_misaligned_dict_rows(self, agent):
+        raw = {
+            "tables": [
+                {
+                    "name": "demo",
+                    "columns": [
+                        {"name": "X", "type": "string"},
+                        {"name": "Y", "type": "string"},
+                    ],
+                    "rows": [
+                        [1, 2],
+                        {"foo": "a", "bar": "b"},
+                    ],
+                }
+            ],
+            "extraction_confidence": 1.0,
+        }
+        out = agent._add_row_ids(raw)
+        t = out["tables"][0]
+        assert t["rows"][0] == {"X": 1, "Y": 2}
+        assert t["rows"][1] == {"X": "a", "Y": "b"}
+        assert t["row_count"] == 2
 
 
 class TestStructurizerConvert:

@@ -36,6 +36,18 @@ class ResearchSourceRef(BaseModel):
     title: str = Field(..., description="Заголовок или домен")
 
 
+class ResearchDiscoveredResourceRef(BaseModel):
+    """Найденный ресурс (URL + метаданные) из ResearchAgent."""
+
+    url: str = Field(..., description="URL")
+    resource_kind: Optional[str] = Field(None, description="html_page, image, video, …")
+    mime_type: Optional[str] = None
+    parent_url: Optional[str] = Field(None, description="Страница-родитель для вложенных ссылок")
+    origin: Optional[str] = Field(None, description="page | embedded | link")
+    tag: Optional[str] = None
+    title: Optional[str] = None
+
+
 class ResearchChatResponse(BaseModel):
     """Ответ Research Chat: narrative, tables, sources."""
     narrative: str = Field(..., description="Текстовый итог исследования")
@@ -46,6 +58,10 @@ class ResearchChatResponse(BaseModel):
     sources: list[ResearchSourceRef] = Field(
         default_factory=list,
         description="Источники (URL, title)",
+    )
+    discovered_resources: list[ResearchDiscoveredResourceRef] = Field(
+        default_factory=list,
+        description="Каталог найденных URL (страницы, медиа) с метаданными",
     )
     session_id: str = Field(..., description="ID сессии")
     execution_time_ms: Optional[int] = Field(None, description="Время выполнения, мс")

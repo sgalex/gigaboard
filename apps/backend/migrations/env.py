@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from pathlib import Path
 from logging.config import fileConfig
 from dotenv import load_dotenv
 
@@ -11,8 +12,15 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 
 from alembic import context
 
-# Load environment variables
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+# Локально: подхватить .env из apps/backend (исторический путь). В Docker — только os.environ (Compose).
+def _in_docker() -> bool:
+    if os.getenv("GIGABOARD_IN_DOCKER", "").lower() in ("1", "true", "yes"):
+        return True
+    return Path("/.dockerenv").exists()
+
+
+if not _in_docker():
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 # Create Base directly here to avoid importing database.py with async engine creation
 from sqlalchemy.orm import declarative_base

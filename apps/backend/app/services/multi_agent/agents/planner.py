@@ -656,7 +656,7 @@ class PlannerAgent(BaseAgent):
                 plan_max_tokens = 3800
 
             try:
-                plan = await self._call_gigachat_with_json_retry(
+                plan = await self._call_llm_with_json_retry(
                     messages=messages,
                     parse_fn=_parse_and_validate,
                     context=context,
@@ -837,7 +837,7 @@ Use only valid agent keys:
                 self._validate_plan(plan)
                 return plan
 
-            updated_plan = await self._call_gigachat_with_json_retry(
+            updated_plan = await self._call_llm_with_json_retry(
                 messages=messages,
                 parse_fn=_parse_and_validate_replan,
                 context=context,
@@ -929,7 +929,7 @@ Use only valid agent keys:
                             raise ValueError(f"sub_step[{i}] must have agent and task")
                 return data
 
-            result = await self._call_gigachat_with_json_retry(
+            result = await self._call_llm_with_json_retry(
                 messages=messages,
                 parse_fn=_parse,
                 context=context,
@@ -1070,7 +1070,7 @@ PIPELINE MEMORY (high-priority context):
                         raise ValueError(f"remaining_steps[{i}] must have agent and task")
                 return {"remaining_steps": steps}
 
-            result = await self._call_gigachat_with_json_retry(
+            result = await self._call_llm_with_json_retry(
                 messages=messages,
                 parse_fn=_parse,
                 context=context,
@@ -1189,7 +1189,7 @@ PIPELINE MEMORY (high-priority context):
                 }
             raise ValueError("Could not extract JSON decision from AI response")
 
-        return await self._call_gigachat_with_json_retry(
+        return await self._call_llm_with_json_retry(
             messages=messages,
             parse_fn=_parse_decision,
             context=context,
@@ -1343,11 +1343,15 @@ PIPELINE MEMORY (high-priority context):
             prompt_parts.append(json.dumps(compact, indent=2, ensure_ascii=False))
 
         # Специализированные подсказки для контроллеров-подсказок:
-        # transform_suggestions / widget_suggestions не должны запускать
+        # transform_suggestions / widget_suggestions / document_suggestions не должны запускать
         # тяжёлый research‑pipeline — данные уже есть в INPUT DATA SCHEMA.
         controller = context.get("controller") if context else None
         mode = context.get("mode") if context else None
-        is_suggestions_controller = controller in {"transform_suggestions", "widget_suggestions"}
+        is_suggestions_controller = controller in {
+            "transform_suggestions",
+            "widget_suggestions",
+            "document_suggestions",
+        }
 
         if is_suggestions_controller:
             prompt_parts.extend(
@@ -1814,11 +1818,15 @@ PIPELINE MEMORY (high-priority context):
         user_request: str,
     ) -> Dict[str, Any]:
         """
-        transform_suggestions / widget_suggestions: не вызывать transform_codex / widget_codex.
+        transform_suggestions / widget_suggestions / document_suggestions: не вызывать transform_codex / widget_codex.
         Удаляем такие шаги, если модель их всё же вернула.
         """
         ctrl = (context or {}).get("controller")
-        if ctrl not in ("transform_suggestions", "widget_suggestions"):
+        if ctrl not in (
+            "transform_suggestions",
+            "widget_suggestions",
+            "document_suggestions",
+        ):
             return plan
         steps_in = plan.get("steps") or []
         banned = frozenset({"transform_codex", "widget_codex"})

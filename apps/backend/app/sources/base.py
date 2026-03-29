@@ -29,7 +29,7 @@ class TableData:
     """Structured table data."""
     id: str
     name: str
-    columns: list[dict[str, str]]  # [{"name": "col1", "type": "string"}, ...]
+    columns: list[dict[str, Any]]  # name, type; optional description (роль ключа и таблица)
     rows: list[dict[str, Any]]
 
 
@@ -61,7 +61,7 @@ class ExtractionResult:
         """Convert to ContentNode content format.
         
         Unified format:
-        - columns: [{name: str, type: str}, ...]
+        - columns: [{name: str, type: str, description?: str}, ...]
         - rows: [{col_name: value, ...}, ...]
         - row_count, column_count
         """

@@ -61,6 +61,7 @@ class ControllerResult:
     # ── Research (narrative + tables + sources) ─────────────────────
     tables: List[Dict[str, Any]] = field(default_factory=list)
     sources: List[Dict[str, Any]] = field(default_factory=list)
+    discovered_resources: List[Dict[str, Any]] = field(default_factory=list)
 
     # ── Validation ──────────────────────────────────────────────────
     validation: Optional[Dict[str, Any]] = None

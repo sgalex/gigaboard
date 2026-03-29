@@ -16,6 +16,24 @@ from app.sources.base import (
 )
 
 
+def _effective_initial_prompt(config: dict[str, Any]) -> str:
+    """Текст запроса: initial_prompt или первая user-реплика из conversation_history."""
+    raw = (config.get("initial_prompt") or "").strip()
+    if raw:
+        return raw
+    history = config.get("conversation_history")
+    if isinstance(history, list):
+        for msg in history:
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return ""
+
+
 def _controller_tables_to_table_data(tables: list[dict[str, Any]]) -> list[TableData]:
     """Конвертирует tables из ControllerResult (dict) в list[TableData]."""
     out: list[TableData] = []
@@ -32,17 +50,17 @@ def _controller_tables_to_table_data(tables: list[dict[str, Any]]) -> list[Table
 
 
 class ResearchSource(BaseSource):
-    """AI Research source handler using multi-agent system (ResearchController)."""
+    """Поиск с ИИ: обработчик источника через мультиагентную систему (ResearchController)."""
 
     source_type = "research"
-    display_name = "AI Research"
+    display_name = "Поиск с ИИ"
     icon = "🔍"
     description = "Поиск данных через AI-агентов"
 
     async def validate_config(self, config: dict[str, Any]) -> ValidationResult:
         """Validate research source config."""
         errors = []
-        if not config.get("initial_prompt"):
+        if not _effective_initial_prompt(config):
             errors.append("Необходимо указать запрос для исследования")
         if errors:
             return ValidationResult.failure(errors)
@@ -57,7 +75,12 @@ class ResearchSource(BaseSource):
         """Execute deep research via ResearchController (Orchestrator)."""
         start_time = time.time()
         try:
-            initial_prompt = config.get("initial_prompt", "")
+            initial_prompt = _effective_initial_prompt(config)
+            if not initial_prompt:
+                return ExtractionResult.failure(
+                    "Не указан запрос для исследования "
+                    "(нужен initial_prompt или хотя бы одна реплика пользователя в conversation_history)"
+                )
             orchestrator = kwargs.get("orchestrator") or kwargs.get("multi_agent_engine")
 
             if orchestrator:

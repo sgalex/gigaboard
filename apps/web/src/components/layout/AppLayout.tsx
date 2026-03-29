@@ -19,6 +19,8 @@ const MIN_PANEL_WIDTH = 200
 const MAX_PANEL_WIDTH = 800
 const DEFAULT_LEFT_PANEL_WIDTH = 320
 const DEFAULT_RIGHT_PANEL_WIDTH = 384
+/** Как `w-1.5` у `ResizableHandle` — вместе с шириной сайдбара задаёт левый край `main` */
+const LEFT_RESIZE_HANDLE_PX = 6
 
 export function AppLayout({ children, showExplorer = true, sidebar, rightPanel }: AppLayoutProps) {
     const {
@@ -54,9 +56,13 @@ export function AppLayout({ children, showExplorer = true, sidebar, rightPanel }
         setRightPanelWidth(DEFAULT_RIGHT_PANEL_WIDTH)
     }, [setRightPanelWidth])
 
+    const hasLeftChrome = showExplorer || !!sidebar
+    const contextMainOffset =
+        hasLeftChrome && isProjectExplorerOpen ? leftPanelWidth + LEFT_RESIZE_HANDLE_PX : 0
+
     return (
         <div className="flex h-screen flex-col bg-background">
-            <TopBar />
+            <TopBar contextMainOffset={contextMainOffset} />
 
             <div className="flex flex-1 overflow-hidden">
                 {/* Left Sidebar - Project Explorer */}

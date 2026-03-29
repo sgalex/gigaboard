@@ -20,6 +20,9 @@ from .widget_controller import WidgetController
 
 logger = logging.getLogger("controller.widget_suggestions")
 
+SUGGESTION_CANDIDATE_POOL = 20
+SUGGESTION_DISPLAY_TOP = 12
+
 # Фоллбэк-подсказки (если AI недоступен)
 # Формат должен совпадать со схемой Suggestion на фронтенде:
 # {id, type, priority, title, description, prompt, reasoning?}
@@ -115,8 +118,10 @@ class WidgetSuggestionsController(BaseController):
                 "content_data": dict,  # {tables: [], text: ""}
                 "current_widget_code": str | None,
                 "chat_history": list[dict],
-                "max_suggestions": int,
             }
+
+        Размер пула для LLM и число подсказок в ответе API — константы
+        ``SUGGESTION_CANDIDATE_POOL`` и ``SUGGESTION_DISPLAY_TOP``.
 
         Returns:
             ControllerResult с suggestions list.
@@ -129,7 +134,6 @@ class WidgetSuggestionsController(BaseController):
         content_data = ctx.get("content_data", {})
         current_widget_code = ctx.get("current_widget_code")
         chat_history = ctx.get("chat_history", [])
-        max_suggestions = ctx.get("max_suggestions", 6)  # Show top 6 from 10 generated
 
         mode = "improve" if current_widget_code else "new"
 
@@ -163,7 +167,7 @@ class WidgetSuggestionsController(BaseController):
             "input_data_preview": input_data_preview,
             "existing_widget_code": current_widget_code,
             "chat_history": chat_history,
-            "max_suggestions": max_suggestions,
+            "max_suggestions": SUGGESTION_CANDIDATE_POOL,
             "keep_tabular_context_in_prompt": True,
         }
         if selected_ids:
@@ -234,7 +238,7 @@ class WidgetSuggestionsController(BaseController):
             logger.warning("No findings from orchestrator, returning fallback")
             return self._fallback_result(start_time)
 
-        suggestions = self._format_suggestions(findings, max_suggestions)
+        suggestions = self._format_suggestions(findings, SUGGESTION_DISPLAY_TOP)
 
         return ControllerResult(
             status="success",
@@ -316,7 +320,8 @@ class WidgetSuggestionsController(BaseController):
                 request += f"  [{role}]: {content}\n"
 
         request += (
-            "\n🎯 ЗАДАЧА: Проанализируй данные и предложи 10 разнообразных вариантов ВИЗУАЛИЗАЦИИ:\n"
+            "\n🎯 ЗАДАЧА: Проанализируй данные и предложи до 20 разнообразных вариантов ВИЗУАЛИЗАЦИИ "
+            "(минимум 12, если данных достаточно):\n"
             "  • chart — графики (столбчатый, линейный, pie, scatter, heatmap)\n"
             "  • table — интерактивные таблицы (с сортировкой, фильтрами)\n"
             "  • kpi — KPI-карточки, метрики, scorecard\n"
@@ -341,11 +346,11 @@ class WidgetSuggestionsController(BaseController):
         """
         Конвертирует findings в формат UI-подсказок (Suggestion schema).
 
-        Генерируем 10 рекомендаций, возвращаем top 6 по confidence.
+        Сортируем по confidence, возвращаем top max_count.
         """
         suggestions: List[Dict[str, Any]] = []
 
-        # Обрабатываем ВСЕ findings (до 10), потом отфильтруем топ-N
+        # Обрабатываем все findings, сортируем и берём топ-N
         for i, finding in enumerate(findings):
             # Finding fields: text, action, confidence, refs, severity
             text = finding.get("text", "")
@@ -405,8 +410,9 @@ class WidgetSuggestionsController(BaseController):
             }
             suggestions.append(suggestion)
         
-        # Сортировка по confidence (убывание), затем берем top N
-        suggestions.sort(key=lambda s: s.get("confidence", 0), reverse=True)
+        suggestions.sort(
+            key=lambda s: (-float(s.get("confidence") or 0), (s.get("title") or "").lower())
+        )
         top_suggestions = suggestions[:max_count]
 
         logger.info(

@@ -59,6 +59,16 @@ def ma_bool(name: str, default: bool) -> bool:
     return raw.lower() in ("1", "true", "yes", "on")
 
 
+def ma_float(name: str, default: float) -> float:
+    raw = _raw_for_key(name)
+    if raw is None:
+        raw = os.getenv(name, str(default)).strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def set_ma_overrides_token(overrides: Dict[str, Any]) -> Token:
     return _MA_OVERRIDES.set(overrides)
 

@@ -69,6 +69,16 @@ import { findFreePosition } from '@/lib/canvasUtils'
 import { contentNodesAPI, filesAPI, getFileImageUrl } from '@/services/api'
 import { domToBlob } from 'modern-screenshot'
 import { findOptimalNodePosition, findNearestFreePosition, convertNodesToBounds, NodeBounds } from '@/lib/nodePositioning'
+import { useResolvedColorScheme } from '@/hooks/useResolvedColorScheme'
+
+/** Миникарта React Flow: дефолтные mask/node цвета светлые; для dark задаём явно (см. MiniMap bgColor / maskColor в документации @xyflow/react). */
+const MINIMAP_DARK = {
+    bgColor: 'hsl(222.2 84% 9%)',
+    maskColor: 'rgba(2, 6, 23, 0.55)',
+    maskStrokeColor: 'hsl(217.2 32.6% 45%)',
+    nodeColor: 'hsl(217.2 32.6% 32%)',
+    nodeStrokeColor: 'hsl(217.2 32.6% 42%)',
+} as const
 
 // Source types configuration
 const SOURCE_TYPES = [
@@ -78,7 +88,7 @@ const SOURCE_TYPES = [
     { type: SourceType.DOCUMENT, label: 'Документ', icon: FileText, color: 'text-blue-500' },
     { type: SourceType.API, label: 'API', icon: Globe, color: 'text-purple-500' },
     { type: SourceType.DATABASE, label: 'База данных', icon: Database, color: 'text-orange-500' },
-    { type: SourceType.RESEARCH, label: 'AI Research', icon: Search, color: 'text-pink-500' },
+    { type: SourceType.RESEARCH, label: 'Поиск с ИИ', icon: Search, color: 'text-pink-500' },
     { type: SourceType.MANUAL, label: 'Ручной ввод', icon: Edit3, color: 'text-gray-500' },
     { type: SourceType.STREAM, label: 'Стрим', icon: Radio, color: 'text-cyan-500', disabled: true },
 ]
@@ -595,6 +605,7 @@ function edgeToReactFlowEdge(edge: Edge, onTransform?: (prompt: string, code?: s
 
 export function BoardCanvas() {
     const { boardId } = useParams<{ boardId: string }>()
+    const colorScheme = useResolvedColorScheme()
     const reactFlowInstance = useReactFlow()
     const {
         widgetNodes,
@@ -1436,6 +1447,7 @@ export function BoardCanvas() {
                     minZoom={0.5}
                     maxZoom={2}
                     defaultViewport={{ x: 0, y: 0, zoom: 1 }}
+                    colorMode={colorScheme}
                     className="bg-muted/30"
                     selectNodesOnDrag={false}
                     panOnDrag={true}
@@ -1449,8 +1461,12 @@ export function BoardCanvas() {
                     proOptions={{ hideAttribution: true }}
                 >
                     {showGrid && <Background gap={GRID_SIZE} size={1} />}
-                    <Controls />
-                    <MiniMap nodeStrokeWidth={3} className="bg-background border border-border" />
+                    <Controls className="overflow-hidden rounded-md border border-border shadow-sm" />
+                    <MiniMap
+                        nodeStrokeWidth={3}
+                        className="overflow-hidden rounded-md border border-border bg-background shadow-sm"
+                        {...(colorScheme === 'dark' ? MINIMAP_DARK : {})}
+                    />
                     {/* Умные направляющие: мост внутри ReactFlow порталит оверлей в контейнер, пиксели по transform */}
                     {guideLines.length > 0 && (
                         <GuideLinesBridge guideLines={guideLines} containerRef={flowContainerRef} />

@@ -2176,7 +2176,6 @@ async def analyze_widget_suggestions(
                 "content_node_metadata": _cn_meta,
                 "current_widget_code": request.current_widget_code,
                 "chat_history": request.chat_history or [],
-                "max_suggestions": request.max_suggestions or 6,
             },
         )
 

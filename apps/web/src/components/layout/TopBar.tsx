@@ -3,6 +3,7 @@
  * The center area (#topbar-context) serves as a portal target for
  * context-specific toolbars rendered by BoardCanvas / DashboardPage.
  */
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Menu, User, LogOut, Settings, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -19,16 +20,48 @@ import {
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 
-export function TopBar() {
+interface TopBarProps {
+    /** X-координата левого края колонки `main` в окне (сайдбар + ручка ресайза), px */
+    contextMainOffset?: number
+}
+
+/** `gap-3` в flex-ряду шапки */
+const TOPBAR_GAP_PX = 12
+
+export function TopBar({ contextMainOffset = 0 }: TopBarProps) {
     const navigate = useNavigate()
     const { user, logout } = useAuthStore()
     const { toggleProjectExplorer, isAIPanelOpen, toggleAIPanel } = useUIStore()
 
+    const leftClusterRef = useRef<HTMLDivElement>(null)
+    const [spacerWidth, setSpacerWidth] = useState(0)
+
+    const updateSpacerWidth = useCallback(() => {
+        const el = leftClusterRef.current
+        if (!el) return
+        const right = el.getBoundingClientRect().right
+        // Левый край #topbar-context = right + gap + spacer + gap = contextMainOffset
+        setSpacerWidth(Math.max(0, contextMainOffset - right - 2 * TOPBAR_GAP_PX))
+    }, [contextMainOffset])
+
+    useLayoutEffect(() => {
+        updateSpacerWidth()
+        const el = leftClusterRef.current
+        if (!el) return
+        const ro = new ResizeObserver(() => updateSpacerWidth())
+        ro.observe(el)
+        window.addEventListener('resize', updateSpacerWidth)
+        return () => {
+            ro.disconnect()
+            window.removeEventListener('resize', updateSpacerWidth)
+        }
+    }, [updateSpacerWidth])
+
     return (
         <header className="border-b border-border bg-card select-none">
             <div className="flex h-12 items-center gap-3 px-3">
-                {/* Left: Menu toggle + Logo */}
-                <div className="flex items-center gap-2 shrink-0">
+                {/* Left: Menu + Logo — ширина учитывается в спейсере */}
+                <div ref={leftClusterRef} className="flex items-center gap-2 shrink-0">
                     <Button
                         variant="ghost"
                         size="icon"
@@ -42,7 +75,12 @@ export function TopBar() {
                     <Logo variant="light" size={28} className="[&_span:last-child]:text-base" />
                 </div>
 
-                <div className="w-px h-6 bg-border" />
+                {/* Доводит левый край контекстного тулбара до левого края доски под сайдбаром */}
+                <div
+                    className="shrink-0 transition-[width] duration-300 ease-out"
+                    style={{ width: spacerWidth }}
+                    aria-hidden
+                />
 
                 {/* Center: portal target for context-specific actions */}
                 <div id="topbar-context" className="flex-1 flex items-center gap-2 min-w-0" />

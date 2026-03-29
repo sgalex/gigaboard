@@ -95,6 +95,17 @@ class SourceNodeService:
                 }
             )
 
+        # list[list] → list[dict] по именам колонок (LLM / document extraction)
+        from app.services.controllers.document_extraction_controller import (
+            DocumentExtractionController,
+        )
+        normalized_tables = DocumentExtractionController._normalize_table_rows_to_dicts(
+            normalized_tables
+        )
+        normalized_tables = DocumentExtractionController._align_dict_rows_to_schema_columns(
+            normalized_tables
+        )
+
         return {
             "text": data.get("text"),
             "tables": normalized_tables,
@@ -202,7 +213,11 @@ class SourceNodeService:
                     f"{len(content.get('tables', []))} tables"
                 )
             else:
-                content, lineage = await SourceNodeService._extract_research_content(config)
+                content, lineage, research_err = await SourceNodeService._extract_research_content(config)
+                if research_err:
+                    logger.warning(
+                        "Research extraction at create returned no content: %s", research_err
+                    )
         
         # Create SourceNode with content
         # Note: используем node_metadata (Python attr), а не metadata (зарезервировано SQLAlchemy)
@@ -380,22 +395,27 @@ class SourceNodeService:
     @staticmethod
     async def _extract_research_content(
         config: dict[str, Any],
-    ) -> tuple[dict | None, dict | None]:
-        """Extract content for RESEARCH source via ResearchSource + Orchestrator."""
+    ) -> tuple[dict | None, dict | None, str | None]:
+        """Extract content for RESEARCH source via ResearchSource + Orchestrator.
+
+        Returns `(content, lineage, error_message)`; `error_message` is set on failure.
+        """
         try:
             from app.main import get_orchestrator
 
             orchestrator = get_orchestrator()
             if not orchestrator:
-                logger.warning("Orchestrator not available for RESEARCH extraction")
-                return None, None
+                msg = "Мультиагент оркестратор недоступен (проверьте запуск backend)"
+                logger.warning(msg)
+                return None, None, msg
 
             handler = get_source_handler("research")
             result = await handler.extract(config, orchestrator=orchestrator)
 
             if not result.success:
-                logger.error(f"Research extraction failed: {result.error}")
-                return None, None
+                err = result.error or "Ошибка извлечения research"
+                logger.error(f"Research extraction failed: {err}")
+                return None, None, err
 
             content = result.to_content()
             lineage = {
@@ -407,10 +427,10 @@ class SourceNodeService:
                 f"Successfully extracted research content: "
                 f"{len(content.get('tables', []))} tables"
             )
-            return content, lineage
+            return content, lineage, None
         except Exception as e:
             logger.exception(f"Error extracting research content: {e}")
-            return None, None
+            return None, None, str(e)
 
     @staticmethod
     async def get_source_node(db: AsyncSession, source_id: UUID) -> SourceNode | None:
@@ -493,6 +513,25 @@ class SourceNodeService:
             source.node_metadata = update_data.metadata
         if update_data.position is not None:
             source.position = update_data.position
+
+        # Документ: сохранение текста/таблиц из диалога (как при create с prefilled data)
+        if (
+            update_data.data is not None
+            and source.source_type == SourceType.DOCUMENT
+        ):
+            content = SourceNodeService._normalize_prefilled_content(update_data.data)
+            source.content = SourceNodeService._to_json_safe(content)
+            lineage = {
+                "operation": "extract",
+                "source_node_id": str(source.id),
+                "transformation_history": [],
+                "source": "prefilled_dialog_data_update",
+            }
+            source.lineage = SourceNodeService._to_json_safe(lineage)
+            logger.info(
+                f"Updated DOCUMENT SourceNode {source_id} content from dialog: "
+                f"{len(content.get('tables', []))} tables"
+            )
         
         await db.commit()
         await db.refresh(source)
@@ -506,6 +545,13 @@ class SourceNodeService:
                 f"🔍 [DIM] SourceNode {source_id} update ({source.source_type}): "
                 f"tables_count={len(tables)}"
             )
+            if tables:
+                await SourceNodeService._auto_detect_dimensions(
+                    db, source.board_id, source.id, tables,
+                )
+
+        if update_data.data is not None and source.source_type == SourceType.DOCUMENT:
+            tables = (source.content or {}).get("tables", [])
             if tables:
                 await SourceNodeService._auto_detect_dimensions(
                     db, source.board_id, source.id, tables,
@@ -597,6 +643,15 @@ class SourceNodeService:
                 content, lineage = await SourceNodeService._extract_manual_content(source.config)
                 if content is None:
                     error_message = "Manual extraction returned no content"
+            elif source.source_type == SourceType.RESEARCH:
+                logger.info("🔬 Re-extracting research source (Поиск с ИИ)")
+                content, lineage, research_err = await SourceNodeService._extract_research_content(
+                    source.config
+                )
+                if content is None:
+                    error_message = research_err or "Не удалось выполнить поиск с ИИ"
+                else:
+                    lineage = {"operation": "refresh", "source_node_id": str(source_id)}
             # For other types, use the generic extract_data
             else:
                 logger.info(f"🔧 Using generic extraction for: {source.source_type}")

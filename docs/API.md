@@ -126,7 +126,7 @@ BoardWithNodesResponse extends BoardResponse { widget_nodes_count, comment_nodes
 | GET    | `/api/v1/source-nodes/board/{board_id}`     | —                  | `list[SourceNodeResponse]` | 200         | Все SourceNode доски              |
 | PUT    | `/api/v1/source-nodes/{source_id}`          | `SourceNodeUpdate` | `SourceNodeResponse`       | 200         | Обновить                          |
 | DELETE | `/api/v1/source-nodes/{source_id}`          | —                  | —                          | 204         | Удалить                           |
-| POST   | `/api/v1/source-nodes/{source_id}/refresh`  | —                  | `SourceNodeResponse`       | 200         | Перезагрузить данные              |
+| POST   | `/api/v1/source-nodes/{source_id}/refresh`  | —                  | `SourceNodeResponse`       | 200         | Перезагрузить данные (см. §5.1)   |
 | POST   | `/api/v1/source-nodes/{source_id}/validate` | —                  | `dict`                     | 200         | Валидировать конфигурацию         |
 
 <details>
@@ -197,12 +197,23 @@ ExcelSourceConfig    { file_id, filename, has_header, analysis_mode="smart", max
 DocumentSourceConfig { file_id, extraction_prompt?, extraction_code? }
 APISourceConfig      { url, method="GET", headers={}, params={}, body?, timeout_seconds=30, pagination? }
 DatabaseSourceConfig { db_type, host?, port?, database?, username?, password?, path?, tables }
-ResearchSourceConfig { initial_prompt, context={} }
+ResearchSourceConfig { initial_prompt, conversation_history?, context={} }
 ManualSourceConfig   { columns: [{name, type}], data=[] }
 StreamSourceConfig   { stream_type: "websocket"|"sse"|"kafka", url, buffer_strategy="accumulate" }
 ```
 
 </details>
+
+### 5.1. `POST /api/v1/source-nodes/{source_id}/refresh`
+
+Повторное извлечение данных в `content` по сохранённому `config` (тип источника определяет ветку в `SourceNodeService.refresh_source_data`).
+
+- **csv / json / excel / document** — повторное чтение файла по `file_id` и экстрактору типа.
+- **manual** — пересборка таблиц из `config.tables`.
+- **research** — повторный запуск `ResearchSource.extract` с оркестратором; текст запроса берётся из **`initial_prompt`**, а при его отсутствии — из **первой реплики пользователя** в `conversation_history` (см. `ResearchSource`, `_effective_initial_prompt`).
+- **api / database** и прочие типы с общим `extract_data` — по текущей логике сервиса.
+
+**UI карточки SourceNode (`SourceNodeCard`)**: кнопка «Обновить данные» **не вызывает** этот endpoint для типов **`document`** и **`research`** — на карточке остаются уже сохранённые в узле таблицы и текст (включая отображение с учётом глобальных фильтров). Чтобы заново извлечь документ или заново запустить исследование, пользователь открывает **настройки источника** (соответствующий диалог). Прямой вызов API `refresh` для этих типов по-прежнему возможен (интеграции, скрипты).
 
 #### JSON Source: контракт и поведение
 
@@ -214,11 +225,12 @@ StreamSourceConfig   { stream_type: "websocket"|"sse"|"kafka", url, buffer_strat
 
 ### Research Chat (`/api/v1/research`)
 
-Чат исследования для диалога **AI Research** (без обязательной привязки к доске). Тот же Orchestrator, что и в админском Playground; отличие — формирование `user_request` в `ResearchController` (см. [AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md](./AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md) §2.0.1).
+Чат исследования для диалога **Поиск с ИИ** (без обязательной привязки к доске). Тот же Orchestrator, что и в админском Playground; отличие — формирование `user_request` в `ResearchController` (см. [AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md](./AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md) §2.0.1).
 
 | Method | Path                       | Request Body          | Response               | Статус | Описание                                      |
 | ------ | -------------------------- | --------------------- | ---------------------- | ------ | --------------------------------------------- |
 | POST   | `/api/v1/research/chat`    | `ResearchChatRequest` | `ResearchChatResponse` | ✅      | Сообщение → narrative, tables, sources, session_id |
+| POST   | `/api/v1/research/chat-stream` | `ResearchChatRequest` | `application/x-ndjson` | ✅      | Прогресс мультиагента + финальный JSON в событии `result` |
 
 **Аутентификация**: JWT, любой авторизованный пользователь (не только admin).
 
@@ -631,6 +643,7 @@ UserAISettingsTestResponse {
 | POST   | `/api/v1/files/{file_id}/analyze-excel-smart` | —                 | `SmartExcelAnalysisResult`                    | Умный анализ областей     |
 | POST   | `/api/v1/files/{file_id}/analyze-document` | —                   | `DocumentAnalysisResult`                      | Анализ документа          |
 | POST   | `/api/v1/files/{file_id}/extract-document-chat` | body             | `DocumentExtractionChatResponse`              | Итеративное извлечение    |
+| POST   | `/api/v1/files/{file_id}/extract-document-chat-stream` | body (как extract-document-chat) | `application/x-ndjson` | Прогресс + `result` с narrative/tables |
 
 <details>
 <summary>📄 CSVAnalysisResult</summary>

@@ -83,7 +83,7 @@ Package:   uv (Python), npm (Frontend)
 | Документ                                                   | Описание                                                    |
 | ---------------------------------------------------------- | ----------------------------------------------------------- |
 | [AI_ASSISTANT.md](./AI_ASSISTANT.md)                       | AI Assistant Panel — спецификация, API, примеры             |
-| [AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md](./AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md) | Источник AI Research: ResearchController, `/research/chat`, диалог, сравнение с Playground |
+| [AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md](./AI_RESEARCH_SOURCE_IMPLEMENTATION_PLAN.md) | Источник «Поиск с ИИ»: ResearchController, `/research/chat`, диалог, сравнение с Playground |
 | [ADMIN_AND_SYSTEM_LLM.md](./ADMIN_AND_SYSTEM_LLM.md)       | Администратор, системные настройки LLM, Playground мультиагента |
 | [LLM_CONFIGURATION_CONCEPT.md](./LLM_CONFIGURATION_CONCEPT.md) | Концепция: пресеты LLM, модель по умолчанию, привязка к агентам |
 | [UI_DESIGN.md](./UI_DESIGN.md)                             | Макеты UI, компоненты, дизайн                               |
@@ -107,6 +107,11 @@ Package:   uv (Python), npm (Frontend)
 - Левая секция: upload JSON + collapsible preview исходного JSON.
 - Правая секция: табы таблиц мэппинга (rename/delete/add), редактор столбцов и встроенный preview.
 - Контракт хранения: `schema_snapshot`, `mapping_spec`, `generation_meta` в `SourceNode.config`.
+
+**Источники document / «Поиск с ИИ» (актуализация 2026-03-28):**
+- Диалог «Поиск с ИИ»: режим **редактирования** с карточки (`existingSource`, сохранение конфига и контента).
+- Backend: `_effective_initial_prompt`, отдельная ветка **refresh** для `RESEARCH` в `SourceNodeService`; ошибки извлечения прокидываются клиенту.
+- Карточка SourceNode: кнопка **«Обновить данные»** для **`document`** и **`research`** не вызывает серверный refresh — см. [API.md](./API.md) §5.1, [BOARD_SYSTEM.md](./BOARD_SYSTEM.md) (таблица типов источников), [SOURCE_NODE_CONCEPT.md](./SOURCE_NODE_CONCEPT.md) §7.
 
 ### Планирование и развитие
 

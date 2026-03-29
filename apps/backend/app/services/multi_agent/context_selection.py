@@ -57,6 +57,7 @@ AGENT_ALLOWED_FIELDS: Dict[str, Optional[set[str]]] = {
         "findings",
         "tables",
         "sources",
+        "discovered_resources",
         "validation",
         "metadata",
         "step_id",
@@ -70,6 +71,7 @@ AGENT_ALLOWED_FIELDS: Dict[str, Optional[set[str]]] = {
         "findings",
         "tables",
         "sources",
+        "discovered_resources",
         "validation",
         "metadata",
         "step_id",
@@ -83,6 +85,7 @@ AGENT_ALLOWED_FIELDS: Dict[str, Optional[set[str]]] = {
         "findings",
         "tables",
         "sources",
+        "discovered_resources",
         "code_blocks",
         "validation",
         "metadata",
@@ -95,6 +98,7 @@ AGENT_ALLOWED_FIELDS: Dict[str, Optional[set[str]]] = {
         "error",
         "narrative",
         "sources",
+        "discovered_resources",
         "metadata",
         "step_id",
     },
@@ -104,6 +108,7 @@ AGENT_ALLOWED_FIELDS: Dict[str, Optional[set[str]]] = {
         "error",
         "narrative",
         "sources",
+        "discovered_resources",
         "metadata",
         "step_id",
     },
@@ -114,6 +119,7 @@ AGENT_ALLOWED_FIELDS: Dict[str, Optional[set[str]]] = {
         "narrative",
         "tables",
         "sources",
+        "discovered_resources",
         "metadata",
         "step_id",
     },
@@ -183,9 +189,33 @@ def _sanitize_sources(sources: Any) -> List[Dict[str, Any]]:
             "fetched": src.get("fetched"),
             "status": src.get("status"),
             "content": _truncate_text(src.get("content"), max_ch),
+            "mime_type": src.get("mime_type"),
+            "resource_kind": src.get("resource_kind"),
             "metadata": src.get("metadata"),
         })
     return sanitized
+
+
+def _sanitize_discovered_resources(items: Any) -> List[Dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    max_n = ma_int("MULTI_AGENT_CONTEXT_MAX_DISCOVERED_RESOURCES", 64)
+    max_url = ma_int("MULTI_AGENT_CONTEXT_MAX_DISCOVERED_RESOURCE_URL_CHARS", 2000)
+    out: List[Dict[str, Any]] = []
+    for it in items[:max_n]:
+        if not isinstance(it, dict):
+            continue
+        pu = it.get("parent_url")
+        out.append({
+            "url": _truncate_text(str(it.get("url") or ""), max_url),
+            "resource_kind": it.get("resource_kind"),
+            "mime_type": it.get("mime_type"),
+            "parent_url": _truncate_text(str(pu), max_url) if pu else None,
+            "origin": it.get("origin"),
+            "tag": it.get("tag"),
+            "title": _truncate_text(it.get("title"), 400) if it.get("title") else None,
+        })
+    return out
 
 
 def _sanitize_tables(tables: Any) -> List[Dict[str, Any]]:
@@ -225,6 +255,10 @@ def _sanitize_result_item(agent_name: str, result: Dict[str, Any]) -> Dict[str, 
 
     if "sources" in item:
         item["sources"] = _sanitize_sources(item.get("sources"))
+    if "discovered_resources" in item:
+        item["discovered_resources"] = _sanitize_discovered_resources(
+            item.get("discovered_resources")
+        )
     if "tables" in item:
         item["tables"] = _sanitize_tables(item.get("tables"))
     if "findings" in item and isinstance(item["findings"], list):

@@ -11,7 +11,6 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_db
@@ -28,19 +27,16 @@ from app.schemas.cross_filter import (
     TableFilterStats,
 )
 from app.services.filter_preset_service import FilterPresetService
-from app.services.filter_state_service import FilterStateService
-from app.services.dimension_service import DimensionService
-from app.services.source_node_service import SourceNodeService
-from app.services.content_node_service import ContentNodeService
-from app.services.dashboard_service import DashboardService
-from app.models.project_widget import ProjectWidget
 
 logger = logging.getLogger(__name__)
 
-class AddFilterRequest(BaseModel):
-    """Backend-compatible addFilter(jsonObject) request."""
+# In-memory store for active filters (Redis replacement for MVP).
+# In production, replace with Redis: `board:{board_id}:user:{user_id}:filters`
+_active_filters_store: dict[str, dict[str, Any]] = {}
 
-    filter: FilterExpression | dict[str, Any]
+
+def _filter_key(scope: str, target_id: str, user_id: str) -> str:
+    return f"{scope}:{target_id}:{user_id}"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -60,11 +56,8 @@ async def get_board_filters(
     current_user: User = Depends(get_current_user),
 ):
     """Get current active filters for a board."""
-    data = FilterStateService.get_active_filters(
-        scope="board",
-        target_id=str(board_id),
-        user_id=str(current_user.id),
-    )
+    key = _filter_key("board", str(board_id), str(current_user.id))
+    data = _active_filters_store.get(key, {})
     return ActiveFiltersResponse(
         filters=data.get("filters"),
         preset_id=data.get("preset_id"),
@@ -80,37 +73,18 @@ async def set_board_filters(
     current_user: User = Depends(get_current_user),
 ):
     """Set (replace) active filters for a board."""
+    from datetime import datetime
+
+    key = _filter_key("board", str(board_id), str(current_user.id))
     filters_dict = None
     if body.filters is not None:
         filters_dict = body.filters.model_dump() if hasattr(body.filters, "model_dump") else body.filters
-    payload = FilterStateService.set_active_filters(
-        scope="board",
-        target_id=str(board_id),
-        user_id=str(current_user.id),
-        filters=filters_dict,
-        preset_id=None,
-    )
-    return ActiveFiltersResponse(**payload)
-
-
-@board_filter_router.post("/add-filter", response_model=ActiveFiltersResponse)
-async def add_board_filter(
-    board_id: UUID,
-    body: AddFilterRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Backend-side addFilter(jsonObject) for board scope."""
-    filter_dict = body.filter.model_dump() if hasattr(body.filter, "model_dump") else body.filter
-    known_values = await _build_dim_known_values_for_board(db, board_id)
-    payload = FilterStateService.add_filter_json_object(
-        scope="board",
-        target_id=str(board_id),
-        user_id=str(current_user.id),
-        filter_json=filter_dict,
-        dim_known_values=known_values,
-    )
-    return ActiveFiltersResponse(**payload)
+    _active_filters_store[key] = {
+        "filters": filters_dict,
+        "preset_id": None,
+        "updated_at": datetime.utcnow(),
+    }
+    return ActiveFiltersResponse(**_active_filters_store[key])
 
 
 @board_filter_router.post("/clear", response_model=ActiveFiltersResponse)
@@ -120,11 +94,8 @@ async def clear_board_filters(
     current_user: User = Depends(get_current_user),
 ):
     """Clear all active filters for a board."""
-    FilterStateService.clear_active_filters(
-        scope="board",
-        target_id=str(board_id),
-        user_id=str(current_user.id),
-    )
+    key = _filter_key("board", str(board_id), str(current_user.id))
+    _active_filters_store.pop(key, None)
     return ActiveFiltersResponse(filters=None, preset_id=None, updated_at=None)
 
 
@@ -136,17 +107,18 @@ async def apply_board_preset(
     current_user: User = Depends(get_current_user),
 ):
     """Apply a saved filter preset to this board."""
+    from datetime import datetime
+
     preset = await FilterPresetService.get_preset(db, preset_id)
     if not preset:
         raise HTTPException(status_code=404, detail="Preset not found")
-    payload = FilterStateService.set_active_filters(
-        scope="board",
-        target_id=str(board_id),
-        user_id=str(current_user.id),
-        filters=preset.filters,
-        preset_id=str(preset.id),
-    )
-    return ActiveFiltersResponse(**payload)
+    key = _filter_key("board", str(board_id), str(current_user.id))
+    _active_filters_store[key] = {
+        "filters": preset.filters,
+        "preset_id": str(preset.id),
+        "updated_at": datetime.utcnow(),
+    }
+    return ActiveFiltersResponse(**_active_filters_store[key])
 
 
 # ── Helper: проверяем есть ли в коде вызовы ai_resolve ──────────────────────
@@ -156,94 +128,6 @@ _AI_RESOLVE_RE = re.compile(r'\bgb\.ai_resolve_(?:batch|single)\b')
 
 def _code_uses_ai(code: str | None) -> bool:
     return bool(code and _AI_RESOLVE_RE.search(code))
-
-
-def _node_table_rows(node: Any, table_name: str) -> list[dict[str, Any]]:
-    content = (getattr(node, "content", None) or {})
-    tables = content.get("tables", []) if isinstance(content, dict) else []
-    for t in tables:
-        if str(t.get("name", "")) == table_name:
-            rows = t.get("rows", [])
-            return rows if isinstance(rows, list) else []
-    return []
-
-
-async def _build_dim_known_values_for_board(
-    db: AsyncSession,
-    board_id: UUID,
-) -> dict[str, list[str]]:
-    mappings_by_node = await DimensionService.get_all_mappings_for_board(db, board_id)
-    if not mappings_by_node:
-        return {}
-
-    node_by_id: dict[str, Any] = {}
-    for n in await SourceNodeService.get_board_sources(db, board_id):
-        node_by_id[str(n.id)] = n
-    for n in await ContentNodeService.get_board_contents(db, board_id):
-        node_by_id.setdefault(str(n.id), n)
-
-    out: dict[str, set[str]] = {}
-    for node_id, mappings in mappings_by_node.items():
-        node = node_by_id.get(node_id)
-        if not node:
-            continue
-        for m in mappings:
-            dim = str(m.get("dim_name", "")).strip()
-            table_name = str(m.get("table_name", "")).strip()
-            col_name = str(m.get("column_name", "")).strip()
-            if not dim or not table_name or not col_name:
-                continue
-            rows = _node_table_rows(node, table_name)
-            bag = out.setdefault(dim, set())
-            for r in rows:
-                if not isinstance(r, dict):
-                    continue
-                val = r.get(col_name)
-                if val is None:
-                    continue
-                s = str(val).strip()
-                if s:
-                    bag.add(s)
-
-    return {dim: sorted(values) for dim, values in out.items() if values}
-
-
-async def _build_dim_known_values_for_dashboard(
-    db: AsyncSession,
-    dashboard_id: UUID,
-    user_id: UUID,
-) -> dict[str, list[str]]:
-    dashboard = await DashboardService.get_dashboard(db, dashboard_id, user_id)
-    if not dashboard:
-        return {}
-
-    widget_items = [it for it in dashboard.items if it.item_type == "widget" and it.source_id]
-    if not widget_items:
-        return {}
-
-    from sqlalchemy import select
-
-    pw_ids = [it.source_id for it in widget_items]
-    pw_rows = (
-        await db.execute(select(ProjectWidget).where(ProjectWidget.id.in_(pw_ids)))
-    ).scalars().all()
-
-    board_ids: set[UUID] = set()
-    for pw in pw_rows:
-        cn_id = pw.source_content_node_id or (pw.config or {}).get("sourceContentNodeId")
-        if not cn_id:
-            continue
-        cn = await ContentNodeService.get_content_node(db, UUID(str(cn_id)))
-        if cn and cn.board_id:
-            board_ids.add(cn.board_id)
-
-    merged: dict[str, set[str]] = {}
-    for bid in board_ids:
-        part = await _build_dim_known_values_for_board(db, bid)
-        for dim, vals in part.items():
-            merged.setdefault(dim, set()).update(vals)
-
-    return {dim: sorted(values) for dim, values in merged.items() if values}
 
 
 async def _compute_filtered_pipeline(
@@ -430,21 +314,14 @@ async def compute_filtered_board(
     НЕ сохраняет результаты в БД — только для отображения на доске.
     ContentNode с ai_resolve_batch используют кэшированные данные.
 
-    Request body: { "filters": FilterExpression | null, "initiator_content_node_ids": [str] | null }
-    "nodes" всегда содержит отфильтрованные данные (для карточек ContentNode).
-    "initiator_full_data" — только для node_id из initiator_content_node_ids полные данные,
-    чтобы виджет-инициатор мог показывать highlight (full vs filtered).
-
-    Response: { "nodes": { [nodeId]: { tables, uses_ai, from_cache } }, "initiator_full_data"?: { [nodeId]: { tables, ... } } }
+    Request body: { "filters": FilterExpression | null }
+    Response: { "nodes": { [nodeId]: { tables, uses_ai, from_cache } } }
     """
     raw_filters = body.get("filters")
-    initiator_ids: list[str] = body.get("initiator_content_node_ids") or []
-
     logger.info(
-        "compute-filtered board=%s raw_filters=%s initiator_ids=%s",
+        "compute-filtered board=%s raw_filters=%s",
         board_id,
         type(raw_filters).__name__ if raw_filters else None,
-        len(initiator_ids),
     )
 
     try:
@@ -454,26 +331,12 @@ async def compute_filtered_board(
             filters=raw_filters,
             user_id=str(current_user.id),
         )
-
-        initiator_full_data: dict[str, dict[str, Any]] = {}
-        if initiator_ids:
-            full_data = await _compute_filtered_pipeline(
-                db=db,
-                board_id=board_id,
-                filters=None,
-                user_id=str(current_user.id),
-            )
-            for nid in initiator_ids:
-                if nid in full_data:
-                    initiator_full_data[nid] = full_data[nid]
-
         logger.info(
-            "compute-filtered board=%s result_nodes=%d initiator_full=%d",
+            "compute-filtered board=%s result_nodes=%d",
             board_id,
             len(nodes_data),
-            len(initiator_full_data),
         )
-        return {"nodes": nodes_data, "initiator_full_data": initiator_full_data}
+        return {"nodes": nodes_data}
     except Exception as e:
         logger.error("compute-filtered failed for board %s: %s", board_id, e, exc_info=True)
         raise HTTPException(
@@ -498,11 +361,8 @@ async def get_dashboard_filters(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    data = FilterStateService.get_active_filters(
-        scope="dashboard",
-        target_id=str(dashboard_id),
-        user_id=str(current_user.id),
-    )
+    key = _filter_key("dashboard", str(dashboard_id), str(current_user.id))
+    data = _active_filters_store.get(key, {})
     return ActiveFiltersResponse(
         filters=data.get("filters"),
         preset_id=data.get("preset_id"),
@@ -517,41 +377,18 @@ async def set_dashboard_filters(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from datetime import datetime
+
+    key = _filter_key("dashboard", str(dashboard_id), str(current_user.id))
     filters_dict = None
     if body.filters is not None:
         filters_dict = body.filters.model_dump() if hasattr(body.filters, "model_dump") else body.filters
-    payload = FilterStateService.set_active_filters(
-        scope="dashboard",
-        target_id=str(dashboard_id),
-        user_id=str(current_user.id),
-        filters=filters_dict,
-        preset_id=None,
-    )
-    return ActiveFiltersResponse(**payload)
-
-
-@dashboard_filter_router.post("/add-filter", response_model=ActiveFiltersResponse)
-async def add_dashboard_filter(
-    dashboard_id: UUID,
-    body: AddFilterRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Backend-side addFilter(jsonObject) for dashboard scope."""
-    filter_dict = body.filter.model_dump() if hasattr(body.filter, "model_dump") else body.filter
-    known_values = await _build_dim_known_values_for_dashboard(
-        db=db,
-        dashboard_id=dashboard_id,
-        user_id=current_user.id,
-    )
-    payload = FilterStateService.add_filter_json_object(
-        scope="dashboard",
-        target_id=str(dashboard_id),
-        user_id=str(current_user.id),
-        filter_json=filter_dict,
-        dim_known_values=known_values,
-    )
-    return ActiveFiltersResponse(**payload)
+    _active_filters_store[key] = {
+        "filters": filters_dict,
+        "preset_id": None,
+        "updated_at": datetime.utcnow(),
+    }
+    return ActiveFiltersResponse(**_active_filters_store[key])
 
 
 @dashboard_filter_router.post("/clear", response_model=ActiveFiltersResponse)
@@ -560,121 +397,9 @@ async def clear_dashboard_filters(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    FilterStateService.clear_active_filters(
-        scope="dashboard",
-        target_id=str(dashboard_id),
-        user_id=str(current_user.id),
-    )
+    key = _filter_key("dashboard", str(dashboard_id), str(current_user.id))
+    _active_filters_store.pop(key, None)
     return ActiveFiltersResponse(filters=None, preset_id=None, updated_at=None)
-
-
-@dashboard_filter_router.post("/compute-filtered")
-async def compute_filtered_dashboard(
-    dashboard_id: UUID,
-    body: dict,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Пересчитать pipeline досок для виджетов дашборда с учётом фильтров.
-
-    Вместо row-level фильтрации на агрегированных таблицах (что обнуляет данные),
-    находим board_id каждого ContentNode и запускаем _compute_filtered_pipeline доски.
-    Это корректно пересчитывает трансформации на отфильтрованных исходных данных.
-
-    Request body: { "filters": FilterExpression | null, "initiator_content_node_ids": [str] | null }
-    Response: { "nodes": { [contentNodeId]: { tables, uses_ai, from_cache } } }
-    """
-    from app.services.content_node_service import ContentNodeService
-    from app.services.dashboard_service import DashboardService
-    from app.models.project_widget import ProjectWidget
-
-    raw_filters = body.get("filters")
-    initiator_ids: list[str] = body.get("initiator_content_node_ids") or []
-    logger.info("compute-filtered dashboard=%s raw_filters=%s initiator_ids=%d", dashboard_id, type(raw_filters).__name__ if raw_filters else None, len(initiator_ids))
-
-    if not raw_filters:
-        return {"nodes": {}}
-
-    try:
-        # 1. Загрузить дашборд с items
-        dashboard = await DashboardService.get_dashboard(db, dashboard_id, current_user.id)
-        if not dashboard:
-            raise HTTPException(status_code=404, detail="Dashboard not found")
-
-        # 2. Собрать content node IDs из widget items → ProjectWidget
-        content_node_ids: set[UUID] = set()
-        widget_items = [it for it in dashboard.items if it.item_type == "widget" and it.source_id]
-        if not widget_items:
-            return {"nodes": {}}
-
-        pw_ids = [it.source_id for it in widget_items]
-        from sqlalchemy import select
-        pw_rows = (await db.execute(select(ProjectWidget).where(ProjectWidget.id.in_(pw_ids)))).scalars().all()
-        for pw in pw_rows:
-            cn_id = pw.source_content_node_id or (pw.config or {}).get("sourceContentNodeId")
-            if cn_id:
-                content_node_ids.add(UUID(str(cn_id)))
-
-        if not content_node_ids:
-            return {"nodes": {}}
-
-        # 3. Группируем content nodes по board_id
-        board_ids_for_cn: dict[UUID, UUID] = {}
-        for cn_id in content_node_ids:
-            cn = await ContentNodeService.get_content_node(db, cn_id)
-            if cn and cn.board_id:
-                board_ids_for_cn[cn_id] = cn.board_id
-
-        # 4. Запускаем pipeline для каждой уникальной доски (с фильтрами)
-        pipeline_results: dict[str, dict] = {}
-        unique_boards = set(board_ids_for_cn.values())
-        for bid in unique_boards:
-            logger.info("compute-filtered dashboard=%s running board pipeline for board=%s", dashboard_id, bid)
-            board_result = await _compute_filtered_pipeline(
-                db=db,
-                board_id=bid,
-                filters=raw_filters,
-                user_id=str(current_user.id),
-            )
-            pipeline_results.update(board_result)
-
-        # 5. Извлекаем результаты только для нужных content nodes
-        result: dict[str, dict] = {}
-        for cn_id in content_node_ids:
-            nid = str(cn_id)
-            if nid in pipeline_results:
-                result[nid] = pipeline_results[nid]
-
-        # 6. Для виджетов-инициаторов — полные данные только в initiator_full_data (result остаётся отфильтрованным)
-        initiator_full_data: dict[str, dict[str, Any]] = {}
-        if initiator_ids:
-            boards_with_initiators = set()
-            for nid in initiator_ids:
-                try:
-                    boards_with_initiators.add(board_ids_for_cn[UUID(nid)])
-                except (KeyError, ValueError):
-                    pass
-            for bid in boards_with_initiators:
-                full_result = await _compute_filtered_pipeline(
-                    db=db,
-                    board_id=bid,
-                    filters=None,
-                    user_id=str(current_user.id),
-                )
-                for nid in initiator_ids:
-                    if nid in full_result:
-                        initiator_full_data[nid] = full_result[nid]
-
-        logger.info("compute-filtered dashboard=%s result_nodes=%d initiator_full=%d", dashboard_id, len(result), len(initiator_full_data))
-        return {"nodes": result, "initiator_full_data": initiator_full_data}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("compute-filtered failed for dashboard %s: %s", dashboard_id, e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Dashboard filter recompute failed: {str(e)}",
-        )
 
 
 @dashboard_filter_router.post("/apply-preset/{preset_id}", response_model=ActiveFiltersResponse)
@@ -684,17 +409,18 @@ async def apply_dashboard_preset(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from datetime import datetime
+
     preset = await FilterPresetService.get_preset(db, preset_id)
     if not preset:
         raise HTTPException(status_code=404, detail="Preset not found")
-    payload = FilterStateService.set_active_filters(
-        scope="dashboard",
-        target_id=str(dashboard_id),
-        user_id=str(current_user.id),
-        filters=preset.filters,
-        preset_id=str(preset.id),
-    )
-    return ActiveFiltersResponse(**payload)
+    key = _filter_key("dashboard", str(dashboard_id), str(current_user.id))
+    _active_filters_store[key] = {
+        "filters": preset.filters,
+        "preset_id": str(preset.id),
+        "updated_at": datetime.utcnow(),
+    }
+    return ActiveFiltersResponse(**_active_filters_store[key])
 
 
 # ═══════════════════════════════════════════════════════════════════════

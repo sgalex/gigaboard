@@ -15,6 +15,22 @@ export function normalizeProgressText(value: unknown): string {
     return String(value || '').trim()
 }
 
+/** Стабильный id для React key (без Math.random при каждом merge). */
+export function stablePlanStepId(idPrefix: string, index: number, text: string): string {
+    const n = normalizeProgressText(text)
+    let h = 0
+    for (let i = 0; i < n.length; i++) {
+        h = (h * 31 + n.charCodeAt(i)) | 0
+    }
+    return `${idPrefix}-${index}-${(h >>> 0).toString(36)}`
+}
+
+/**
+ * Слияние плана с сервера с локальным состоянием.
+ * — Завершённые ранее шаги (completed/failed) никогда не удаляем.
+ * — Первые completed_count шагов из incoming считаем завершёнными (даже если клиент ещё не успел их отметить).
+ * — Хвост incoming.slice(completed_count) — ожидающие шаги; дубликаты по тексту отфильтровываются от уже завершённых.
+ */
 export function mergePlanSteps(
     prevSteps: ProgressStep[],
     incomingStepsRaw: string[],
@@ -32,16 +48,37 @@ export function mergePlanSteps(
         .filter((s) => s.length > 0)
 
     const preservedDone = prevSteps.filter((s) => s.status === 'completed' || s.status === 'failed')
-    const preservedTexts = new Set(preservedDone.map((s) => normalizeProgressText(s.text)))
+    const mergedDoneTexts = new Set(
+        preservedDone.map((s) => normalizeProgressText(s.text)).filter((s) => s.length > 0)
+    )
 
     const completedCount = Math.max(0, Math.min(Number(completedCountRaw || 0), incomingSteps.length))
+    const serverLeading = incomingSteps.slice(0, completedCount)
     const tailFromServer = incomingSteps.slice(completedCount)
-    const mergedTail = tailFromServer.filter((text) => !preservedTexts.has(text))
+
+    const mergedDone: ProgressStep[] = [...preservedDone]
+    for (const text of serverLeading) {
+        const n = normalizeProgressText(text)
+        if (!n.length) continue
+        if (!mergedDoneTexts.has(n)) {
+            mergedDone.push({
+                id: stablePlanStepId(idPrefix, mergedDone.length, text),
+                text,
+                status: 'completed',
+            })
+            mergedDoneTexts.add(n)
+        }
+    }
+
+    const mergedTail = tailFromServer.filter((text) => {
+        const n = normalizeProgressText(text)
+        return n.length > 0 && !mergedDoneTexts.has(n)
+    })
 
     let nextSteps: ProgressStep[] = [
-        ...preservedDone,
+        ...mergedDone,
         ...mergedTail.map((stepText, idx) => ({
-            id: `${idPrefix}-plan-tail-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+            id: stablePlanStepId(idPrefix, mergedDone.length + idx, stepText),
             text: stepText,
             status: 'pending' as const,
         })),
@@ -142,7 +179,7 @@ export function applyProgressToSteps(
             step.status === 'running' ? { ...step, status: 'completed' as const } : step
         ),
         {
-            id: `${idPrefix}-step-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            id: stablePlanStepId(idPrefix, nextSteps.length, fallbackText),
             text: fallbackText,
             status: 'running',
         },
@@ -176,6 +213,10 @@ export function updateMetaFromPlanEvent(
     }
 }
 
+/**
+ * step_index с бэка — 1-based номер **текущего** выполняемого шага.
+ * Для шкалы «доля завершённых» считаем завершёнными step_index - 1 (пока шаг идёт, полоса не «съедает» его).
+ */
 export function updateMetaFromProgressEvent(
     prevMeta: ProgressMeta,
     stepIndexRaw: number | undefined,
@@ -187,13 +228,14 @@ export function updateMetaFromProgressEvent(
         typeof stepIndexRaw === 'number' && stepIndexRaw > 0 ? Math.floor(stepIndexRaw) : null
     const nextTotal = totalSteps != null ? Math.max(prevMeta.total ?? 0, totalSteps) : prevMeta.total
     if (stepIndex != null) {
+        const completed = Math.max(0, stepIndex - 1)
         return {
-            current: nextTotal != null ? Math.min(stepIndex, nextTotal) : stepIndex,
+            current: nextTotal != null ? Math.min(completed, nextTotal) : completed,
             total: nextTotal ?? null,
         }
     }
     return {
-        current: nextTotal != null ? Math.min(prevMeta.current + 1, nextTotal) : prevMeta.current + 1,
+        current: prevMeta.current,
         total: nextTotal ?? null,
     }
 }
@@ -203,5 +245,15 @@ export function finalizeMeta(prevMeta: ProgressMeta, fallbackLength: number): Pr
     return {
         current: resolvedTotal ?? Math.max(prevMeta.current, fallbackLength),
         total: resolvedTotal,
+    }
+}
+
+/** Мета из фактического списка шагов (для синхронизации после merge). */
+export function metaFromSteps(steps: ProgressStep[]): ProgressMeta {
+    const total = steps.length
+    const completed = steps.filter((s) => s.status === 'completed').length
+    return {
+        current: completed,
+        total: total > 0 ? total : null,
     }
 }

@@ -64,6 +64,9 @@ class ResearchController(BaseController):
         }
         if chat_history:
             orch_context["chat_history"] = chat_history
+        for key in ("_progress_callback", "_enable_plan_progress"):
+            if key in ctx:
+                orch_context[key] = ctx[key]
 
         orch_result = await self._call_orchestrator(
             user_request=enriched_request,
@@ -86,12 +89,14 @@ class ResearchController(BaseController):
         narrative = self._extract_narrative(results)
         tables = self._extract_tables(results)
         sources = self._extract_sources(results)
+        discovered_resources = self._extract_discovered_resources(results)
 
         return ControllerResult(
             status="success",
             narrative=narrative or "",
             tables=tables,
             sources=sources,
+            discovered_resources=discovered_resources,
             session_id=returned_session,
             plan=plan,
             mode="research",
@@ -133,10 +138,48 @@ class ResearchController(BaseController):
                 if not url or url in seen_urls:
                     continue
                 seen_urls.add(url)
-                out.append({
+                entry: Dict[str, Any] = {
                     "url": url,
                     "title": s.get("title") or s.get("name") or url,
-                })
+                }
+                if s.get("mime_type"):
+                    entry["mime_type"] = s.get("mime_type")
+                if s.get("resource_kind"):
+                    entry["resource_kind"] = s.get("resource_kind")
+                if s.get("metadata") and isinstance(s.get("metadata"), dict):
+                    entry["metadata"] = s.get("metadata")
+                out.append(entry)
+        return out
+
+    @staticmethod
+    def _extract_discovered_resources(results: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Каталог URL из payload research (страницы + embedded и т.д.)."""
+        out: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for key, payload in results.items():
+            if not isinstance(payload, dict) or not key.startswith("research"):
+                continue
+            for dr in payload.get("discovered_resources") or []:
+                if not isinstance(dr, dict):
+                    continue
+                url = dr.get("url")
+                if not url or not isinstance(url, str) or url in seen:
+                    continue
+                seen.add(url)
+                entry: Dict[str, Any] = {"url": url}
+                if dr.get("resource_kind"):
+                    entry["resource_kind"] = dr.get("resource_kind")
+                if dr.get("mime_type"):
+                    entry["mime_type"] = dr.get("mime_type")
+                if dr.get("parent_url"):
+                    entry["parent_url"] = dr.get("parent_url")
+                if dr.get("origin"):
+                    entry["origin"] = dr.get("origin")
+                if dr.get("tag"):
+                    entry["tag"] = dr.get("tag")
+                if dr.get("title"):
+                    entry["title"] = dr.get("title")
+                out.append(entry)
         return out
 
     @staticmethod

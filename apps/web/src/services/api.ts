@@ -1,6 +1,7 @@
 import axios, { AxiosInstance } from 'axios'
 import { useAuthStore } from '../store/authStore'
 import { notify } from '@/store/notificationStore'
+import { getViteApiBaseUrl } from '@/config/apiBase'
 import type {
     Project,
     ProjectWithBoards,
@@ -41,113 +42,13 @@ import type {
     DashboardShare, DashboardShareCreate,
     PublicDashboard,
 } from '@/types/dashboard'
-import { getViteApiBaseUrl } from '@/config/apiBase'
 
+/** Пустой env → относительные URL (Vite proxy / nginx в Docker). Не использовать `|| localhost:8000`: пустая строка falsy и уводила бы UI на хостовый :8000. */
 const API_URL = getViteApiBaseUrl()
 
 const api: AxiosInstance = axios.create({
     baseURL: API_URL,
 })
-
-type MultiAgentStreamEvent = {
-    type: 'start' | 'progress' | 'plan' | 'result' | 'error' | 'done'
-    agent_label?: string
-    task?: string
-    steps?: string[]
-    completed_count?: number
-    source?: string
-    result?: Record<string, unknown>
-    error?: string
-}
-
-type MultiAgentStreamMeta = {
-    phase?: string
-    stepIndex?: number
-    totalSteps?: number
-}
-
-type MultiAgentPlanMeta = {
-    completedCount?: number
-    source?: string
-}
-
-type RunMultiAgentStreamHandlers = {
-    onProgress?: (agentLabel: string, task: string, meta?: MultiAgentStreamMeta) => void
-    onPlanUpdate?: (steps: string[], meta?: MultiAgentPlanMeta) => void
-    onResult?: (result: Record<string, unknown>) => void
-    onError?: (error: string) => void
-}
-
-function getAuthHeadersForStream(): HeadersInit {
-    const token = useAuthStore.getState().token
-    const headers: HeadersInit = {
-        'Content-Type': 'application/json',
-    }
-    if (token) {
-        ;(headers as Record<string, string>)['Authorization'] = `Bearer ${token}`
-    }
-    return headers
-}
-
-async function consumeNdjsonStream(
-    response: Response,
-    handlers: RunMultiAgentStreamHandlers
-): Promise<void> {
-    if (!response.body) {
-        throw new Error('Пустой поток ответа')
-    }
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buffer = ''
-
-    while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-            const trimmed = line.trim()
-            if (!trimmed) continue
-
-            let event: MultiAgentStreamEvent
-            try {
-                event = JSON.parse(trimmed) as MultiAgentStreamEvent
-            } catch {
-                continue
-            }
-
-            if (event.type === 'progress') {
-                handlers.onProgress?.(event.agent_label || 'Агент', event.task || 'Выполнение шага', {
-                    phase:
-                        typeof (event as Record<string, unknown>).phase === 'string'
-                            ? ((event as Record<string, unknown>).phase as string)
-                            : undefined,
-                    stepIndex:
-                        typeof (event as Record<string, unknown>).step_index === 'number'
-                            ? ((event as Record<string, unknown>).step_index as number)
-                            : undefined,
-                    totalSteps:
-                        typeof (event as Record<string, unknown>).total_steps === 'number'
-                            ? ((event as Record<string, unknown>).total_steps as number)
-                            : undefined,
-                })
-            } else if (event.type === 'plan') {
-                handlers.onPlanUpdate?.(Array.isArray(event.steps) ? event.steps : [], {
-                    completedCount:
-                        typeof event.completed_count === 'number' ? event.completed_count : undefined,
-                    source: typeof event.source === 'string' ? event.source : undefined,
-                })
-            } else if (event.type === 'result' && event.result) {
-                handlers.onResult?.(event.result)
-            } else if (event.type === 'error') {
-                handlers.onError?.(event.error || 'Ошибка выполнения')
-            }
-        }
-    }
-}
 
 // Add token to requests
 api.interceptors.request.use((config) => {
@@ -163,7 +64,7 @@ api.interceptors.response.use(
     (response) => response,
     (error) => {
         if (!error.response) {
-            notify.error('Сервер недоступен или CORS блокирует запрос. Проверьте backend и прокси nginx (или VITE_API_URL).', {
+            notify.error('Сервер недоступен или CORS блокирует запрос. Проверьте backend и VITE_API_URL.', {
                 title: 'Сетевая ошибка',
             })
         }
@@ -217,8 +118,7 @@ export const boardsAPI = {
 // SourceNodes API (Source-Content Architecture) 🆕
 export const sourceNodesAPI = {
     list: (boardId: string) => api.get<SourceNode[]>(`/api/v1/source-nodes/board/${boardId}`),
-    // Trailing slash — иначе FastAPI 307 и Location с внутренним хостом без proxy-headers
-    create: (data: SourceNodeCreate) => api.post<SourceNode>('/api/v1/source-nodes/', data),
+    create: (data: SourceNodeCreate) => api.post<SourceNode>('/api/v1/source-nodes', data),
     get: (sourceId: string) => api.get<SourceNode>(`/api/v1/source-nodes/${sourceId}`),
     update: (sourceId: string, data: SourceNodeUpdate) =>
         api.put<SourceNode>(`/api/v1/source-nodes/${sourceId}`, data),
@@ -230,6 +130,97 @@ export const sourceNodesAPI = {
         api.post(`/api/v1/boards/${boardId}/source-nodes/${sourceId}/extract`, params || {}),
     refresh: (sourceId: string) =>
         api.post<SourceNode>(`/api/v1/source-nodes/${sourceId}/refresh`),
+}
+
+/** NDJSON: POST …/visualize-multiagent-stream, …/transform-multiagent-stream, …/files/…/extract-document-chat-stream. */
+async function consumeContentNodeMultiagentNdjsonStream(
+    apiPath: string,
+    body: unknown,
+    callbacks: {
+        onPlanUpdate?: (steps: string[], meta?: { completedCount?: number }) => void
+        onProgress?: (
+            agentLabel: string,
+            task: string,
+            meta?: { stepIndex?: number; totalSteps?: number }
+        ) => void
+        onResult?: (result: Record<string, unknown>) => void
+        onError?: (errorText: string) => void
+    }
+): Promise<void> {
+    const token = useAuthStore.getState().token
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) {
+        headers.Authorization = `Bearer ${token}`
+    }
+    const base = getViteApiBaseUrl()
+    const url = base ? `${base.replace(/\/$/, '')}${apiPath}` : apiPath
+
+    const res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+    })
+
+    if (!res.ok) {
+        let detail = res.statusText
+        try {
+            const err = (await res.json()) as { detail?: string }
+            if (err?.detail) detail = err.detail
+        } catch {
+            /* ignore */
+        }
+        callbacks.onError?.(String(detail))
+        return
+    }
+
+    const reader = res.body?.getReader()
+    if (!reader) {
+        callbacks.onError?.('Пустой ответ сервера')
+        return
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed) continue
+            let obj: Record<string, unknown>
+            try {
+                obj = JSON.parse(trimmed) as Record<string, unknown>
+            } catch {
+                continue
+            }
+            const t = obj.type
+            if (t === 'plan') {
+                const steps = Array.isArray(obj.steps) ? (obj.steps as string[]) : []
+                const completedCount =
+                    typeof obj.completed_count === 'number' ? obj.completed_count : 0
+                callbacks.onPlanUpdate?.(steps, { completedCount })
+            } else if (t === 'progress') {
+                const agentLabel = String(obj.agent_label ?? obj.agent ?? '')
+                const task = String(obj.task ?? '')
+                const stepIndex =
+                    typeof obj.step_index === 'number' ? obj.step_index : undefined
+                const totalSteps =
+                    typeof obj.total_steps === 'number' ? obj.total_steps : undefined
+                callbacks.onProgress?.(agentLabel, task, { stepIndex, totalSteps })
+            } else if (t === 'result') {
+                const raw = obj.result
+                if (raw && typeof raw === 'object') {
+                    callbacks.onResult?.(raw as Record<string, unknown>)
+                }
+            } else if (t === 'error') {
+                callbacks.onError?.(String(obj.error ?? 'Ошибка'))
+            }
+        }
+    }
 }
 
 // ContentNodes API (Source-Content Architecture) 🆕
@@ -299,6 +290,32 @@ export const contentNodesAPI = {
             };
             agent_plan: any;
         }>(`/api/v1/content-nodes/${contentId}/transform-multiagent`, params),
+    transformMultiagentStream: async (
+        contentId: string,
+        params: {
+            user_prompt: string
+            existing_code?: string
+            transformation_id?: string
+            chat_history?: Array<{ role: string; content: string }>
+            selected_node_ids?: string[]
+            preview_only?: boolean
+        },
+        callbacks: {
+            onPlanUpdate?: (steps: string[], meta?: { completedCount?: number }) => void
+            onProgress?: (
+                agentLabel: string,
+                task: string,
+                meta?: { stepIndex?: number; totalSteps?: number }
+            ) => void
+            onResult?: (result: Record<string, unknown>) => void
+            onError?: (errorText: string) => void
+        }
+    ) =>
+        consumeContentNodeMultiagentNdjsonStream(
+            `/api/v1/content-nodes/${contentId}/transform-multiagent-stream`,
+            params,
+            callbacks
+        ),
     // Visualization
     visualize: (contentId: string, params: {
         user_prompt?: string;
@@ -344,29 +361,6 @@ export const contentNodesAPI = {
             status: string;
             error?: string;
         }>(`/api/v1/content-nodes/${contentId}/visualize-multiagent`, params),
-    transformMultiagentStream: async (
-        contentId: string,
-        params: {
-            user_prompt: string
-            existing_code?: string
-            transformation_id?: string
-            chat_history?: Array<{ role: string; content: string }>
-            selected_node_ids?: string[]
-            preview_only?: boolean
-        },
-        handlers: RunMultiAgentStreamHandlers
-    ): Promise<void> => {
-        const resp = await fetch(`/api/v1/content-nodes/${contentId}/transform-multiagent-stream`, {
-            method: 'POST',
-            headers: getAuthHeadersForStream(),
-            body: JSON.stringify(params),
-        })
-        if (!resp.ok) {
-            const errorText = await resp.text()
-            throw new Error(errorText || 'Ошибка запуска трансформации')
-        }
-        await consumeNdjsonStream(resp, handlers)
-    },
     visualizeMultiagentStream: async (
         contentId: string,
         params: {
@@ -376,20 +370,24 @@ export const contentNodesAPI = {
             existing_js?: string
             existing_widget_code?: string
             chat_history?: Array<{ role: string; content: string }>
+            selected_node_ids?: string[]
         },
-        handlers: RunMultiAgentStreamHandlers
-    ): Promise<void> => {
-        const resp = await fetch(`/api/v1/content-nodes/${contentId}/visualize-multiagent-stream`, {
-            method: 'POST',
-            headers: getAuthHeadersForStream(),
-            body: JSON.stringify(params),
-        })
-        if (!resp.ok) {
-            const errorText = await resp.text()
-            throw new Error(errorText || 'Ошибка запуска генерации виджета')
+        callbacks: {
+            onPlanUpdate?: (steps: string[], meta?: { completedCount?: number }) => void
+            onProgress?: (
+                agentLabel: string,
+                task: string,
+                meta?: { stepIndex?: number; totalSteps?: number }
+            ) => void
+            onResult?: (result: Record<string, unknown>) => void
+            onError?: (errorText: string) => void
         }
-        await consumeNdjsonStream(resp, handlers)
-    },
+    ) =>
+        consumeContentNodeMultiagentNdjsonStream(
+            `/api/v1/content-nodes/${contentId}/visualize-multiagent-stream`,
+            params,
+            callbacks
+        ),
     // Widget suggestions
     analyzeSuggestions: (contentId: string, params: {
         chat_history: Array<{ role: string; content: string }>;
@@ -471,31 +469,6 @@ export const edgesAPI = {
         api.patch<Edge>(`/api/v1/boards/${boardId}/edges/${edgeId}`, data),
     delete: (boardId: string, edgeId: string) =>
         api.delete(`/api/v1/boards/${boardId}/edges/${edgeId}`),
-}
-
-/** Base URL for API (e.g. для fetch); пусто = тот же origin (Docker/nginx). */
-export const apiBaseURL = getViteApiBaseUrl()
-
-const FILE_IMAGE_PATH = '/api/v1/files/image'
-
-/** URL to display an uploaded image by file_id (relative path — идёт через прокси, без CORS/ORB). */
-export function getFileImageUrl(fileId: string): string {
-    return `${FILE_IMAGE_PATH}/${fileId}`
-}
-
-/** Нормализует thumbnail_url в относительный путь для <img> (чтобы запрос шёл через прокси фронта). */
-export function getProxiedImageUrl(thumbnailUrl: string | null | undefined): string | null {
-    if (!thumbnailUrl) return null
-    try {
-        if (thumbnailUrl.startsWith('http://') || thumbnailUrl.startsWith('https://')) {
-            const u = new URL(thumbnailUrl)
-            if (u.pathname.startsWith('/api/v1/files/image/')) return u.pathname
-        }
-        if (thumbnailUrl.startsWith(FILE_IMAGE_PATH)) return thumbnailUrl
-    } catch {
-        /* ignore */
-    }
-    return thumbnailUrl
 }
 
 // Files API
@@ -603,6 +576,22 @@ export const filesAPI = {
         is_scanned: boolean
     }>(`/api/v1/files/${fileId}/analyze-document`),
 
+    analyzeDocumentSuggestions: (
+        fileId: string,
+        body: {
+            chat_history: Array<{ role: string; content: string }>
+            document_text: string
+            document_type: string
+            filename: string
+            page_count?: number | null
+            existing_tables?: Array<Record<string, unknown>>
+        },
+    ) =>
+        api.post<{
+            suggestions: Array<Record<string, unknown>>
+            fallback?: boolean
+        }>(`/api/v1/files/${fileId}/analyze-document-suggestions`, body),
+
     extractDocumentChat: (fileId: string, params: {
         user_prompt: string
         document_text: string
@@ -624,40 +613,50 @@ export const filesAPI = {
         mode: string
         agent_plan: any
     }>(`/api/v1/files/${fileId}/extract-document-chat`, params),
+
+    extractDocumentChatStream: async (
+        fileId: string,
+        params: {
+            user_prompt: string
+            document_text: string
+            document_type: string
+            filename: string
+            page_count?: number | null
+            existing_tables?: Array<Record<string, any>>
+            chat_history?: Array<{ role: string; content: string }>
+        },
+        callbacks: {
+            onPlanUpdate?: (steps: string[], meta?: { completedCount?: number }) => void
+            onProgress?: (
+                agentLabel: string,
+                task: string,
+                meta?: { stepIndex?: number; totalSteps?: number }
+            ) => void
+            onResult?: (result: Record<string, unknown>) => void
+            onError?: (errorText: string) => void
+        }
+    ) =>
+        consumeContentNodeMultiagentNdjsonStream(
+            `/api/v1/files/${fileId}/extract-document-chat-stream`,
+            params,
+            callbacks
+        ),
 }
 
 // AI Assistant API
 export const aiAssistantAPI = {
     chat: (boardId: string, data: AIChatRequest) =>
         api.post<AIChatResponse>(`/api/v1/boards/${boardId}/ai/chat`, data),
-    chatDashboard: (dashboardId: string, data: AIChatRequest) =>
-        api.post<AIChatResponse>(`/api/v1/dashboards/${dashboardId}/ai/chat`, data),
     getMyHistory: (boardId: string, limit?: number) =>
         api.get<AIChatHistoryResponse>(`/api/v1/boards/${boardId}/ai/chat/history/me`, {
-            params: { limit },
-        }),
-    getMyHistoryDashboard: (dashboardId: string, limit?: number) =>
-        api.get<AIChatHistoryResponse>(`/api/v1/dashboards/${dashboardId}/ai/chat/history/me`, {
             params: { limit },
         }),
     getHistory: (boardId: string, sessionId: string, limit?: number) =>
         api.get<AIChatHistoryResponse>(`/api/v1/boards/${boardId}/ai/chat/history`, {
             params: { session_id: sessionId, limit },
         }),
-    getHistoryDashboard: (dashboardId: string, sessionId: string, limit?: number) =>
-        api.get<AIChatHistoryResponse>(`/api/v1/dashboards/${dashboardId}/ai/chat/history`, {
-            params: { session_id: sessionId, limit },
-        }),
     deleteSession: (boardId: string, sessionId: string) =>
         api.delete(`/api/v1/boards/${boardId}/ai/chat/session/${sessionId}`),
-    deleteSessionDashboard: (dashboardId: string, sessionId: string) =>
-        api.delete(`/api/v1/dashboards/${dashboardId}/ai/chat/session/${sessionId}`),
-}
-
-// Research Chat API (ResearchSourceDialog)
-export const researchAPI = {
-    chat: (data: ResearchChatRequest) =>
-        api.post<ResearchChatResponse>('/api/v1/research/chat', data),
 }
 
 // Database API — connection testing, table introspection, preview
@@ -831,6 +830,16 @@ export const dimensionsAPI = {
     delete: (projectId: string, dimId: string) =>
         api.delete(`/api/v1/projects/${projectId}/dimensions/${dimId}`),
 
+    mergeDimensions: (
+        projectId: string,
+        data: { source_ids: string[]; target_id: string },
+    ) =>
+        api.post<{
+            target_id: string
+            deleted_count: number
+            transferred_count: number
+        }>(`/api/v1/projects/${projectId}/dimensions/merge`, data),
+
     // Mappings
     listMappings: (projectId: string, dimId: string) =>
         api.get<DimensionColumnMapping[]>(`/api/v1/projects/${projectId}/dimensions/${dimId}/mappings`),
@@ -850,13 +859,6 @@ export const dimensionsAPI = {
     // Auto-detect dimensions from content node tables
     detectDimensions: (nodeId: string) =>
         api.post<{ suggestions: DimensionSuggestion[]; total_columns_scanned: number }>(`/api/v1/content-nodes/${nodeId}/detect-dimensions`),
-
-    // Merge two or more dimensions into a target
-    merge: (projectId: string, sourceIds: string[], targetId: string) =>
-        api.post<{ target_id: string; deleted_count: number; transferred_count: number }>(
-            `/api/v1/projects/${projectId}/dimensions/merge`,
-            { source_ids: sourceIds, target_id: targetId },
-        ),
 }
 
 // Filters API (board/dashboard active filters)
@@ -874,14 +876,10 @@ export const filtersAPI = {
      * Пересчитать pandas-цепочку доски с фильтрами (без сохранения в БД).
      * ContentNode с ai_resolve_batch используют кэш + row-level filter.
      */
-    computeFiltered: (
-        boardId: string,
-        body: { filters: FilterExpression | null; initiator_content_node_ids?: string[] }
-    ) =>
+    computeFiltered: (boardId: string, filters: FilterExpression | null) =>
         api.post<{
             nodes: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
-            initiator_full_data?: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
-        }>(`/api/v1/boards/${boardId}/filters/compute-filtered`, body),
+        }>(`/api/v1/boards/${boardId}/filters/compute-filtered`, { filters }),
 
     // Dashboard
     getDashboardFilters: (dashboardId: string) =>
@@ -892,14 +890,6 @@ export const filtersAPI = {
         api.post<ActiveFiltersResponse>(`/api/v1/dashboards/${dashboardId}/filters/clear`),
     applyDashboardPreset: (dashboardId: string, presetId: string) =>
         api.post<ActiveFiltersResponse>(`/api/v1/dashboards/${dashboardId}/filters/apply-preset/${presetId}`),
-    computeFilteredDashboard: (
-        dashboardId: string,
-        body: { filters: FilterExpression | null; initiator_content_node_ids?: string[] }
-    ) =>
-        api.post<{
-            nodes: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
-            initiator_full_data?: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
-        }>(`/api/v1/dashboards/${dashboardId}/filters/compute-filtered`, body),
 }
 
 // Filter Presets API (project-scoped)
@@ -916,6 +906,144 @@ export const filterPresetsAPI = {
         api.put<FilterPreset>(`/api/v1/projects/${projectId}/filter-presets/${presetId}`, data),
     delete: (projectId: string, presetId: string) =>
         api.delete(`/api/v1/projects/${projectId}/filter-presets/${presetId}`),
+}
+
+/** Research Chat (ResearchSourceDialog) — см. POST /api/v1/research/chat, /chat-stream */
+export const researchAPI = {
+    chat: (data: ResearchChatRequest) =>
+        api.post<ResearchChatResponse>('/api/v1/research/chat', data),
+
+    async chatStream(
+        body: ResearchChatRequest,
+        callbacks: {
+            onPlanUpdate?: (steps: string[], meta?: { completedCount?: number }) => void
+            onProgress?: (
+                agentLabel: string,
+                task: string,
+                meta?: { stepIndex?: number; totalSteps?: number }
+            ) => void
+            onResult?: (result: ResearchChatResponse) => void
+            onError?: (errorText: string) => void
+        }
+    ): Promise<void> {
+        const token = useAuthStore.getState().token
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+        if (token) {
+            headers.Authorization = `Bearer ${token}`
+        }
+        const base = getViteApiBaseUrl()
+        const url = base
+            ? `${base.replace(/\/$/, '')}/api/v1/research/chat-stream`
+            : '/api/v1/research/chat-stream'
+
+        const res = await fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+        })
+
+        if (!res.ok) {
+            let detail = res.statusText
+            try {
+                const err = (await res.json()) as { detail?: string }
+                if (err?.detail) detail = err.detail
+            } catch {
+                /* ignore */
+            }
+            callbacks.onError?.(String(detail))
+            return
+        }
+
+        const reader = res.body?.getReader()
+        if (!reader) {
+            callbacks.onError?.('Пустой ответ сервера')
+            return
+        }
+
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            const lines = buffer.split('\n')
+            buffer = lines.pop() ?? ''
+            for (const line of lines) {
+                const trimmed = line.trim()
+                if (!trimmed) continue
+                let obj: Record<string, unknown>
+                try {
+                    obj = JSON.parse(trimmed) as Record<string, unknown>
+                } catch {
+                    continue
+                }
+                const t = obj.type
+                if (t === 'plan') {
+                    const steps = Array.isArray(obj.steps) ? (obj.steps as string[]) : []
+                    const completedCount =
+                        typeof obj.completed_count === 'number' ? obj.completed_count : 0
+                    callbacks.onPlanUpdate?.(steps, { completedCount })
+                } else if (t === 'progress') {
+                    const agentLabel = String(obj.agent_label ?? obj.agent ?? '')
+                    const task = String(obj.task ?? '')
+                    const stepIndex =
+                        typeof obj.step_index === 'number' ? obj.step_index : undefined
+                    const totalSteps =
+                        typeof obj.total_steps === 'number' ? obj.total_steps : undefined
+                    callbacks.onProgress?.(agentLabel, task, { stepIndex, totalSteps })
+                } else if (t === 'result') {
+                    const raw = obj.result
+                    if (raw && typeof raw === 'object') {
+                        callbacks.onResult?.(raw as ResearchChatResponse)
+                    }
+                } else if (t === 'error') {
+                    callbacks.onError?.(String(obj.error ?? 'Ошибка исследования'))
+                }
+            }
+        }
+    },
+}
+
+/** Публичный URL превью файла (картинки) для img src. */
+export function getFileImageUrl(fileId: string): string {
+    const path = `/api/v1/files/image/${fileId}`
+    const base = getViteApiBaseUrl()
+    if (!base) return path
+    return `${base.replace(/\/$/, '')}${path}`
+}
+
+/**
+ * URL для превью досок/дашбордов: относительные /api/... дополняются базой API;
+ * абсолютные ссылки на тот же path перепривязываются к текущей базе (dev → nginx).
+ */
+export function getProxiedImageUrl(url: string | null | undefined): string | null {
+    if (url == null || String(url).trim() === '') return null
+    const s = String(url).trim()
+    if (s.startsWith('blob:') || s.startsWith('data:')) return s
+
+    if (s.startsWith('/api/')) {
+        const base = getViteApiBaseUrl()
+        return base ? `${base.replace(/\/$/, '')}${s}` : s
+    }
+
+    try {
+        const u = new URL(s)
+        if (u.pathname.includes('/api/v1/files/image/')) {
+            const base = getViteApiBaseUrl()
+            const path = `${u.pathname}${u.search}${u.hash}`
+            if (!base) return path
+            return `${base.replace(/\/$/, '')}${path}`
+        }
+    } catch {
+        /* not a valid absolute URL */
+    }
+
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s)) {
+        return getFileImageUrl(s)
+    }
+
+    return s
 }
 
 export default api

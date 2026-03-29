@@ -11,6 +11,8 @@ import io
 import logging
 import re
 import time
+import zipfile
+from pathlib import Path
 from typing import Any
 
 from app.sources.base import (
@@ -62,6 +64,61 @@ def detect_document_type(config: dict[str, Any]) -> str:
     return "txt"  # fallback
 
 
+# Sentinel: ZIP — это Excel, не Word (диалог «Документ» такие файлы не обрабатывает)
+_DOC_TYPE_EXCEL_XLSX = "xlsx_wrong_dialog"
+
+# Скан заголовка в поиске сигнатуры (часть PDF идёт с префиксом до %PDF)
+_SNIFF_HEAD = 65536
+
+
+def _as_bytes_for_extraction(file_content: bytes | memoryview | Path) -> bytes:
+    """Единый байтовый буфер для парсеров (в т.ч. local storage → Path). Извлечение без temp-файлов."""
+    if isinstance(file_content, bytes):
+        return file_content
+    if isinstance(file_content, memoryview):
+        return file_content.tobytes()
+    if isinstance(file_content, Path):
+        return file_content.read_bytes()
+    raise TypeError(f"Unsupported file_content type: {type(file_content)}")
+
+
+def _pdf_magic_offset(data: bytes) -> int:
+    """0 — если PDF с начала; иначе позиция %PDF в первых _SNIFF_HEAD байтах, либо -1."""
+    if len(data) >= 4 and data[:4] == b"%PDF":
+        return 0
+    head = data[:_SNIFF_HEAD] if len(data) > _SNIFF_HEAD else data
+    return head.find(b"%PDF")
+
+
+def _trim_pdf_stream(data: bytes) -> bytes:
+    """Убрать мусор до начала PDF (некоторые экспорты добавляют префикс)."""
+    off = _pdf_magic_offset(data)
+    if off > 0:
+        return data[off:]
+    return data
+
+
+def detect_document_type_from_content(config: dict[str, Any], file_content: bytes) -> str:
+    """Определить тип по сигнатуре байтов, затем по MIME/имени.
+
+    Браузеры и прокси часто шлют неверный Content-Type; имя файла тоже бывает без расширения.
+    Без этого PDF ошибочно идёт в ветку TXT/DOCX и даёт 400.
+    """
+    if _pdf_magic_offset(file_content) >= 0:
+        return "pdf"
+    if len(file_content) >= 4 and file_content[:2] == b"PK":
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_content)) as zf:
+                names = zf.namelist()
+            if "word/document.xml" in names:
+                return "docx"
+            if "xl/workbook.xml" in names:
+                return _DOC_TYPE_EXCEL_XLSX
+        except zipfile.BadZipFile:
+            pass
+    return detect_document_type(config)
+
+
 class DocumentSource(BaseSource):
     """Document file source handler (PDF/DOCX/TXT)."""
     
@@ -88,14 +145,14 @@ class DocumentSource(BaseSource):
     async def extract(
         self,
         config: dict[str, Any],
-        file_content: bytes | None = None,
+        file_content: bytes | memoryview | Path | None = None,
         **kwargs
     ) -> ExtractionResult:
         """Extract text and tables from document.
         
         Args:
             config: Source config with file_id, filename, document_type, etc.
-            file_content: Raw file bytes.
+            file_content: Сырые байты (или Path для local storage). Без temp-файлов — только BytesIO в памяти.
             
         Returns:
             ExtractionResult with text and tables.
@@ -104,11 +161,25 @@ class DocumentSource(BaseSource):
         
         if file_content is None:
             return ExtractionResult.failure("Содержимое файла не предоставлено")
-        
+
         try:
-            document_type = detect_document_type(config)
+            file_content = _as_bytes_for_extraction(file_content)
+        except TypeError as e:
+            return ExtractionResult.failure(str(e))
+
+        if len(file_content) == 0:
+            return ExtractionResult.failure("Файл пустой")
+
+        try:
+            document_type = detect_document_type_from_content(config, file_content)
             filename = config.get("filename", "document")
-            
+
+            if document_type == _DOC_TYPE_EXCEL_XLSX:
+                return ExtractionResult.failure(
+                    "Файл — Excel (xlsx). В диалоге «Документ» поддерживаются PDF, DOCX и TXT; "
+                    "для таблиц Excel используйте источник «Excel»."
+                )
+
             logger.info(f"📄 Extracting document: {filename} (type={document_type}, size={len(file_content)} bytes)")
             
             if document_type == "pdf":
@@ -156,10 +227,20 @@ class DocumentSource(BaseSource):
     async def _extract_pdf(
         self, content: bytes, config: dict[str, Any]
     ) -> tuple[str, list[TableData]]:
-        """Extract text and tables from PDF using pypdf."""
+        """Extract text and tables from PDF using pypdf (только память, без temp-файлов)."""
         from pypdf import PdfReader
-        
-        reader = PdfReader(io.BytesIO(content))
+
+        content = _trim_pdf_stream(content)
+        reader = PdfReader(io.BytesIO(content), strict=False)
+        # Не прерываем извлечение, если decrypt("") не вернул успех: часть PDF с owner-only
+        # или нестандартным шифрованием даёт NOT_DECRYPTED в одной версии pypdf, но текст
+        # всё равно читается через extract_text (локально и в Docker должно совпадать).
+        if getattr(reader, "is_encrypted", False):
+            try:
+                reader.decrypt("")
+            except Exception as e:
+                logger.warning("PDF decrypt('') raised: %s — continuing with extract_text", e)
+
         total_pages = len(reader.pages)
         config["_page_count"] = total_pages
         
@@ -195,8 +276,15 @@ class DocumentSource(BaseSource):
         self, content: bytes, config: dict[str, Any]
     ) -> tuple[str, list[TableData]]:
         """Extract text and tables from DOCX using python-docx."""
+        # DOCX — ZIP (OOXML). Старый бинарный .doc часто ошибочно помечается как docx по расширению.
+        if len(content) < 4 or not content.startswith(b"PK\x03\x04"):
+            raise ValueError(
+                "Файл не является DOCX (Office Open XML). Старый формат .doc не поддерживается — "
+                "откройте в Word и сохраните как DOCX."
+            )
+
         from docx import Document
-        
+
         doc = Document(io.BytesIO(content))
         
         # Extract paragraphs (preserving structure)

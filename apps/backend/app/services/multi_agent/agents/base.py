@@ -20,6 +20,7 @@ from ..exceptions import MessageBusError, TimeoutError as AgentTimeoutError
 from ..schemas.agent_payload import (
     AgentPayload,
     CodeBlock,
+    DiscoveredResource,
     Finding,
     Narrative,
     PayloadContentTable,
@@ -228,7 +229,8 @@ class BaseAgent(ABC):
     def _format_error_response(
         self,
         error_message: str,
-        suggestions: Optional[List[str]] = None
+        suggestions: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> AgentPayload:
         """
         Форматирует ответ об ошибке как AgentPayload (V2).
@@ -237,6 +239,7 @@ class BaseAgent(ABC):
             agent=self.agent_name,
             error_message=error_message,
             suggestions=suggestions,
+            metadata=metadata,
         )
     
     # ------------------------------------------------------------------
@@ -251,6 +254,7 @@ class BaseAgent(ABC):
         tables: Optional[List[PayloadContentTable]] = None,
         code_blocks: Optional[List[CodeBlock]] = None,
         sources: Optional[List[Source]] = None,
+        discovered_resources: Optional[List[DiscoveredResource]] = None,
         findings: Optional[List[Finding]] = None,
         validation: Optional[ValidationResult] = None,
         plan: Optional[Plan] = None,
@@ -272,6 +276,7 @@ class BaseAgent(ABC):
             tables=tables,
             code_blocks=code_blocks,
             sources=sources,
+            discovered_resources=discovered_resources,
             findings=findings,
             validation=validation,
             plan=plan,
@@ -284,12 +289,14 @@ class BaseAgent(ABC):
         self,
         error_message: str,
         suggestions: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> AgentPayload:
         """Создать AgentPayload с ошибкой от имени этого агента."""
         return AgentPayload.make_error(
             agent=self.agent_name,
             error_message=error_message,
             suggestions=suggestions,
+            metadata=metadata,
         )
 
     @staticmethod
@@ -415,17 +422,22 @@ class BaseAgent(ABC):
         max_tokens: Optional[int] = None,
     ) -> str:
         """
-        Вызов LLM: при наличии user_id в context и llm_router — через LLMRouter
-        (учёт пользовательских настроек провайдера), иначе через self.gigachat.
+        Вызов LLM: при наличии llm_router — через LLMRouter (модель по agent_key и
+        настройкам в БД: AgentLLMOverride / default_llm_config). Прямой вызов
+        self.gigachat — только если роутер не передан (тесты/legacy).
         """
         llm_router = getattr(self, "llm_router", None)
         gigachat = getattr(self, "gigachat", None)
         effective_messages = self._inject_global_output_policy(messages, context)
-        user_id = None
+        user_id: Optional[UUID] = None
         if context and context.get("user_id"):
             uid = context["user_id"]
-            user_id = UUID(uid) if isinstance(uid, str) else uid
-        if llm_router and user_id is not None:
+            try:
+                user_id = UUID(str(uid)) if not isinstance(uid, UUID) else uid
+            except (ValueError, TypeError):
+                user_id = None
+
+        if llm_router is not None:
             from app.services.llm_router import LLMCallParams, LLMMessage
             params = LLMCallParams(
                 messages=[
@@ -439,7 +451,9 @@ class BaseAgent(ABC):
                 user_id=user_id, params=params, agent_key=self.agent_name
             )
         if gigachat is None:
-            raise RuntimeError(f"{self.agent_name}: neither llm_router nor gigachat available")
+            raise RuntimeError(
+                f"{self.agent_name}: llm_router не передан и gigachat недоступен"
+            )
         return await gigachat.chat_completion(
             messages=effective_messages,
             temperature=temperature,
@@ -458,10 +472,10 @@ class BaseAgent(ABC):
         }
 
     # ============================================================
-    # GigaChat retry helper — повторный вызов при ошибке парсинга
+    # LLM + JSON retry — повторный вызов при ошибке парсинга
     # ============================================================
 
-    MAX_GIGACHAT_PARSE_RETRIES = 1  # 1 retry = максимум 2 вызова
+    MAX_LLM_JSON_PARSE_RETRIES = 1  # 1 retry = максимум 2 вызова
 
     @staticmethod
     def _classify_llm_parse_error(error: Exception) -> str:
@@ -476,7 +490,7 @@ class BaseAgent(ABC):
             return "timeout"
         return "unknown_parse_error"
 
-    async def _call_gigachat_with_json_retry(
+    async def _call_llm_with_json_retry(
         self,
         messages: List[Dict[str, str]],
         parse_fn: Callable[[Any], T],
@@ -486,16 +500,16 @@ class BaseAgent(ABC):
         max_tokens: Optional[int] = None,
         max_retries: Optional[int] = None,
     ) -> T:
-        """Вызывает LLM (через роутер или GigaChat) и парсит ответ; при ошибке парсинга повторяет с уточнением.
+        """Вызывает LLM через `_call_llm` (LLMRouter + agent_key) и парсит ответ; при ошибке парсинга повторяет с уточнением.
 
         Args:
             messages: Список сообщений для LLM (будет мутирован при retry).
             parse_fn: Функция парсинга ответа → результат. Должна бросить исключение
                        (json.JSONDecodeError, ValueError, ...) при невалидном ответе.
-            context: Контекст с user_id для маршрутизации LLM.
+            context: Контекст пайплайна (в т.ч. user_id при необходимости).
             temperature: Температура.
             max_tokens: Макс. токенов (если None — не передаётся).
-            max_retries: Сколько раз повторить (по умолчанию MAX_GIGACHAT_PARSE_RETRIES).
+            max_retries: Сколько раз повторить (по умолчанию MAX_LLM_JSON_PARSE_RETRIES).
 
         Returns:
             Результат parse_fn(response) при успехе.
@@ -503,7 +517,7 @@ class BaseAgent(ABC):
         Raises:
             Последнее исключение от parse_fn, если все попытки исчерпаны.
         """
-        retries = max_retries if max_retries is not None else self.MAX_GIGACHAT_PARSE_RETRIES
+        retries = max_retries if max_retries is not None else self.MAX_LLM_JSON_PARSE_RETRIES
         last_error: Optional[Exception] = None
 
         for attempt in range(1 + retries):

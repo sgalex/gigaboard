@@ -39,6 +39,7 @@ class TimeoutConfig:
         "structurizer": 90,     # StructurizerAgent — parse & extract
         "analyst": 60,          # AnalystAgent — анализ данных
         "transform_codex": 90,   # TransformCodexAgent — генерация Python кода
+        "widget_codex": 90,     # WidgetCodexAgent — HTML/JS (как transform_codex, не TASK_REQUEST 60s)
         "reporter": 60,         # ReporterAgent — формирование ответа
         "validator": 30,        # ValidatorAgent — gate-keeper
         # V1 legacy (backward compat until Phase 3)

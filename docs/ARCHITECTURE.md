@@ -169,7 +169,7 @@ flowchart TB
 | `AIAssistantController`          | Чат-ассистент (панель AI)                 |
 | `TransformSuggestionsController` | Предложения трансформаций                 |
 | `WidgetSuggestionsController`    | Предложения виджетов                      |
-| `ResearchController`             | Источник AI Research и `POST /api/v1/research/chat`: единый вызов Orchestrator, извлечение narrative/tables/sources |
+| `ResearchController`             | Источник «Поиск с ИИ» и `POST /api/v1/research/chat`: единый вызов Orchestrator, извлечение narrative/tables/sources |
 
 Админский **Playground** мультиагента вызывает тот же Orchestrator напрямую из `admin.py` (см. [ADMIN_AND_SYSTEM_LLM.md](./ADMIN_AND_SYSTEM_LLM.md)).
 
@@ -209,7 +209,7 @@ apps/backend/app/services/
 │   ├── transformation_controller.py
 │   ├── widget_controller.py
 │   ├── ai_assistant_controller.py
-│   ├── research_controller.py     # AI Research source + research/chat
+│   ├── research_controller.py     # источник «Поиск с ИИ» + research/chat
 │   ├── transform_suggestions_controller.py
 │   └── widget_suggestions_controller.py
 ```

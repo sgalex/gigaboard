@@ -65,7 +65,7 @@ const DEFAULT_ITEMS: SourceVitrinaItem[] = [
     { source_type: 'document', display_name: 'Документ', icon: '📄', description: 'PDF, DOCX, TXT' },
     { source_type: 'api', display_name: 'API', icon: '🔗', description: 'REST API' },
     { source_type: 'database', display_name: 'База данных', icon: '🗄️', description: 'SQL БД' },
-    { source_type: 'research', display_name: 'AI Research', icon: '🔍', description: 'Поиск через AI' },
+    { source_type: 'research', display_name: 'Поиск с ИИ', icon: '🔍', description: 'Поиск через AI' },
     { source_type: 'manual', display_name: 'Ручной ввод', icon: '✏️', description: 'Создать таблицу' },
     { source_type: 'stream', display_name: 'Стрим', icon: '📡', description: 'Real-time (скоро)' },
 ]

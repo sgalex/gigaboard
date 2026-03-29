@@ -3,14 +3,23 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+
+def _running_in_docker() -> bool:
+    """В контейнере не читаем .env с хоста — только переменные окружения (Compose / k8s)."""
+    if os.getenv("GIGABOARD_IN_DOCKER", "").lower() in ("1", "true", "yes"):
+        return True
+    return Path("/.dockerenv").exists()
+
+
 # Единственный источник env — корень репозитория (GigaBoard). apps/backend/.env не используется.
 _project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
 _env_root = _project_root / ".env"
 _env_local = _project_root / ".env.local"
-if _env_root.is_file():
-    load_dotenv(_env_root)
-if _env_local.is_file():
-    load_dotenv(_env_local, override=True)  # переопределения для локального запуска (без Docker)
+if not _running_in_docker():
+    if _env_root.is_file():
+        load_dotenv(_env_root)
+    if _env_local.is_file():
+        load_dotenv(_env_local, override=True)  # переопределения для локального запуска (без Docker)
 
 class Settings:
     # Database

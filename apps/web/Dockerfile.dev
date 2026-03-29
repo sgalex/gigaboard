@@ -1,4 +1,6 @@
-# Dev-сервер Vite (docker-compose.dev.yml). Сборка из корня монорепозитория — для copy-libs (echarts, шрифты).
+# Dev-сервер Vite (docker-compose.dev.yml).
+# Сборка из корня монорепозитория — copy-libs.cjs берёт echarts/leaflet из корневого node_modules.
+# В compose смонтированы ./apps/web/src (и др.) — правки TS/React видны без пересборки образа.
 FROM node:20-alpine
 
 WORKDIR /workspace

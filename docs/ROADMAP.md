@@ -26,7 +26,7 @@
   - [x] AgentPayload — универсальный формат данных
   - [x] Orchestrator — Single Path (Planner → Steps → Validator)
   - [x] 9 Core Agents: Planner, Structurizer, Analyst, TransformCodex, WidgetCodex, Reporter, Discovery, Research, Validator
-  - [x] Satellite Controllers: Transformation, Widget, AIAssistant, TransformSuggestions, WidgetSuggestions, **ResearchController** (источник AI Research + `research/chat`)
+  - [x] Satellite Controllers: Transformation, Widget, AIAssistant, TransformSuggestions, WidgetSuggestions, **ResearchController** (источник «Поиск с ИИ» + `research/chat`)
   - [x] Zero-mapping agent_results (хронологический list), adaptive replanning
   - [x] 112 unit + integration тестов (pytest) ✅
   - [x] Legacy V1 cleanup (12 файлов, ~145KB удалено)

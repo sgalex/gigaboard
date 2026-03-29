@@ -88,7 +88,8 @@ export function useSourceDialog({ sourceType, onClose, position = { x: 100, y: 1
     const update = useCallback(async (
         sourceId: string,
         config: SourceConfig,
-        metadata?: Record<string, any>
+        metadata?: Record<string, any>,
+        data?: { text?: string; tables?: Array<Record<string, unknown>> }
     ): Promise<CreateSourceResult> => {
         setIsLoading(true)
 
@@ -96,6 +97,7 @@ export function useSourceDialog({ sourceType, onClose, position = { x: 100, y: 1
             await updateSourceNode(sourceId, {
                 config,
                 metadata,
+                ...(data != null ? { data } : {}),
             })
 
             notify.success('Настройки источника обновлены')

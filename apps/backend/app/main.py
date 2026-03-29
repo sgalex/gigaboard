@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import os
 import sys
 import io
+from urllib.parse import urlparse
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -84,12 +86,32 @@ def get_orchestrator() -> Orchestrator | None:
     """Get the global Orchestrator V2 instance."""
     return _orchestrator
 
+
+def _db_target_for_log(url: str) -> str:
+    """host:port/db без учётных данных — для проверки, куда смотрит контейнер."""
+    try:
+        u = urlparse(url)
+        host = u.hostname or "?"
+        port = u.port or 5432
+        db = (u.path or "/").strip("/").split("/")[0] or "?"
+        return f"{host}:{port}/{db}"
+    except Exception:
+        return "?"
+
+
 # FastAPI app initialization
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown"""
     # Startup
     logger.info("🚀 Starting GigaBoard Backend...")
+    logger.info("Database target (DATABASE_URL): %s", _db_target_for_log(settings.DATABASE_URL))
+    logger.info(
+        "File storage: STORAGE_BACKEND=%s STORAGE_LOCAL_PATH=%s GIGABOARD_IN_DOCKER=%s",
+        settings.STORAGE_BACKEND,
+        settings.STORAGE_LOCAL_PATH,
+        os.getenv("GIGABOARD_IN_DOCKER", ""),
+    )
     
     # Track initialization status
     redis_ok = False

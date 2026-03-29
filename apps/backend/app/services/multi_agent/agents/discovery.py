@@ -17,6 +17,7 @@ from .base import BaseAgent
 from ..message_bus import AgentMessageBus
 from ..schemas.agent_payload import Source, Narrative
 from app.services.gigachat_service import GigaChatService
+from app.services.multi_agent.source_url_meta import infer_resource_kind_from_url
 
 
 logger = logging.getLogger(__name__)
@@ -199,7 +200,26 @@ class DiscoveryAgent(BaseAgent):
                 else max_results
             )
             raw_results = self._filter_off_topic_results(query, raw_results, filter_cap)
-            raw_results = self._filter_low_value_help_domains(query, raw_results, max_results)
+            raw_results = self._filter_low_value_help_domains(
+                query, raw_results, filter_cap
+            )
+            raw_results = self._filter_portal_chaff_for_showbiz(
+                query, description, raw_results, filter_cap
+            )
+            if self._is_showbiz_or_people_query(query, description) and len(
+                raw_results
+            ) < max(2, max_results // 2):
+                fb = self._fallback_showbiz_search_query(query, description)
+                self.logger.info(
+                    "Discovery: fallback DDG after filter (had %s links): %s",
+                    len(raw_results),
+                    fb[:120],
+                )
+                extra = self._search_web(fb, fetch_count, region)
+                raw_results = self._merge_dedupe_results(raw_results, extra)
+                raw_results = self._filter_portal_chaff_for_showbiz(
+                    query, description, raw_results, filter_cap
+                )
             if len(queries_used) > 1:
                 raw_results = raw_results[:max_results]
 
@@ -503,6 +523,132 @@ class DiscoveryAgent(BaseAgent):
         "сериал", "фильм", "кино", "топ-250", "top-250", "top10-hd",
     )
 
+    # Запрос про людей / шоу-бизнес / кино (не автоданные)
+    _SHOWBIZ_QUERY_MARKERS = (
+        "актрис",
+        "актер",
+        "актеров",
+        "знаменит",
+        "модел",
+        "фото",
+        "красив",
+        "звезд",
+        "звёзд",
+        "селебр",
+        "celebrit",
+        "шоу-бизнес",
+        "шоубизнес",
+    )
+
+    # Рубрики крупных порталов, часто попадающие в выдачу по шаблону «самые …» без связи с темой
+    _PORTAL_CHAFF_PATH_FRAGMENTS = (
+        "/games/",
+        "/army/",
+        "/sport/",
+        "/finance/",
+        "/tech/",
+        "/auto/",
+        "/realty/",
+        "/crime/",
+        "/politics/",
+        "/business/",
+        "/horoscope/",
+    )
+
+    _SHOWBIZ_RELEVANCE_IN_SNIPPET = (
+        "актрис",
+        "актер",
+        "кино",
+        "сериал",
+        "фильм",
+        "звезд",
+        "артист",
+        "модел",
+        "шоу",
+        "биограф",
+        "съёмок",
+        "съемок",
+    )
+
+    @staticmethod
+    def _strip_research_format_hint(text: str) -> str:
+        if not text:
+            return ""
+        parts = re.split(r"\n\n\[Формат ответа:", text, maxsplit=1)
+        return parts[0].strip()
+
+    def _is_showbiz_or_people_query(self, query: str, description: str) -> bool:
+        blob = f"{query} {description}".lower()
+        return any(m in blob for m in self._SHOWBIZ_QUERY_MARKERS)
+
+    def _filter_portal_chaff_for_showbiz(
+        self,
+        query: str,
+        description: str,
+        raw_results: List[Dict[str, Any]],
+        max_keep: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Убирает типичный мусор новостных порталов (игры, армия, пароли…), если запрос
+        про актёров/знаменитостей, а в title/snippet нет следов темы.
+        """
+        if not raw_results or not self._is_showbiz_or_people_query(query, description):
+            return raw_results[:max_keep]
+
+        out: List[Dict[str, Any]] = []
+        for r in raw_results:
+            url = (r.get("url") or "").lower()
+            title = (r.get("title") or "").lower()
+            snip = (r.get("snippet") or "").lower()
+            blob = f"{title} {snip}"
+            if any(p in url for p in self._PORTAL_CHAFF_PATH_FRAGMENTS):
+                if not any(k in blob for k in self._SHOWBIZ_RELEVANCE_IN_SNIPPET):
+                    self.logger.debug(
+                        "Discovery: filtered portal chaff (showbiz query): %s",
+                        (r.get("url") or "")[:90],
+                    )
+                    continue
+            out.append(r)
+            if len(out) >= max_keep:
+                break
+
+        if not out:
+            self.logger.warning(
+                "Discovery: all %s results were portal chaff for showbiz query",
+                len(raw_results),
+            )
+            return []
+        return out
+
+    def _merge_dedupe_results(
+        self,
+        primary: List[Dict[str, Any]],
+        extra: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        seen: set[str] = set()
+        merged: List[Dict[str, Any]] = []
+        for r in primary + extra:
+            u = (r.get("url") or "").strip()
+            if not u:
+                continue
+            key = u.lower().split("#")[0]
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(r)
+        return merged
+
+    def _fallback_showbiz_search_query(self, query: str, description: str) -> str:
+        """Усиленная строка для DDG, если выдача — нерелевантные рубрики порталов."""
+        base = self._strip_research_format_hint((description or "").strip() or query)
+        base = re.sub(r"\s+", " ", base).strip()
+        if len(base) < 12:
+            base = query.strip()
+        low = base.lower()
+        if "актрис" not in low and "актер" not in low and "знаменит" not in low:
+            base = f"{base} российские актрисы кино"
+        return base[:280]
+
     def _filter_off_topic_results(
         self, query: str, raw_results: List[Dict[str, Any]], max_keep: int
     ) -> List[Dict[str, Any]]:
@@ -661,13 +807,17 @@ class DiscoveryAgent(BaseAgent):
 
         sources: List[Source] = []
         for r in raw_results:
+            u = r.get("url", "") or ""
+            _, rk = infer_resource_kind_from_url(u)
             source = Source(
-                url=r.get("url", ""),
+                url=u,
                 title=r.get("title", ""),
                 snippet=r.get("snippet", ""),
                 fetched=False,
                 content=None,
                 source_type=src_type,  # type: ignore[arg-type]
+                resource_kind=rk,  # type: ignore[arg-type]
+                metadata={"inferred_from_discovery_url": True},
             )
             sources.append(source)
         return sources

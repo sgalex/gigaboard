@@ -384,14 +384,39 @@ class ReporterAgent(BaseAgent):
             f"{len(all_code_blocks)} code blocks"
         )
 
+        structured_tables_text = self._format_structured_tables_for_synthesis(agent_results)
+        discovered_resources_text = self._format_discovered_resources_for_synthesis(agent_results)
+
         # ── LLM synthesis ────────────────────────────────────────────
-        if narrative_parts:
+        if narrative_parts or structured_tables_text or discovered_resources_text:
+            parts_body: List[str] = []
+            if narrative_parts:
+                parts_body.append(
+                    "Текстовые фрагменты от агентов:\n\n" + "\n\n".join(narrative_parts)
+                )
+            if structured_tables_text:
+                parts_body.append(structured_tables_text)
+            if discovered_resources_text:
+                parts_body.append(discovered_resources_text)
+
             synthesis_prompt = (
                 "Сформулируй итоговый ответ пользователю на основе фрагментов ниже.\n"
                 f"Оригинальный запрос пользователя: {original_user_request}\n"
-                f"Техническое описание шага: {description}\n\n"
-                + "\n\n".join(narrative_parts)
+                f"Техническое описание шага: {description}\n"
             )
+            if structured_tables_text:
+                synthesis_prompt += (
+                    "\nЕсли в ответе нужна таблица, список или конкретные факты из данных, "
+                    "опирайся на блок «СТРУКТУРИРОВАННЫЕ ДАННЫЕ»: используй только строки и значения "
+                    "из полей columns/rows; не добавляй новые строки, ранги и сущности, которых там нет.\n"
+                )
+            if discovered_resources_text:
+                synthesis_prompt += (
+                    "\nЕсли нужны ссылки на страницы или медиа, используй URL из блока "
+                    "«НАЙДЕННЫЕ РЕСУРСЫ»; не выдумывай адреса.\n"
+                )
+            synthesis_prompt += "\n\n" + "\n\n".join(parts_body)
+
             messages = [
                 {"role": "system", "content": reporter_style_instruction},
                 {"role": "user", "content": synthesis_prompt},
@@ -402,7 +427,14 @@ class ReporterAgent(BaseAgent):
                 )
             except Exception as e:
                 self.logger.warning(f"LLM synthesis failed, using raw: {e}")
-                synthesized = "\n\n".join(narrative_parts)
+                if narrative_parts:
+                    synthesized = "\n\n".join(narrative_parts)
+                else:
+                    synthesized = (
+                        structured_tables_text
+                        or discovered_resources_text
+                        or "Нет данных для ответа."
+                    )
         else:
             # Нет narrative от агентов — формируем ответ из того, что есть в контексте.
             # Принцип: что есть в контексте — используем; чего нет — не подставляем специальных сообщений.
@@ -415,6 +447,10 @@ class ReporterAgent(BaseAgent):
                 parts.append("Данные на доске:")
                 for cn in content_nodes[:5]:
                     parts.append(f"  • {cn.get('name', 'Node')}: {cn.get('content_summary', '')}")
+            if structured_tables_text:
+                parts.append(structured_tables_text)
+            if discovered_resources_text:
+                parts.append(discovered_resources_text)
             if all_findings:
                 parts.append("Найденные факты:")
                 for f in all_findings[:10]:
@@ -446,6 +482,108 @@ class ReporterAgent(BaseAgent):
             findings=[],
             tables=all_tables,
             code_blocks=all_code_blocks,
+        )
+
+    @staticmethod
+    def _table_dict_for_prompt(table: Dict[str, Any]) -> Dict[str, Any]:
+        """Компактное представление таблицы для JSON в промпте синтеза."""
+        cols_out: List[Dict[str, str]] = []
+        for c in table.get("columns") or []:
+            if isinstance(c, dict):
+                cols_out.append(
+                    {
+                        "name": str(c.get("name", "")),
+                        "type": str(c.get("type", "string")),
+                    }
+                )
+            else:
+                cols_out.append({"name": str(c), "type": "string"})
+        rows = table.get("rows")
+        if not isinstance(rows, list):
+            rows = []
+        # Доп. лимит строк в промпте (селекция контекста уже режет; см. context_selection)
+        max_rows = 50
+        rows = rows[:max_rows]
+        rc = table.get("row_count")
+        if isinstance(rc, int):
+            row_count = rc
+        else:
+            row_count = len(rows)
+        return {
+            "name": table.get("name", ""),
+            "columns": cols_out,
+            "rows": rows,
+            "row_count": row_count,
+        }
+
+    @staticmethod
+    def _format_structured_tables_for_synthesis(
+        agent_results: List[Dict[str, Any]],
+    ) -> str:
+        """Сериализует tables из agent_results для включения в промпт LLM синтеза."""
+        blocks: List[str] = []
+        for result in agent_results:
+            if not isinstance(result, dict):
+                continue
+            agent_name = result.get("agent", "unknown")
+            tables = result.get("tables") or []
+            if not tables:
+                continue
+            slim: List[Dict[str, Any]] = []
+            for t in tables:
+                if isinstance(t, dict):
+                    slim.append(ReporterAgent._table_dict_for_prompt(t))
+            if slim:
+                blocks.append(
+                    f"[{agent_name}] Структурированные таблицы (JSON):\n"
+                    + json.dumps(slim, ensure_ascii=False, indent=2)
+                )
+        if not blocks:
+            return ""
+        return (
+            "=== СТРУКТУРИРОВАННЫЕ ДАННЫЕ (источник истины для фактов и строк таблиц) ===\n"
+            + "\n\n".join(blocks)
+        )
+
+    @staticmethod
+    def _format_discovered_resources_for_synthesis(
+        agent_results: List[Dict[str, Any]],
+    ) -> str:
+        """Сериализует discovered_resources из шагов research для промпта синтеза."""
+        blocks: List[str] = []
+        for result in agent_results:
+            if not isinstance(result, dict):
+                continue
+            agent_name = result.get("agent", "unknown")
+            if agent_name != "research":
+                continue
+            drs = result.get("discovered_resources") or []
+            if not isinstance(drs, list) or not drs:
+                continue
+            slim: List[Dict[str, Any]] = []
+            for r in drs:
+                if isinstance(r, dict):
+                    slim.append(
+                        {
+                            "url": r.get("url"),
+                            "resource_kind": r.get("resource_kind"),
+                            "mime_type": r.get("mime_type"),
+                            "parent_url": r.get("parent_url"),
+                            "origin": r.get("origin"),
+                            "tag": r.get("tag"),
+                            "title": r.get("title"),
+                        }
+                    )
+            if slim:
+                blocks.append(
+                    f"[{agent_name}] Найденные ресурсы (JSON):\n"
+                    + json.dumps(slim, ensure_ascii=False, indent=2)
+                )
+        if not blocks:
+            return ""
+        return (
+            "=== НАЙДЕННЫЕ РЕСУРСЫ (URL и тип; источник для ссылок в ответе) ===\n"
+            + "\n\n".join(blocks)
         )
 
     @staticmethod

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import Editor from '@monaco-editor/react'
 import {
     Dialog,
@@ -14,7 +14,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Sparkles, Loader2, Send, Code, Eye, Save, RefreshCw, Trash2 } from 'lucide-react'
+import { Sparkles, Loader2, Send, Code, Eye, Save, Trash2, MessageSquare, Lightbulb, RefreshCw } from 'lucide-react'
 import { ContentNode } from '@/types'
 import { cn } from '@/lib/utils'
 import { contentNodesAPI, widgetNodesAPI, edgesAPI } from '@/services/api'
@@ -28,11 +28,9 @@ import {
     type ProgressMeta as SharedProgressMeta,
     mergePlanSteps,
     applyProgressToSteps,
-    updateMetaFromPlanEvent,
-    updateMetaFromProgressEvent,
+    metaFromSteps,
     markRunningAsCompleted,
     markLastRunningAsFailed,
-    finalizeMeta,
 } from '@/lib/multiAgentProgress'
 
 interface WidgetDialogProps {
@@ -95,6 +93,9 @@ export const WidgetDialog = ({
     const [currentVisualization, setCurrentVisualization] = useState<VisualizationState | null>(null)
     const [editedCode, setEditedCode] = useState<VisualizationState | null>(null)
     const [rightPanelTab, setRightPanelTab] = useState<'preview' | 'code'>('preview')
+    const [composerTab, setComposerTab] = useState<'message' | 'suggestions'>('message')
+    const [composerSuggestionsRefreshKey, setComposerSuggestionsRefreshKey] = useState(0)
+    const [composerSuggestionsLoading, setComposerSuggestionsLoading] = useState(false)
     const [iframeKey, setIframeKey] = useState(0)  // Key to force iframe recreation
     const [selectedSourceTableIndex, setSelectedSourceTableIndex] = useState(0)
     // Autocomplete state
@@ -112,9 +113,16 @@ export const WidgetDialog = ({
         table.name.toLowerCase().includes(autocompleteSearch.toLowerCase())
     )
 
+    const chatHistoryForSuggestions = useMemo(
+        () => chatMessages.map(msg => ({ role: msg.role, content: msg.content })),
+        [chatMessages]
+    )
+
     // Initialize or reset state when dialog opens
     useEffect(() => {
         if (!open) return
+
+        setComposerTab('message')
 
         if (widgetNodeId && initialHtmlCode) {
             // Edit mode: restore all data
@@ -146,6 +154,12 @@ export const WidgetDialog = ({
         }
         setIframeKey(prev => prev + 1)
     }, [open, widgetNodeId, initialHtmlCode, initialWidgetName, initialMessages, initialAutoRefresh, initialRefreshInterval])
+
+    useEffect(() => {
+        const el = textareaRef.current
+        if (!el || inputValue !== '') return
+        el.style.height = ''
+    }, [inputValue])
 
     // Auto-scroll chat to bottom
     useEffect(() => {
@@ -322,19 +336,28 @@ export const WidgetDialog = ({
                 },
                 {
                     onPlanUpdate: (steps, meta) => {
-                        setProgressSteps((prev) =>
-                            mergePlanSteps(prev, steps, meta?.completedCount, 'widget')
-                        )
-                        setProgressMeta((prev) =>
-                            updateMetaFromPlanEvent(prev, steps.length, meta?.completedCount)
-                        )
+                        setProgressSteps((prev) => {
+                            const next = mergePlanSteps(prev, steps, meta?.completedCount, 'widget')
+                            setProgressMeta(metaFromSteps(next))
+                            return next
+                        })
                     },
                     onProgress: (_agentLabel, task, meta) => {
-                        setProgressSteps((prev) =>
-                            applyProgressToSteps(prev, task, meta?.stepIndex, 'widget')
-                        )
-                        setProgressMeta((prev) => {
-                            return updateMetaFromProgressEvent(prev, meta?.stepIndex, meta?.totalSteps)
+                        setProgressSteps((prev) => {
+                            const next = applyProgressToSteps(prev, task, meta?.stepIndex, 'widget')
+                            let metaNext = metaFromSteps(next)
+                            if (
+                                typeof meta?.totalSteps === 'number' &&
+                                meta.totalSteps > 0 &&
+                                metaNext.total != null
+                            ) {
+                                metaNext = {
+                                    ...metaNext,
+                                    total: Math.max(metaNext.total, meta.totalSteps),
+                                }
+                            }
+                            setProgressMeta(metaNext)
+                            return next
                         })
                     },
                     onResult: (result) => {
@@ -351,8 +374,11 @@ export const WidgetDialog = ({
             if (!data) {
                 throw new Error('Пустой результат генерации визуализации')
             }
-            setProgressSteps((prev) => markRunningAsCompleted(prev))
-            setProgressMeta((prev) => finalizeMeta(prev, progressSteps.length))
+            setProgressSteps((prev) => {
+                const next = markRunningAsCompleted(prev)
+                setProgressMeta(metaFromSteps(next))
+                return next
+            })
 
             console.log('🏷️ API response:', {
                 widget_name: data.widget_name,
@@ -469,10 +495,10 @@ export const WidgetDialog = ({
         const newValue = e.target.value
         setInputValue(newValue)
 
-        // Auto-resize
         const textarea = e.target
+        const minH = 56 // ~2 строки text-sm + py-1.5
         textarea.style.height = 'auto'
-        textarea.style.height = `${Math.min(textarea.scrollHeight, 120)}px`
+        textarea.style.height = `${Math.max(minH, Math.min(textarea.scrollHeight, 120))}px`
 
         // Check for @ trigger
         const cursorPos = textarea.selectionStart
@@ -492,7 +518,7 @@ export const WidgetDialog = ({
 
     // Apply manual code edits
     const handleApplyCode = () => {
-        if (!currentVisualization) return
+        if (!currentVisualization || isGenerating) return
         // editedCode state triggers iframe update via useEffect
     }
 
@@ -568,7 +594,7 @@ export const WidgetDialog = ({
                 const rawName = code.widget_name || `Visualization ${contentNode.id.slice(0, 8)}`
                 const response = await widgetNodesAPI.create(contentNode.board_id, {
                     name: rawName.length > 200 ? rawName.slice(0, 200) : rawName,
-                    description: code.description || 'AI-generated visualization',
+                    description: code.description || 'Визуализация, сгенерированная ИИ',
                     html_code: unescapeWidgetHtml(code.widget_code || ''),
                     css_code: code.css || '',
                     js_code: code.js || '',
@@ -660,7 +686,7 @@ export const WidgetDialog = ({
                         Интерактивный редактор визуализаций
                     </DialogTitle>
                     <DialogDescription className="text-xs leading-tight mt-0.5">
-                        Создайте визуализацию с помощью AI или отредактируйте код вручную
+                        Создайте визуализацию с помощью ИИ или отредактируйте код вручную
                     </DialogDescription>
                 </DialogHeader>
 
@@ -690,12 +716,13 @@ export const WidgetDialog = ({
 
                         {/* Chat Messages */}
                         <div className="flex items-center justify-between px-3 pt-2 pb-1">
-                            <span className="text-xs font-medium text-muted-foreground">Диалог с AI</span>
+                            <span className="text-xs font-medium text-muted-foreground">Диалог с ИИ</span>
                             {chatMessages.length > 0 && (
                                 <Button
                                     variant="ghost"
                                     size="sm"
                                     className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+                                    disabled={isGenerating || isSaving}
                                     onClick={() => {
                                         setChatMessages([])
                                         setCurrentVisualization(null)
@@ -708,7 +735,14 @@ export const WidgetDialog = ({
                                 </Button>
                             )}
                         </div>
-                        <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-2">
+                        <div
+                            className={cn(
+                                'flex-1 min-h-0 px-3 pb-3 space-y-2',
+                                chatMessages.length === 0 && !isGenerating
+                                    ? 'overflow-y-hidden'
+                                    : 'overflow-y-auto'
+                            )}
+                        >
                             {chatMessages.length === 0 ? (
                                 <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground">
                                     <Sparkles className="w-10 h-10 mb-3 text-purple-500/30" />
@@ -743,7 +777,7 @@ export const WidgetDialog = ({
                             )}
                             {isGenerating && (
                                 <MultiAgentProgressBlock
-                                    runningText="AI создаёт визуализацию..."
+                                    runningText="ИИ создаёт визуализацию..."
                                     progressMeta={progressMeta}
                                     progressSteps={progressSteps}
                                     variant="purple"
@@ -752,74 +786,125 @@ export const WidgetDialog = ({
                             <div ref={messagesEndRef} />
                         </div>
 
-                        {/* AI Suggestions Panel */}
-                        <div className="border-t overflow-y-auto max-h-[120px]">
-                            <SuggestionsPanel
-                                contentNodeId={contentNode.id}
-                                chatHistory={chatMessages.map(msg => ({
-                                    role: msg.role,
-                                    content: msg.content
-                                }))}
-                                currentWidgetCode={currentVisualization?.widget_code}
-                                onSuggestionClick={(prompt) => {
-                                    // Send prompt directly to AI
-                                    handleSendMessage(prompt)
-                                }}
-                            />
-                        </div>
-
-                        {/* Chat Input */}
-                        <div className="p-2 border-t relative">
-                            {/* Autocomplete dropdown */}
-                            {showAutocomplete && filteredTables.length > 0 && (
-                                <div
-                                    ref={autocompleteRef}
-                                    className="absolute bottom-full left-2 right-2 mb-1 bg-popover border rounded-md shadow-lg max-h-[200px] overflow-y-auto z-50"
-                                >
-                                    {filteredTables.map((table, idx) => (
-                                        <button
-                                            key={table.name}
-                                            onClick={() => insertTableMention(table.name)}
-                                            onMouseEnter={() => setAutocompleteIndex(idx)}
-                                            className={cn(
-                                                'w-full px-3 py-2 text-left text-sm flex items-center justify-between hover:bg-accent transition-colors',
-                                                idx === autocompleteIndex && 'bg-accent'
-                                            )}
+                        <div className="border-t flex flex-col shrink-0 min-h-0">
+                            <Tabs
+                                value={composerTab}
+                                onValueChange={(v) => setComposerTab(v as 'message' | 'suggestions')}
+                                className="flex flex-col gap-0"
+                            >
+                                <TabsList className="mx-2 mt-2 h-8 w-[calc(100%-1rem)] grid grid-cols-2 shrink-0 gap-1 p-1 items-stretch">
+                                    <TabsTrigger value="message" className="text-xs gap-1 px-2 h-full min-h-0">
+                                        <MessageSquare className="h-3 w-3 shrink-0" />
+                                        Сообщение
+                                    </TabsTrigger>
+                                    <div
+                                        className={cn(
+                                            'flex min-h-0 min-w-0 h-full rounded-sm overflow-hidden',
+                                            composerTab === 'suggestions' &&
+                                                'bg-background text-foreground shadow-sm'
+                                        )}
+                                    >
+                                        <TabsTrigger
+                                            value="suggestions"
+                                            className="text-xs gap-1 px-2 h-full min-w-0 flex-1 rounded-none shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
                                         >
-                                            <span className="font-mono">{table.name}</span>
-                                            <span className="text-xs text-muted-foreground">
-                                                {table.row_count?.toLocaleString()} rows
-                                            </span>
+                                            <Lightbulb className="h-3 w-3 shrink-0" />
+                                            <span className="truncate">Рекомендации</span>
+                                        </TabsTrigger>
+                                        <button
+                                            type="button"
+                                            className={cn(
+                                                'inline-flex items-center justify-center w-7 shrink-0 rounded-none border-l border-border/60',
+                                                'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+                                                'disabled:pointer-events-none disabled:opacity-40',
+                                                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1'
+                                            )}
+                                            disabled={
+                                                composerTab !== 'suggestions' ||
+                                                isGenerating ||
+                                                isSaving ||
+                                                composerSuggestionsLoading
+                                            }
+                                            onClick={() => setComposerSuggestionsRefreshKey((k) => k + 1)}
+                                            title="Обновить рекомендации"
+                                            aria-label="Обновить рекомендации"
+                                        >
+                                            <RefreshCw className="h-3.5 w-3.5" />
                                         </button>
-                                    ))}
-                                </div>
-                            )}
+                                    </div>
+                                </TabsList>
+                                <TabsContent value="message" className="mt-0 p-2 pt-1 m-0 border-0 focus-visible:outline-none data-[state=inactive]:hidden">
+                                    <div className="relative">
+                                        {showAutocomplete && !isGenerating && filteredTables.length > 0 && (
+                                            <div
+                                                ref={autocompleteRef}
+                                                className="absolute bottom-full left-0 right-0 mb-1 bg-popover border rounded-md shadow-lg max-h-[200px] overflow-y-auto z-50"
+                                            >
+                                                {filteredTables.map((table, idx) => (
+                                                    <button
+                                                        key={table.name}
+                                                        onClick={() => insertTableMention(table.name)}
+                                                        onMouseEnter={() => setAutocompleteIndex(idx)}
+                                                        className={cn(
+                                                            'w-full px-3 py-2 text-left text-sm flex items-center justify-between hover:bg-accent transition-colors',
+                                                            idx === autocompleteIndex && 'bg-accent'
+                                                        )}
+                                                    >
+                                                        <span className="font-mono">{table.name}</span>
+                                                        <span className="text-xs text-muted-foreground">
+                                                            {table.row_count?.toLocaleString()} rows
+                                                        </span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
 
-                            <div className="flex gap-2 items-end">
-                                <Textarea
-                                    ref={textareaRef}
-                                    value={inputValue}
-                                    onChange={handleInputChange}
-                                    onKeyDown={handleKeyDown}
-                                    placeholder={allTables.length > 0 ? `Опишите визуализацию (@ для ссылки на таблицу)...` : 'Опишите визуализацию или корректировку...'}
-                                    className="min-h-[32px] py-1.5 px-2 resize-none text-sm overflow-hidden"
-                                    style={{ height: '32px' }}
-                                    disabled={isGenerating}
-                                    rows={1}
-                                />
-                                <Button
-                                    onClick={() => handleSendMessage()}
-                                    disabled={!inputValue.trim() || isGenerating}
-                                    size="icon"
-                                    className="h-[32px] w-[32px] shrink-0 bg-purple-500 hover:bg-purple-600"
+                                        <div className="flex gap-2 items-end">
+                                            <Textarea
+                                                ref={textareaRef}
+                                                value={inputValue}
+                                                onChange={handleInputChange}
+                                                onKeyDown={handleKeyDown}
+                                                placeholder={allTables.length > 0 ? `Опишите визуализацию (@ для ссылки на таблицу)...` : 'Опишите визуализацию или корректировку...'}
+                                                className="min-h-[56px] py-1.5 px-2 resize-none text-sm overflow-hidden"
+                                                disabled={isGenerating}
+                                                rows={2}
+                                            />
+                                            <Button
+                                                onClick={() => handleSendMessage()}
+                                                disabled={!inputValue.trim() || isGenerating}
+                                                size="icon"
+                                                className="h-[32px] w-[32px] shrink-0 bg-purple-500 hover:bg-purple-600"
+                                            >
+                                                {isGenerating ? (
+                                                    <Loader2 className="w-5 h-5 animate-spin" />
+                                                ) : (
+                                                    <Send className="w-5 h-5" />
+                                                )}
+                                            </Button>
+                                        </div>
+                                    </div>
+                                </TabsContent>
+                                <TabsContent
+                                    value="suggestions"
+                                    forceMount
+                                    className="mt-0 m-0 p-2 pt-1 flex-none h-fit min-h-0 max-h-[min(36vh,260px)] overflow-y-auto border-0 focus-visible:outline-none data-[state=inactive]:hidden"
                                 >
-                                    {isGenerating ? (
-                                        <Loader2 className="w-5 h-5 animate-spin" />
-                                    ) : (
-                                        <Send className="w-5 h-5" />
-                                    )}
-                                </Button>
-                            </div>
+                                    <SuggestionsPanel
+                                        contentNodeId={contentNode.id}
+                                        chatHistory={chatHistoryForSuggestions}
+                                        currentWidgetCode={currentVisualization?.widget_code}
+                                        suggestionsTabActive={composerTab === 'suggestions'}
+                                        isGenerating={isGenerating || isSaving}
+                                        suggestionsRefreshKey={composerSuggestionsRefreshKey}
+                                        onSuggestionsLoadingChange={setComposerSuggestionsLoading}
+                                        onSuggestionClick={(prompt) => {
+                                            handleSendMessage(prompt)
+                                            setComposerTab('message')
+                                        }}
+                                    />
+                                </TabsContent>
+                            </Tabs>
                         </div>
                     </div>
 
@@ -878,6 +963,7 @@ export const WidgetDialog = ({
                                             variant="outline"
                                             size="sm"
                                             onClick={handleApplyCode}
+                                            disabled={isGenerating}
                                         >
                                             Применить изменения
                                         </Button>
@@ -903,6 +989,7 @@ export const WidgetDialog = ({
                                                     fontSize: 12,
                                                     lineNumbers: 'on',
                                                     scrollBeyondLastLine: false,
+                                                    readOnly: isGenerating,
                                                 }}
                                             />
                                         </div>
@@ -928,6 +1015,7 @@ export const WidgetDialog = ({
                                     id="auto-refresh"
                                     checked={autoRefresh}
                                     onCheckedChange={setAutoRefresh}
+                                    disabled={isGenerating || isSaving}
                                 />
                                 <Label htmlFor="auto-refresh" className="text-xs cursor-pointer">
                                     Автообновление
@@ -946,6 +1034,7 @@ export const WidgetDialog = ({
                                         value={refreshInterval}
                                         onChange={(e) => setRefreshInterval(Math.max(1, parseInt(e.target.value) || 5))}
                                         className="h-7 w-16 text-xs"
+                                        disabled={isGenerating || isSaving}
                                     />
                                 </div>
                             )}
@@ -959,7 +1048,7 @@ export const WidgetDialog = ({
                             </Button>
                             <Button
                                 onClick={handleSaveToBoard}
-                                disabled={!currentVisualization || isSaving}
+                                disabled={!currentVisualization || isSaving || isGenerating}
                                 className="bg-purple-500 hover:bg-purple-600"
                             >
                                 {isSaving ? (

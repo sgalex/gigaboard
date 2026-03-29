@@ -18,6 +18,8 @@ interface MappingColumn {
     type: string
     path: string
     nullable?: boolean
+    /** Роль ключа (PK/FK) и таблица; для полей данных — путь и принадлежность к таблице. */
+    description?: string
 }
 
 interface MappingTable {
@@ -45,6 +47,12 @@ interface SchemaFieldOption {
 const FIELD_ALIASES: Record<string, string> = {
     doktype: 'doktype',
     'докtype': 'doktype',
+}
+
+function describeDataColumn(tableId: string, tableName: string, relativePath: string) {
+    return (
+        `Поле данных из JSON по пути ${relativePath}; относится к таблице «${tableName}» (id=${tableId}). Не ключ.`
+    )
 }
 
 export function JSONSourceDialog({
@@ -119,6 +127,14 @@ export function JSONSourceDialog({
                             type: String(col.type || 'text'),
                             path: String(col.path || '$'),
                             nullable: col.nullable !== false,
+                            description:
+                                typeof col.description === 'string' && col.description.trim()
+                                    ? col.description
+                                    : describeDataColumn(
+                                          String(table.id || `table_${idx + 1}`),
+                                          String(table.name || table.id || `table_${idx + 1}`),
+                                          String(col.path || '$'),
+                                      ),
                         }))
                     : [],
             }))
@@ -149,6 +165,9 @@ export function JSONSourceDialog({
                 type: column.type || 'text',
                 path: column.path,
                 nullable: column.nullable !== false,
+                description:
+                    column.description?.trim() ||
+                    describeDataColumn(table.id, table.name, column.path),
             })),
         })),
     })
@@ -408,6 +427,7 @@ export function JSONSourceDialog({
                     type: option.inferredType,
                     path: option.relativePath,
                     nullable: true,
+                    description: describeDataColumn(tableId, tableName || tableId, option.relativePath),
                 }
             })
 
@@ -481,6 +501,7 @@ export function JSONSourceDialog({
                     // user can still adjust them manually afterwards.
                     name: deriveColumnNameFromPath(selectedPath),
                     type: selected?.inferredType || current.type,
+                    description: describeDataColumn(table.id, table.name, selectedPath),
                 }
                 return { ...table, columns: nextColumns }
             })
@@ -676,6 +697,7 @@ export function JSONSourceDialog({
                             type: 'text',
                             path: '$',
                             nullable: true,
+                            description: describeDataColumn(table.id, table.name, '$'),
                         },
                     ],
                 }
@@ -799,6 +821,31 @@ export function JSONSourceDialog({
         return current
     }
 
+    /** Deterministic UUID-like id for preview rows (matches no backend rows; for UI only). */
+    const stablePreviewPk = (tableId: string, rowIdx: number) => {
+        let h = 0
+        for (let i = 0; i < tableId.length; i++) h = ((h << 5) - h + tableId.charCodeAt(i)) | 0
+        const n = ((h >>> 0) ^ rowIdx) >>> 0
+        const tail = (n.toString(16) + (rowIdx * 65537).toString(16)).padEnd(12, '0').slice(0, 12)
+        return `00000000-0000-4000-8000-${tail}`
+    }
+
+    const jsonContains = (parent: any, target: any): boolean => {
+        if (parent === target) return true
+        if (Array.isArray(parent)) {
+            for (const el of parent) {
+                if (jsonContains(el, target)) return true
+            }
+            return false
+        }
+        if (parent && typeof parent === 'object') {
+            for (const v of Object.values(parent)) {
+                if (jsonContains(v, target)) return true
+            }
+        }
+        return false
+    }
+
     const activeTablePreview = useMemo(() => {
         if (!activeTable) return null
 
@@ -817,22 +864,65 @@ export function JSONSourceDialog({
             }
         }
 
-        if (!quickJsonData || activeTable.columns.length === 0) return null
+        if (!quickJsonData) return null
+
+        const pkColumn = activeTable.pk?.column || `${activeTable.id}_id`
+        const fkEntries = activeTable.fk || []
+        const hasMappingCols = activeTable.columns.length > 0
+        const hasSurrogateCols = Boolean(pkColumn) || fkEntries.length > 0
+        if (!hasMappingCols && !hasSurrogateCols) return null
+
         const items = resolveItemsByBasePath(quickJsonData, activeTable.base_path)
-        const rows = items.slice(0, 100).map((item) => {
+        const parentTableByRef = (refTable: string) => mappingTables.find((t) => t.id === refTable)
+
+        const rows = items.slice(0, 100).map((item, idx) => {
             const row: Record<string, any> = {}
+            row[pkColumn] = stablePreviewPk(activeTable.id, idx)
+
+            for (const fk of fkEntries) {
+                const pt = parentTableByRef(fk.ref_table)
+                let fkVal: string | null = null
+                if (pt) {
+                    const parents = resolveItemsByBasePath(quickJsonData, pt.base_path)
+                    const pi = parents.findIndex((p) => jsonContains(p, item))
+                    if (pi >= 0) fkVal = stablePreviewPk(pt.id, pi)
+                }
+                row[fk.column] = fkVal ?? ''
+            }
+
             activeTable.columns.forEach((col) => {
                 row[col.name] = extractRelativeValue(item, col.path)
             })
             return row
         })
+
+        const previewColumns = [
+            {
+                name: pkColumn,
+                type: 'text',
+                surrogate: 'pk' as const,
+                description: `Суррогатный первичный ключ (PK) таблицы «${activeTable.name}» (id=${activeTable.id}).`,
+            },
+            ...fkEntries.map((f) => ({
+                name: f.column,
+                type: 'text',
+                surrogate: 'fk' as const,
+                description: `Внешний ключ (FK) на таблицу «${f.ref_table}», столбец ${f.ref_column}; дочерняя таблица «${activeTable.name}» (id=${activeTable.id}).`,
+            })),
+            ...activeTable.columns.map((c) => ({
+                name: c.name,
+                type: c.type,
+                description: c.description?.trim() || describeDataColumn(activeTable.id, activeTable.name, c.path),
+            })),
+        ]
+
         return {
-            columns: activeTable.columns.map((c) => ({ name: c.name, type: c.type })),
+            columns: previewColumns,
             rows,
             rowCount: items.length,
             source: 'quick',
         }
-    }, [activeTable, existingSource, quickJsonData])
+    }, [activeTable, existingSource, quickJsonData, mappingTables])
 
     const toggleJsonNode = (path: string) => {
         setExpandedJsonNodes((prev) => {
@@ -1044,15 +1134,12 @@ export function JSONSourceDialog({
 
                 <div className="grid gap-4 lg:grid-cols-2 flex-1 min-h-0">
                     <div className="p-3 flex flex-col min-h-0 gap-3">
-                        <p className="text-sm font-medium">JSON файл и исходная структура</p>
                         <div className="space-y-2">
-                            <Label htmlFor="json-file">
-                                {mode === 'edit' ? 'JSON файл (можно заменить)' : 'Выберите JSON файл *'}
-                            </Label>
                             <Input
                                 id="json-file"
                                 type="file"
                                 accept=".json"
+                                aria-label={mode === 'edit' ? 'Заменить JSON файл' : 'Выберите JSON файл'}
                                 onChange={(e) => setFile(e.target.files?.[0] || null)}
                                 className="cursor-pointer"
                             />
@@ -1230,7 +1317,7 @@ export function JSONSourceDialog({
                                             <div ref={activeColumnsScrollRef} className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-1.5">
                                                 {activeTable.columns.length === 0 ? (
                                                     <p className="text-xs text-muted-foreground">
-                                                        У таблицы пока нет колонок.
+                                                        У таблицы пока нет колонок из JSON.
                                                     </p>
                                                 ) : (
                                                     activeTable.columns.map((column, colIdx) => {
@@ -1312,7 +1399,7 @@ export function JSONSourceDialog({
                                                     </div>
                                                 ) : activeTablePreview.columns.length === 0 ? (
                                                     <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
-                                                        Добавьте колонки в мэппинг, чтобы увидеть данные.
+                                                        Добавьте колонки в мэппинг или задайте суррогатный ключ (PK), чтобы увидеть данные.
                                                     </div>
                                                 ) : (
                                                     <div className="flex-1 min-h-0 overflow-auto border rounded">
@@ -1320,8 +1407,18 @@ export function JSONSourceDialog({
                                                             <thead className="bg-muted/50 sticky top-0 z-10">
                                                                 <tr>
                                                                     {activeTablePreview.columns.map((col: any) => (
-                                                                        <th key={col.name} className="p-1.5 text-left font-medium border-b whitespace-nowrap">
+                                                                        <th
+                                                                            key={col.name}
+                                                                            title={typeof col.description === 'string' && col.description ? col.description : undefined}
+                                                                            className="p-1.5 text-left font-medium border-b whitespace-nowrap"
+                                                                        >
                                                                             {col.name}
+                                                                            {col.surrogate === 'pk' && (
+                                                                                <span className="ml-1 text-[10px] text-muted-foreground font-normal">PK</span>
+                                                                            )}
+                                                                            {col.surrogate === 'fk' && (
+                                                                                <span className="ml-1 text-[10px] text-muted-foreground font-normal">FK</span>
+                                                                            )}
                                                                             <span className="ml-1 text-muted-foreground font-normal">({col.type})</span>
                                                                         </th>
                                                                     ))}

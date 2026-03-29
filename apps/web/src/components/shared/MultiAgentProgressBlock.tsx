@@ -46,6 +46,19 @@ export function MultiAgentProgressBlock({
 }: MultiAgentProgressBlockProps) {
     const v = getVariantClasses(variant)
 
+    const completedCount = progressSteps.filter((s) => s.status === 'completed').length
+    const totalFromSteps = progressSteps.length
+    const hasRunning = progressSteps.some((s) => s.status === 'running')
+    const useStepsForBar = totalFromSteps > 0
+
+    const barPercent = useStepsForBar
+        ? Math.round((completedCount / Math.max(totalFromSteps, 1)) * 100)
+        : progressMeta.total != null
+          ? Math.round((progressMeta.current / Math.max(progressMeta.total, 1)) * 100)
+          : null
+
+    const indeterminate = !useStepsForBar && progressMeta.total == null
+
     return (
         <div className="rounded-md px-2 py-1.5 text-xs bg-muted text-foreground">
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
@@ -55,28 +68,31 @@ export function MultiAgentProgressBlock({
             <div className="mb-1.5">
                 <div className="h-1.5 w-full rounded-full bg-background/80 overflow-hidden border border-border/60">
                     <div
-                        className={cn('h-full transition-all duration-300', v.bar, progressMeta.total == null && 'animate-pulse w-1/3')}
+                        className={cn(
+                            'h-full transition-all duration-300',
+                            v.bar,
+                            indeterminate && 'animate-pulse w-1/3'
+                        )}
                         style={
-                            progressMeta.total != null
+                            !indeterminate && barPercent != null
                                 ? {
-                                      width: `${Math.max(
-                                          4,
-                                          Math.min(
-                                              100,
-                                              Math.round(
-                                                  (progressMeta.current / Math.max(progressMeta.total, 1)) * 100
-                                              )
-                                          )
-                                      )}%`,
+                                      width: `${Math.max(4, Math.min(100, barPercent))}%`,
                                   }
                                 : undefined
                         }
                     />
                 </div>
                 <div className="mt-0.5 text-[11px] text-muted-foreground">
-                    {progressMeta.total != null
-                        ? `Прогресс: шаг ${Math.min(progressMeta.current, progressMeta.total)} из ${progressMeta.total}`
-                        : 'Прогресс: выполняю шаги пайплайна...'}
+                    {useStepsForBar ? (
+                        <>
+                            Выполнено {completedCount} из {totalFromSteps}
+                            {hasRunning ? ' · выполняется шаг' : ''}
+                        </>
+                    ) : progressMeta.total != null ? (
+                        `Прогресс: ${Math.min(progressMeta.current, progressMeta.total)} из ${progressMeta.total}`
+                    ) : (
+                        'Прогресс: выполняю шаги пайплайна...'
+                    )}
                 </div>
             </div>
             {progressSteps.length > 0 ? (
@@ -117,4 +133,3 @@ export function MultiAgentProgressBlock({
         </div>
     )
 }
-

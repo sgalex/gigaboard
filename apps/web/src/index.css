@@ -30,6 +30,10 @@
         --input: 214.3 31.8% 91.4%;
         --ring: 221.2 83.2% 53.3%;
         --radius: 0.75rem;
+        /* Скроллбары: трек и ползунок (Firefox + fallback для цветов) */
+        --scrollbar-track: 210 40% 94%;
+        --scrollbar-thumb: 215.4 16.3% 72%;
+        --scrollbar-thumb-hover: 215.4 16.3% 58%;
     }
 
     .dark {
@@ -58,6 +62,9 @@
         --border: 217.2 32.6% 17.5%;
         --input: 217.2 32.6% 17.5%;
         --ring: 224.3 76.3% 48%;
+        --scrollbar-track: 222.2 84% 7%;
+        --scrollbar-thumb: 217.2 32.6% 32%;
+        --scrollbar-thumb-hover: 217.2 32.6% 44%;
     }
 }
 
@@ -72,6 +79,39 @@
         font-family: "Space Grotesk", "Segoe UI", system-ui, -apple-system, sans-serif;
         font-feature-settings: "ss01" on, "ss02" on, "salt" on;
         min-height: 100vh;
+    }
+
+    /* Скроллбары: тёмная/светлая тема (сайдбар, модалки, overflow-области). Firefox — на каждом scroll-контейнере. */
+    * {
+        scrollbar-width: thin;
+        scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track));
+    }
+
+    *::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+
+    *::-webkit-scrollbar-track {
+        background: hsl(var(--scrollbar-track));
+        border-radius: 4px;
+    }
+
+    *::-webkit-scrollbar-thumb {
+        background: hsl(var(--scrollbar-thumb));
+        border-radius: 4px;
+        border: 2px solid hsl(var(--scrollbar-track));
+        background-clip: padding-box;
+    }
+
+    *::-webkit-scrollbar-thumb:hover {
+        background: hsl(var(--scrollbar-thumb-hover));
+        border: 2px solid hsl(var(--scrollbar-track));
+        background-clip: padding-box;
+    }
+
+    *::-webkit-scrollbar-corner {
+        background: hsl(var(--scrollbar-track));
     }
 
     h1,

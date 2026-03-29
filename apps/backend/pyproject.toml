@@ -28,6 +28,7 @@ dependencies = [
     "asyncpg==0.30.0",  # PostgreSQL async driver for main app
     "pandas==2.2.0",
     "httpx==0.26.0",
+    "beautifulsoup4>=4.12",
     "python-multipart>=0.0.6",
     "ddgs>=1.0.0",
     "chardet==5.2.0",  # Encoding detection

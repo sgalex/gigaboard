@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "apps" / "backend"))
 from app.sources.json.extractor import JSONSource
+from app.sources.json.normalizer import extract_tables_from_mapping
 
 
 def test_json_source_generates_schema_and_mapping_spec():
@@ -68,6 +69,61 @@ def test_json_source_uses_saved_mapping_spec():
     row = table.rows[0]
     assert "external_id" in row
     assert row["external_id"] == "A-1"
+    assert "order_id" in row
+    assert len(row["order_id"]) == 36  # uuid string
+
+
+def test_extract_tables_from_mapping_sets_fk_to_parent_surrogate():
+    """Child rows must reference parent PK via same JSON object identity as parent table."""
+    payload = {
+        "data": [
+            {"id": 1, "route": [{"x": 10}, {"x": 20}]},
+            {"id": 2, "route": [{"x": 30}]},
+        ]
+    }
+    mapping_spec = {
+        "version": "1.0",
+        "tables": [
+            {
+                "id": "trip",
+                "name": "trip",
+                "base_path": "$.data[*]",
+                "pk": {"column": "trip_id", "strategy": "surrogate_uuid"},
+                "columns": [{"name": "id", "type": "number", "path": "$.id", "nullable": True}],
+            },
+            {
+                "id": "route_point",
+                "name": "route_point",
+                "base_path": "$.data[*].route[*]",
+                "pk": {"column": "route_point_id", "strategy": "surrogate_uuid"},
+                "fk": [
+                    {
+                        "column": "trip_id",
+                        "ref_table": "trip",
+                        "ref_column": "trip_id",
+                    }
+                ],
+                "columns": [{"name": "x", "type": "number", "path": "$.x", "nullable": True}],
+            },
+        ],
+    }
+    tables = extract_tables_from_mapping(payload, mapping_spec)
+    trip = next(t for t in tables if t.id == "trip")
+    routes = next(t for t in tables if t.id == "route_point")
+    trip_ids = {r["trip_id"] for r in trip.rows}
+    for r in routes.rows:
+        assert r["trip_id"] in trip_ids
+        assert "route_point_id" in r
+        assert len(r["route_point_id"]) == 36
+
+    by_name = {c["name"]: c for c in routes.columns}
+    assert "description" in by_name["route_point_id"]
+    assert "PK" in by_name["route_point_id"]["description"]
+    assert "description" in by_name["trip_id"]
+    assert "FK" in by_name["trip_id"]["description"]
+    assert "trip" in by_name["trip_id"]["description"]
+    assert "description" in by_name["x"]
+    assert "Не ключ" in by_name["x"]["description"]
 
 
 def test_json_source_max_rows_limits_each_table():

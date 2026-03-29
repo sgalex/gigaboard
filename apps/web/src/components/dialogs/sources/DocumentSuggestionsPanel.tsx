@@ -1,9 +1,12 @@
-import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
+/**
+ * Панель AI-рекомендаций для чата извлечения из документа (аналог TransformSuggestionsPanel).
+ */
+import { useState, useEffect, useLayoutEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2, Filter, BarChart2, Calculator, ArrowUpDown, Eraser, Shuffle, Grid3x3, AlertCircle, Lightbulb } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
-import { contentNodesAPI } from '@/services/api'
+import { filesAPI } from '@/services/api'
 import {
     getInitialTooltipViewportPos,
     placeTooltipInViewport,
@@ -11,36 +14,41 @@ import {
     type SuggestionTooltipPlacement,
 } from '@/lib/suggestionTooltipPlacement'
 
-interface TransformSuggestion {
+interface DocumentSuggestionTag {
     id: string
     label: string
     prompt: string
     type: 'filter' | 'aggregation' | 'calculation' | 'sorting' | 'cleaning' | 'merge' | 'reshape'
-    relevance: number  // 0.0-1.0
-    category: string  // Legacy field
-    confidence: number  // Legacy field
+    relevance: number
+    category: string
+    confidence: number
     description?: string
     reasoning?: string
 }
 
 const SUGGESTIONS_DEBOUNCE_MS = 450
 
-interface TransformSuggestionsPanelProps {
-    contentNodeId: string
+export interface DocumentSuggestionsPayload {
+    document_text: string
+    document_type: string
+    filename: string
+    page_count?: number | null
+    existing_tables: Array<Record<string, unknown>>
+}
+
+interface DocumentSuggestionsPanelProps {
+    fileId: string
+    documentPayload: DocumentSuggestionsPayload
     chatHistory: Array<{ role: string; content: string }>
-    currentCode?: string
-    /** Пока false — запрос не стартует (вкладка «Сообщение»); при true — один раз на contextFingerprint */
+    contextFingerprint: string
     suggestionsTabActive: boolean
-    /** Как у поля ввода: пока ИИ отвечает — выбор рекомендации недоступен */
     isGenerating?: boolean
-    /** Счётчик с родителя (кнопка в табе) — сбрасывает кэш и перезапрашивает */
     suggestionsRefreshKey?: number
-    /** Для блокировки кнопки обновления в табе во время загрузки */
     onSuggestionsLoadingChange?: (loading: boolean) => void
     onSuggestionClick: (prompt: string) => void
 }
 
-const TYPE_ICONS: Record<TransformSuggestion['type'], React.ComponentType<{ className?: string }>> = {
+const TYPE_ICONS: Record<DocumentSuggestionTag['type'], React.ComponentType<{ className?: string }>> = {
     filter: Filter,
     aggregation: BarChart2,
     calculation: Calculator,
@@ -50,21 +58,20 @@ const TYPE_ICONS: Record<TransformSuggestion['type'], React.ComponentType<{ clas
     reshape: Grid3x3,
 }
 
-const TYPE_LABELS: Record<TransformSuggestion['type'], string> = {
-    filter: 'Фильтрация',
-    aggregation: 'Агрегация',
-    calculation: 'Вычисления',
-    sorting: 'Сортировка',
-    cleaning: 'Очистка',
-    merge: 'Объединение',
-    reshape: 'Перестройка',
+const TYPE_LABELS: Record<DocumentSuggestionTag['type'], string> = {
+    filter: 'Фокус / отбор',
+    aggregation: 'Сводка / агрегация',
+    calculation: 'Производные показатели',
+    sorting: 'Упорядочивание',
+    cleaning: 'Нормализация',
+    merge: 'Сопоставление',
+    reshape: 'Структура',
 }
 
-/** Приводит ответ API (в т.ч. legacy category) к типу панели */
-function normalizeTransformSuggestion(raw: Record<string, unknown>): TransformSuggestion {
+function normalizeDocumentSuggestion(raw: Record<string, unknown>): DocumentSuggestionTag {
     const category = String(raw.category ?? '')
     const typeRaw = String(raw.type ?? '')
-    const typeMap: Record<string, TransformSuggestion['type']> = {
+    const typeMap: Record<string, DocumentSuggestionTag['type']> = {
         filter: 'filter',
         aggregation: 'aggregation',
         aggregate: 'aggregation',
@@ -76,7 +83,7 @@ function normalizeTransformSuggestion(raw: Record<string, unknown>): TransformSu
         reshape: 'reshape',
     }
     const type =
-        (typeMap[typeRaw] || typeMap[category] || 'filter') as TransformSuggestion['type']
+        (typeMap[typeRaw] || typeMap[category] || 'filter') as DocumentSuggestionTag['type']
     const rel = raw.relevance
     const conf = raw.confidence
     const relevance =
@@ -96,7 +103,7 @@ function normalizeTransformSuggestion(raw: Record<string, unknown>): TransformSu
     }
 }
 
-const TYPE_COLORS: Record<TransformSuggestion['type'], string> = {
+const TYPE_COLORS: Record<DocumentSuggestionTag['type'], string> = {
     filter: 'bg-blue-500 text-white hover:bg-blue-600',
     aggregation: 'bg-green-500 text-white hover:bg-green-600',
     calculation: 'bg-purple-500 text-white hover:bg-purple-600',
@@ -106,28 +113,27 @@ const TYPE_COLORS: Record<TransformSuggestion['type'], string> = {
     reshape: 'bg-amber-500 text-white hover:bg-amber-600',
 }
 
-// Relevance-based badge colors (border/text, not background)
 const getRelevanceBadgeColor = (relevance: number): string => {
-    if (relevance >= 0.9) return 'border-red-500 text-red-700 bg-red-50'  // Critical
-    if (relevance >= 0.7) return 'border-orange-500 text-orange-700 bg-orange-50'  // High
-    if (relevance >= 0.5) return 'border-yellow-500 text-yellow-700 bg-yellow-50'  // Medium
-    if (relevance >= 0.3) return 'border-gray-400 text-gray-600 bg-gray-50'  // Low
-    return 'border-gray-300 text-gray-500 bg-gray-50'  // Very low
+    if (relevance >= 0.9) return 'border-red-500 text-red-700 bg-red-50'
+    if (relevance >= 0.7) return 'border-orange-500 text-orange-700 bg-orange-50'
+    if (relevance >= 0.5) return 'border-yellow-500 text-yellow-700 bg-yellow-50'
+    if (relevance >= 0.3) return 'border-gray-400 text-gray-600 bg-gray-50'
+    return 'border-gray-300 text-gray-500 bg-gray-50'
 }
 
-export const TransformSuggestionsPanel = ({
-    contentNodeId,
+export function DocumentSuggestionsPanel({
+    fileId,
+    documentPayload,
     chatHistory,
-    currentCode,
+    contextFingerprint,
     suggestionsTabActive,
     isGenerating = false,
     suggestionsRefreshKey = 0,
     onSuggestionsLoadingChange,
     onSuggestionClick,
-}: TransformSuggestionsPanelProps) => {
-    const [suggestions, setSuggestions] = useState<TransformSuggestion[]>([])
+}: DocumentSuggestionsPanelProps) {
+    const [suggestions, setSuggestions] = useState<DocumentSuggestionTag[]>([])
     const [isLoading, setIsLoading] = useState(false)
-    /** После первого успешного цикла для узла — при следующих запросах показываем «Обновление…» */
     const [loadingMode, setLoadingMode] = useState<'load' | 'refresh'>('load')
     const [error, setError] = useState<string | null>(null)
     const [hoveredSuggestion, setHoveredSuggestion] = useState<string | null>(null)
@@ -139,19 +145,12 @@ export const TransformSuggestionsPanel = ({
     const badgeRefs = useRef<{ [key: string]: HTMLDivElement | null }>({})
     const tooltipRef = useRef<HTMLDivElement | null>(null)
 
-    /** Запрос только при смене узла / кода трансформации, не при смене вкладки и не при каждом сообщении чата */
-    const contextFingerprint = useMemo(
-        () => `${contentNodeId}|${currentCode ?? ''}`,
-        [contentNodeId, currentCode]
-    )
-
     const chatHistoryRef = useRef(chatHistory)
-    const currentCodeRef = useRef(currentCode)
+    const documentPayloadRef = useRef(documentPayload)
     chatHistoryRef.current = chatHistory
-    currentCodeRef.current = currentCode
+    documentPayloadRef.current = documentPayload
 
     const lastFetchedFingerprintRef = useRef<string | null>(null)
-    /** Уже выполняется запрос для этого fingerprint — повторно не ставим в очередь (в т.ч. после смены вкладки) */
     const inFlightFingerprintRef = useRef<string | null>(null)
     const contextFingerprintRef = useRef(contextFingerprint)
     contextFingerprintRef.current = contextFingerprint
@@ -161,7 +160,7 @@ export const TransformSuggestionsPanel = ({
 
     useEffect(() => {
         hasCompletedFetchRef.current = false
-    }, [contentNodeId])
+    }, [fileId])
 
     useEffect(() => {
         if (skipExternalRefreshClearRef.current) {
@@ -176,7 +175,7 @@ export const TransformSuggestionsPanel = ({
     }, [isLoading, onSuggestionsLoadingChange])
 
     useEffect(() => {
-        if (!contentNodeId || !suggestionsTabActive) return
+        if (!fileId || !suggestionsTabActive) return
         if (lastFetchedFingerprintRef.current === contextFingerprint) return
         if (inFlightFingerprintRef.current === contextFingerprint) return
 
@@ -195,9 +194,14 @@ export const TransformSuggestionsPanel = ({
             void (async () => {
                 outstandingFetchesRef.current += 1
                 try {
-                    const response = await contentNodesAPI.analyzeTransformSuggestions(contentNodeId, {
+                    const p = documentPayloadRef.current
+                    const response = await filesAPI.analyzeDocumentSuggestions(fileId, {
                         chat_history: chatHistoryRef.current,
-                        current_code: currentCodeRef.current || null,
+                        document_text: p.document_text,
+                        document_type: p.document_type,
+                        filename: p.filename,
+                        page_count: p.page_count ?? undefined,
+                        existing_tables: p.existing_tables as Array<Record<string, unknown>>,
                     })
 
                     if (contextFingerprintRef.current !== fpLocked) {
@@ -205,29 +209,23 @@ export const TransformSuggestionsPanel = ({
                     }
 
                     const list = response.data.suggestions || []
-                    setSuggestions(list.map((s) => normalizeTransformSuggestion(s as Record<string, unknown>)))
+                    setSuggestions(list.map((s) => normalizeDocumentSuggestion(s as Record<string, unknown>)))
                     lastFetchedFingerprintRef.current = fpLocked
-                } catch (err: any) {
-                    console.error('Failed to load transform suggestions:', err)
-                    console.error('Request details:', {
-                        contentNodeId,
-                        chatHistoryLength: chatHistoryRef.current.length,
-                        hasCode: !!currentCodeRef.current,
-                    })
-
+                } catch (err: unknown) {
+                    console.error('Failed to load document suggestions:', err)
+                    const ax = err as { response?: { status?: number; data?: { detail?: string } } }
                     if (contextFingerprintRef.current !== fpLocked) {
                         return
                     }
 
-                    if (err.response?.status === 503) {
-                        const detail = err.response?.data?.detail || 'Service unavailable'
+                    if (ax.response?.status === 503) {
+                        const detail = ax.response?.data?.detail || 'Service unavailable'
                         if (detail.includes('Redis') || detail.includes('GigaChat')) {
                             setError('AI рекомендации недоступны. Проверьте подключение к Redis и GigaChat.')
                         } else {
                             setError('Сервис рекомендаций временно недоступен')
                         }
-                    } else if (err.response?.status === 404) {
-                        console.warn('Transform suggestions endpoint not implemented yet')
+                    } else if (ax.response?.status === 404) {
                         setSuggestions([])
                         lastFetchedFingerprintRef.current = fpLocked
                     } else {
@@ -255,7 +253,7 @@ export const TransformSuggestionsPanel = ({
                 setIsLoading(false)
             }
         }
-    }, [contentNodeId, contextFingerprint, suggestionsTabActive, suggestionsRefreshKey])
+    }, [fileId, contextFingerprint, suggestionsTabActive, suggestionsRefreshKey])
 
     useLayoutEffect(() => {
         if (!hoveredSuggestion || !tooltipRef.current) return
@@ -269,8 +267,8 @@ export const TransformSuggestionsPanel = ({
     if (isLoading) {
         return (
             <div className="flex items-center justify-center p-4">
-                <Loader2 className="w-4 h-4 animate-spin text-purple-600" />
-                <span className="ml-2 text-xs text-gray-600">
+                <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+                <span className="ml-2 text-xs text-muted-foreground">
                     {loadingMode === 'refresh' ? 'Обновление рекомендаций' : 'Загрузка рекомендаций'}
                 </span>
             </div>
@@ -279,8 +277,8 @@ export const TransformSuggestionsPanel = ({
 
     if (error) {
         return (
-            <div className="flex items-center justify-center p-4 text-red-600">
-                <AlertCircle className="w-4 h-4 mr-2" />
+            <div className="flex items-center justify-center p-4 text-destructive">
+                <AlertCircle className="h-4 w-4 mr-2 shrink-0" />
                 <span className="text-xs">{error}</span>
             </div>
         )
@@ -288,9 +286,9 @@ export const TransformSuggestionsPanel = ({
 
     if (suggestions.length === 0) {
         return (
-            <div className="p-4 text-center text-gray-500 text-xs">
+            <div className="p-4 text-center text-muted-foreground text-xs">
                 <Lightbulb className="w-6 h-6 mx-auto mb-1 opacity-50" />
-                <p>Нет рекомендаций для текущих данных и истории</p>
+                <p>Нет рекомендаций для текущего документа и истории</p>
                 <p className="mt-1 opacity-80">Уточните задачу во вкладке «Сообщение»</p>
             </div>
         )
@@ -298,7 +296,6 @@ export const TransformSuggestionsPanel = ({
 
     return (
         <div className={cn('p-1', isGenerating && 'opacity-60')} aria-busy={isGenerating || undefined}>
-            {/* Compact tag view with tooltips — 6×2 для двенадцати подсказок */}
             <div className="grid w-full grid-cols-6 gap-1.5">
                 {suggestions.map((suggestion, index) => {
                     const Icon = TYPE_ICONS[suggestion.type] || Lightbulb
@@ -347,11 +344,10 @@ export const TransformSuggestionsPanel = ({
                 })}
             </div>
 
-            {/* Global tooltip portal */}
             {hoveredSuggestion && tooltipLayout && createPortal(
                 <div
                     ref={tooltipRef}
-                    className="fixed w-72 bg-white border border-gray-200 rounded-lg shadow-xl p-3 z-[9999] pointer-events-none"
+                    className="fixed w-72 bg-popover border rounded-lg shadow-xl p-3 z-[9999] pointer-events-none text-popover-foreground"
                     style={{
                         top: `${tooltipLayout.top}px`,
                         left: `${tooltipLayout.left}px`,
@@ -366,10 +362,10 @@ export const TransformSuggestionsPanel = ({
                         return (
                             <>
                                 <div className="flex items-start gap-2 mb-2">
-                                    <Icon className="w-4 h-4 mt-0.5 flex-shrink-0 text-gray-600" />
+                                    <Icon className="w-4 h-4 mt-0.5 flex-shrink-0" />
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2 mb-1">
-                                            <h4 className="text-sm font-semibold text-gray-900">
+                                            <h4 className="text-sm font-semibold">
                                                 {suggestion.label}
                                             </h4>
                                             <Badge
@@ -382,39 +378,39 @@ export const TransformSuggestionsPanel = ({
                                                 {Math.round(suggestion.relevance * 100)}%
                                             </Badge>
                                         </div>
-                                        <p className="text-xs text-gray-500 mb-1">
+                                        <p className="text-xs text-muted-foreground mb-1">
                                             {TYPE_LABELS[suggestion.type]}
                                         </p>
                                     </div>
                                 </div>
 
                                 {suggestion.description && (
-                                    <p className="text-xs text-gray-700 leading-relaxed mb-2">
+                                    <p className="text-xs leading-relaxed mb-2">
                                         {suggestion.description}
                                     </p>
                                 )}
 
                                 {suggestion.reasoning && (
-                                    <div className="pt-2 border-t border-gray-100">
-                                        <p className="text-xs text-gray-500 italic">
-                                            💡 {suggestion.reasoning}
+                                    <div className="pt-2 border-t">
+                                        <p className="text-xs text-muted-foreground italic">
+                                            {suggestion.reasoning}
                                         </p>
                                     </div>
                                 )}
 
-                                <div className="pt-2 border-t border-gray-100 mt-2">
-                                    <p className="text-xs text-gray-600 font-medium">
-                                        📝 Промпт для AI:
+                                <div className="pt-2 border-t mt-2">
+                                    <p className="text-xs font-medium">
+                                        Промпт для чата:
                                     </p>
-                                    <p className="text-xs text-gray-500 mt-1 italic">
-                                        "{suggestion.prompt}"
+                                    <p className="text-xs text-muted-foreground mt-1 italic">
+                                        &quot;{suggestion.prompt}&quot;
                                     </p>
                                 </div>
 
                                 {placement === 'below' ? (
-                                    <div className="absolute -top-1 left-4 z-10 w-2 h-2 bg-white border-l border-t border-gray-200 rotate-45" />
+                                    <div className="absolute -top-1 left-4 z-10 w-2 h-2 bg-popover border-l border-t rotate-45" />
                                 ) : (
-                                    <div className="absolute -bottom-1 left-4 z-10 w-2 h-2 bg-white border-r border-b border-gray-200 rotate-45" />
+                                    <div className="absolute -bottom-1 left-4 z-10 w-2 h-2 bg-popover border-r border-b rotate-45" />
                                 )}
                             </>
                         )

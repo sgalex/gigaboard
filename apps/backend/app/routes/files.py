@@ -1,4 +1,6 @@
 """File upload routes."""
+import asyncio
+import json
 import logging
 import csv
 import io
@@ -6,7 +8,7 @@ from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
@@ -813,7 +815,16 @@ async def analyze_document_file(
     try:
         storage = get_storage()
         file_content = await storage.get(file_id=file_id, db=db)
-        
+
+        # S3 backend отдаёт URL, не байты — этот endpoint должен читать содержимое целиком
+        if isinstance(file_content, str) and (
+            file_content.startswith("http://") or file_content.startswith("https://")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Анализ документа при STORAGE_BACKEND=s3 не поддержан в этом API. Задайте STORAGE_BACKEND=database или local.",
+            )
+
         if file_content is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -832,21 +843,25 @@ async def analyze_document_file(
         filename = uploaded_file.filename if uploaded_file else "document"
         mime_type = uploaded_file.mime_type if uploaded_file else ""
         
-        # Run document extraction
-        from app.sources.document.extractor import DocumentSource, detect_document_type
-        
+        # Run document extraction (тип по сигнатуре байтов внутри extract — не подставлять
+        # document_type из MIME/имени: браузеры часто шлют неверный Content-Type для PDF).
+        from app.sources.document.extractor import DocumentSource
+
         config = {
             "file_id": file_id,
             "filename": filename,
             "mime_type": mime_type,
         }
-        doc_type = detect_document_type(config)
-        config["document_type"] = doc_type
-        
+
         extractor = DocumentSource()
         extraction = await extractor.extract(config, file_content=file_content)
-        
+
         if not extraction.success:
+            logger.warning(
+                "analyze-document failed file_id=%s detail=%s",
+                file_id,
+                extraction.error,
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=extraction.error or "Document extraction failed"
@@ -869,7 +884,7 @@ async def analyze_document_file(
         )
         
         return DocumentAnalysisResult(
-            document_type=doc_type,
+            document_type=extraction.metadata.get("document_type", "txt"),
             filename=filename,
             text=extraction.text or "",
             text_length=len(extraction.text) if extraction.text else 0,
@@ -913,6 +928,81 @@ class DocumentExtractionChatResponse(BaseModel):
     status: str = "success"
     mode: str = "document_extraction"
     agent_plan: dict | None = None
+    session_id: str | None = None
+    trace_file_path: str | None = None  # путь к JSONL в logs/multi_agent_traces/ на сервере
+    execution_time_ms: int | None = None
+
+
+class DocumentSuggestionsRequest(BaseModel):
+    """Контекст документа для рекомендаций-промптов чата извлечения (см. TransformDialog)."""
+    chat_history: list[dict] = []
+    document_text: str
+    document_type: str = "txt"
+    filename: str = "document"
+    page_count: int | None = None
+    existing_tables: list[dict] = []
+
+
+@router.post("/{file_id}/analyze-document-suggestions")
+async def analyze_document_suggestions(
+    file_id: str,
+    request: DocumentSuggestionsRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Подсказки-промпты для чата извлечения: DocumentSuggestionsController → Orchestrator V2."""
+    if not (request.document_text or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="document_text is required",
+        )
+    try:
+        from app.main import get_orchestrator
+        from app.services.controllers.document_suggestions_controller import (
+            DocumentSuggestionsController,
+        )
+
+        orchestrator = get_orchestrator()
+        if not orchestrator:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Orchestrator not initialized. Check backend logs for Redis/GigaChat connection issues.",
+            )
+
+        controller = DocumentSuggestionsController(orchestrator)
+        result = await controller.process_request(
+            user_message=f"Рекомендации для извлечения из документа (file_id={file_id})",
+            context={
+                "board_id": "",
+                "user_id": str(current_user.id),
+                "file_id": file_id,
+                "document_text": request.document_text,
+                "document_type": request.document_type,
+                "filename": request.filename,
+                "existing_tables": request.existing_tables,
+                "chat_history": request.chat_history,
+                "page_count": request.page_count,
+            },
+        )
+
+        if result.status != "success":
+            return {
+                "suggestions": [dict(s) for s in (result.suggestions or [])],
+                "fallback": True,
+            }
+
+        meta = result.metadata or {}
+        return {
+            "suggestions": [dict(s) for s in (result.suggestions or [])],
+            "fallback": bool(meta.get("fallback")),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Document suggestions failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Document suggestions failed: {str(e)}",
+        )
 
 
 @router.post("/{file_id}/extract-document-chat", response_model=DocumentExtractionChatResponse)
@@ -968,13 +1058,17 @@ async def extract_document_chat(
                 detail=result.error or "Document extraction failed"
             )
 
+        meta = result.metadata or {}
         return DocumentExtractionChatResponse(
             narrative=result.narrative or "Анализ выполнен.",
-            tables=result.metadata.get("tables", []),
-            findings=result.metadata.get("findings", []),
+            tables=meta.get("tables", []),
+            findings=meta.get("findings", []),
             status="success",
             mode=result.mode or "document_extraction",
             agent_plan=result.plan,
+            session_id=result.session_id,
+            trace_file_path=meta.get("trace_file_path"),
+            execution_time_ms=result.execution_time_ms,
         )
 
     except HTTPException:
@@ -997,3 +1091,113 @@ async def extract_document_chat(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Document extraction failed: {str(e)}"
         )
+
+
+@router.post("/{file_id}/extract-document-chat-stream")
+async def extract_document_chat_stream(
+    file_id: str,
+    request: DocumentExtractionChatRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """NDJSON-стрим прогресса мультиагента + финальный результат (как TransformDialog)."""
+    if not request.user_prompt:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="user_prompt is required",
+        )
+
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def _progress_callback(progress_payload: dict) -> None:
+        payload = progress_payload or {}
+        if payload.get("event") == "plan_update":
+            await queue.put(
+                {
+                    "type": "plan",
+                    "steps": payload.get("steps") or [],
+                    "completed_count": payload.get("completed_count") or 0,
+                    "source": payload.get("source"),
+                }
+            )
+            return
+        await queue.put({"type": "progress", **payload})
+
+    async def _run_pipeline() -> None:
+        try:
+            await queue.put({"type": "start"})
+            from app.main import get_orchestrator
+            from app.services.controllers.document_extraction_controller import (
+                DocumentExtractionController,
+            )
+
+            orchestrator = get_orchestrator()
+            if not orchestrator:
+                await queue.put(
+                    {
+                        "type": "error",
+                        "error": "Orchestrator not initialized. Check backend logs.",
+                    }
+                )
+                return
+
+            controller = DocumentExtractionController(orchestrator)
+            result = await controller.process_request(
+                user_message=request.user_prompt,
+                context={
+                    "board_id": "",
+                    "user_id": str(current_user.id),
+                    "document_text": request.document_text,
+                    "document_type": request.document_type,
+                    "filename": request.filename,
+                    "existing_tables": request.existing_tables,
+                    "chat_history": request.chat_history,
+                    "page_count": request.page_count,
+                    "_progress_callback": _progress_callback,
+                    "_enable_plan_progress": True,
+                },
+            )
+
+            if result.status != "success":
+                await queue.put(
+                    {
+                        "type": "error",
+                        "error": result.error or "Document extraction failed",
+                    }
+                )
+                return
+
+            await queue.put(
+                {
+                    "type": "result",
+                    "result": {
+                        "narrative": result.narrative or "Анализ выполнен.",
+                        "tables": result.metadata.get("tables", []),
+                        "findings": result.metadata.get("findings", []),
+                        "status": "success",
+                        "mode": result.mode or "document_extraction",
+                        "agent_plan": result.plan,
+                        "session_id": result.session_id,
+                        "trace_file_path": result.metadata.get("trace_file_path"),
+                        "execution_time_ms": result.execution_time_ms,
+                    },
+                }
+            )
+        except Exception as e:
+            logger.error(f"Document extraction stream failed: {e}", exc_info=True)
+            await queue.put({"type": "error", "error": str(e)})
+        finally:
+            await queue.put({"type": "done"})
+
+    async def _event_stream():
+        task = asyncio.create_task(_run_pipeline())
+        try:
+            while True:
+                item = await queue.get()
+                yield json.dumps(item, ensure_ascii=False, default=str) + "\n"
+                if item.get("type") == "done":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(_event_stream(), media_type="application/x-ndjson")

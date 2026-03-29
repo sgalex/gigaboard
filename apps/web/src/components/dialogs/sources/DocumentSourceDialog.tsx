@@ -10,10 +10,10 @@
  * 
  * См. docs/SOURCE_NODE_CONCEPT.md — раздел "📄 4. Document Dialog"
  */
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import {
     FileText, Upload, Check, Loader2, X, FileType, Table2,
-    AlignLeft, AlertTriangle, Send, MessageSquare,
+    AlignLeft, AlertTriangle, Send, MessageSquare, Trash2, Lightbulb, RefreshCw,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -21,13 +21,28 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { SourceType } from '@/types'
+import { SourceNode, SourceType } from '@/types'
 import { notify } from '@/store/notificationStore'
 import { filesAPI } from '@/services/api'
 import { cn } from '@/lib/utils'
+import { MultiAgentProgressBlock } from '@/components/shared/MultiAgentProgressBlock'
+import {
+    type ProgressStep as SharedProgressStep,
+    type ProgressMeta as SharedProgressMeta,
+    mergePlanSteps,
+    applyProgressToSteps,
+    metaFromSteps,
+    markRunningAsCompleted,
+    markLastRunningAsFailed,
+} from '@/lib/multiAgentProgress'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { BaseSourceDialog } from './BaseSourceDialog'
 import { useSourceDialog } from './useSourceDialog'
 import { SourceDialogProps } from './types'
+import { DocumentSuggestionsPanel } from './DocumentSuggestionsPanel'
+import { logDocumentExtractionMultiAgentTrace } from '@/lib/documentExtractionTrace'
+import { rowToCellStrings } from '@/lib/tablePreview'
+import { getErrorMessage } from '@/lib/errors'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -71,11 +86,94 @@ const DOC_TYPE_COLORS: Record<string, string> = {
     txt: 'text-gray-500',
 }
 
-const QUICK_PROMPTS = [
-    'Извлеки все таблицы с финансовыми показателями',
-    'Найди ключевые KPI и собери их в одну таблицу',
-    'Извлеки структуру: раздел, метрика, значение, период',
-]
+/** Лимит длины цепочки для API (TransformDialog не режет на клиенте — здесь ограничиваем размер тела запроса). */
+const AGENT_CHAT_HISTORY_LIMIT = 20
+
+/**
+ * Нормализация ролей и обрезка хвоста — после сборки fullChatHistory как в TransformDialog.
+ * См. `TransformDialog` → handleSendMessage: `fullChatHistory = [...chatMessages, currentUser]`.
+ */
+function buildAgentChatHistory(
+    messages: { role: string; content: string }[]
+): { role: string; content: string }[] {
+    return messages
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({ role: m.role, content: m.content }))
+        .slice(-AGENT_CHAT_HISTORY_LIMIT)
+}
+
+function buildAnalysisFromDocumentSource(existing: SourceNode): DocumentAnalysisResult | null {
+    const cfg = existing.config || {}
+    const content = existing.content || {}
+    const text = typeof content.text === 'string' ? content.text : ''
+    const fid = cfg.file_id
+    if (!fid) return null
+
+    const rawTables = Array.isArray(content.tables) ? content.tables : []
+    const tables: DocumentAnalysisResult['tables'] = rawTables.map((t, idx) => {
+        const columns = (t.columns || []).map((c: { name?: string; type?: string }) => ({
+            name: typeof c === 'object' && c ? String(c.name || '') : String(c),
+            type: typeof c === 'object' && c ? String(c.type || 'string') : 'string',
+        }))
+        const rows = Array.isArray(t.rows) ? t.rows : []
+        const row_count = typeof t.row_count === 'number' ? t.row_count : rows.length
+        return {
+            name: t.name || `table_${idx + 1}`,
+            columns,
+            rows,
+            row_count,
+        }
+    })
+    const total_rows = tables.reduce(
+        (acc, t) => acc + (t.row_count || t.rows?.length || 0),
+        0
+    )
+
+    return {
+        document_type: String(cfg.document_type || 'pdf'),
+        filename: String(cfg.filename || existing.metadata?.name || 'document'),
+        text,
+        text_length: text.length,
+        page_count: cfg.page_count ?? null,
+        tables,
+        table_count: tables.length,
+        total_rows,
+        is_scanned: !!cfg.is_scanned,
+        file_id: String(fid),
+    }
+}
+
+function buildHydratedChatMessages(
+    cfg: Record<string, unknown>,
+    analysis: DocumentAnalysisResult
+): ChatMessage[] {
+    const summaryMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: analysis.is_scanned
+            ? `📄 **${analysis.filename}** — скан-документ, текстовый слой не найден.\n\nOCR через GigaChat будет доступен в следующих версиях.`
+            : `📄 Документ **${analysis.filename}** загружен из источника:\n\n` +
+              `- Тип: ${DOC_TYPE_LABELS[analysis.document_type] || analysis.document_type}\n` +
+              (analysis.page_count ? `- Страниц: ${analysis.page_count}\n` : '') +
+              `- Текст: ${analysis.text_length.toLocaleString()} символов\n` +
+              `- Таблиц: ${analysis.table_count}` +
+              (analysis.total_rows > 0 ? ` (${analysis.total_rows} строк)` : '') +
+              `\n\nОпишите, какие данные извлечь из документа.`,
+        contentType: 'markdown',
+        timestamp: new Date(),
+    }
+    const out: ChatMessage[] = [summaryMsg]
+    const ep = cfg.extraction_prompt
+    if (typeof ep === 'string' && ep.trim()) {
+        out.push({
+            id: crypto.randomUUID(),
+            role: 'user',
+            content: ep.trim(),
+            timestamp: new Date(),
+        })
+    }
+    return out
+}
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
@@ -89,6 +187,8 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
     const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
     const [inputValue, setInputValue] = useState('')
     const [isGenerating, setIsGenerating] = useState(false)
+    const [progressSteps, setProgressSteps] = useState<SharedProgressStep[]>([])
+    const [progressMeta, setProgressMeta] = useState<SharedProgressMeta>({ current: 0, total: null })
 
     // ── Results state (right panel, updated by AI chat) ───────────
     const [extractedTables, setExtractedTables] = useState<DocumentAnalysisResult['tables']>([])
@@ -96,11 +196,31 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
     const [activeTableIdx, setActiveTableIdx] = useState(0)
     const [showFullText, setShowFullText] = useState(false)
 
+    const [composerTab, setComposerTab] = useState<'message' | 'suggestions'>('message')
+    const [composerSuggestionsRefreshKey, setComposerSuggestionsRefreshKey] = useState(0)
+    const [composerSuggestionsLoading, setComposerSuggestionsLoading] = useState(false)
+
     // ── Refs ──────────────────────────────────────────────────────
     const messagesEndRef = useRef<HTMLDivElement>(null)
     const textareaRef = useRef<HTMLTextAreaElement>(null)
 
     // ── Source dialog hook ────────────────────────────────────────
+    const resetForm = useCallback(() => {
+        setFile(null)
+        setAnalysis(null)
+        setChatMessages([])
+        setInputValue('')
+        setExtractedTables([])
+        setProgressSteps([])
+        setProgressMeta({ current: 0, total: null })
+        setActiveTab('text')
+        setActiveTableIdx(0)
+        setShowFullText(false)
+        setComposerTab('message')
+        setComposerSuggestionsRefreshKey(0)
+        setComposerSuggestionsLoading(false)
+    }, [])
+
     const { isLoading, create, update } = useSourceDialog({
         sourceType: SourceType.DOCUMENT,
         onClose: () => {
@@ -110,25 +230,74 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
         position: initialPosition,
     })
 
+    const isEditMode = mode === 'edit' && !!existingSource
+    const existingSourceRef = useRef<SourceNode | undefined>(undefined)
+    useEffect(() => {
+        existingSourceRef.current = existingSource
+    }, [existingSource])
+
+    useEffect(() => {
+        if (!open) {
+            resetForm()
+            return
+        }
+        if (!isEditMode) return
+        const src = existingSourceRef.current
+        if (!src) return
+        const built = buildAnalysisFromDocumentSource(src)
+        if (!built) {
+            notify.info('Не удалось восстановить документ: нет file_id в конфигурации источника.')
+            return
+        }
+        setAnalysis(built)
+        setExtractedTables(built.tables)
+        setChatMessages(
+            buildHydratedChatMessages(
+                (src.config || {}) as Record<string, unknown>,
+                built
+            )
+        )
+        setInputValue('')
+        setProgressSteps([])
+        setProgressMeta({ current: 0, total: null })
+        setActiveTab(built.table_count > 0 ? 'tables' : 'text')
+        setActiveTableIdx(0)
+        setShowFullText(false)
+        setComposerTab('message')
+        setComposerSuggestionsRefreshKey(0)
+        setComposerSuggestionsLoading(false)
+    }, [open, isEditMode, existingSource?.id, resetForm])
+
+    const chatHistoryForSuggestions = useMemo(
+        () => chatMessages.map((msg) => ({ role: msg.role, content: msg.content })),
+        [chatMessages]
+    )
+
+    const documentSuggestionsFingerprint = useMemo(() => {
+        if (!analysis?.file_id) return ''
+        const sig = extractedTables.map((t) => `${t.name}:${t.row_count ?? 0}`).join('|')
+        return `${analysis.file_id}|${analysis.text_length}|${sig}`
+    }, [analysis?.file_id, analysis?.text_length, extractedTables])
+
+    const documentSuggestionsPayload = useMemo(() => {
+        if (!analysis) return null
+        return {
+            document_text: analysis.text,
+            document_type: analysis.document_type,
+            filename: analysis.filename,
+            page_count: analysis.page_count,
+            existing_tables: extractedTables as unknown as Array<Record<string, unknown>>,
+        }
+    }, [analysis, extractedTables])
+
     // ── Auto-scroll chat ─────────────────────────────────────────
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, [chatMessages, isGenerating])
+    }, [chatMessages, isGenerating, progressSteps.length, progressMeta.current])
 
     // ═══════════════════════════════════════════════════════════════
     //  File Upload & Analysis
     // ═══════════════════════════════════════════════════════════════
-
-    const resetForm = () => {
-        setFile(null)
-        setAnalysis(null)
-        setChatMessages([])
-        setInputValue('')
-        setExtractedTables([])
-        setActiveTab('text')
-        setActiveTableIdx(0)
-        setShowFullText(false)
-    }
 
     const handleFileDrop = useCallback((e: React.DragEvent) => {
         e.preventDefault()
@@ -146,9 +315,14 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
 
     const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const selectedFile = e.target.files?.[0]
-        if (selectedFile) {
+        if (!selectedFile) return
+        const ext = selectedFile.name.split('.').pop()?.toLowerCase()
+        if (ext && ['pdf', 'docx', 'txt', 'md'].includes(ext)) {
             setFile(selectedFile)
             analyzeFile(selectedFile)
+        } else {
+            notify.error('Поддерживаются только PDF, DOCX и TXT')
+            e.target.value = ''
         }
     }, [])
 
@@ -204,7 +378,7 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                 : `Извлечено: ${result.text_length.toLocaleString()} символов, ${result.table_count} таблиц`
             notify.success(msg)
         } catch (error) {
-            notify.error('Ошибка анализа документа')
+            notify.error(getErrorMessage(error, 'Ошибка анализа документа'))
             console.error('Document analysis error:', error)
         } finally {
             setIsAnalyzing(false)
@@ -229,28 +403,110 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
         setChatMessages(prev => [...prev, userMessage])
         setInputValue('')
         setIsGenerating(true)
+        setProgressSteps([])
+        setProgressMeta({ current: 0, total: null })
 
         try {
-            // 2. Build chat_history for API
+            // Как в TransformDialog: полная цепочка включая текущее user-сообщение, затем нормализация/лимит.
             const fullChatHistory = [
-                ...chatMessages.map(msg => ({ role: msg.role, content: msg.content })),
+                ...chatMessages.map((msg) => ({
+                    role: msg.role,
+                    content: msg.content,
+                })),
                 { role: userMessage.role, content: userMessage.content },
             ]
+            const chatHistoryForAgent = buildAgentChatHistory(fullChatHistory)
 
-            // 3. Call extraction chat API
-            const response = await filesAPI.extractDocumentChat(analysis.file_id, {
-                user_prompt: userMessage.content,
-                document_text: analysis.text,
-                document_type: analysis.document_type,
-                filename: analysis.filename,
-                page_count: analysis.page_count,
-                existing_tables: extractedTables,
-                chat_history: fullChatHistory,
-            })
+            let data: {
+                narrative?: string
+                tables?: DocumentAnalysisResult['tables']
+                session_id?: string
+                trace_file_path?: string
+                execution_time_ms?: number
+            } | null = null
+            let streamError: string | null = null
 
-            const data = response.data
+            await filesAPI.extractDocumentChatStream(
+                analysis.file_id,
+                {
+                    user_prompt: userMessage.content,
+                    document_text: analysis.text,
+                    document_type: analysis.document_type,
+                    filename: analysis.filename,
+                    page_count: analysis.page_count,
+                    existing_tables: extractedTables,
+                    chat_history: chatHistoryForAgent,
+                },
+                {
+                    onPlanUpdate: (steps, meta) => {
+                        setProgressSteps((prev) => {
+                            const next = mergePlanSteps(prev, steps, meta?.completedCount, 'document')
+                            setProgressMeta(metaFromSteps(next))
+                            return next
+                        })
+                    },
+                    onProgress: (_agentLabel, task, meta) => {
+                        setProgressSteps((prev) => {
+                            const next = applyProgressToSteps(
+                                prev,
+                                task,
+                                meta?.stepIndex,
+                                'document'
+                            )
+                            let metaNext = metaFromSteps(next)
+                            if (
+                                typeof meta?.totalSteps === 'number' &&
+                                meta.totalSteps > 0 &&
+                                metaNext.total != null
+                            ) {
+                                metaNext = {
+                                    ...metaNext,
+                                    total: Math.max(metaNext.total, meta.totalSteps),
+                                }
+                            }
+                            setProgressMeta(metaNext)
+                            return next
+                        })
+                    },
+                    onResult: (result) => {
+                        data = result as typeof data
+                        const r = result as Record<string, unknown>
+                        logDocumentExtractionMultiAgentTrace({
+                            fileId: analysis.file_id,
+                            sessionId: typeof r.session_id === 'string' ? r.session_id : null,
+                            traceFilePath:
+                                typeof r.trace_file_path === 'string' ? r.trace_file_path : null,
+                            executionTimeMs:
+                                typeof r.execution_time_ms === 'number'
+                                    ? r.execution_time_ms
+                                    : null,
+                            tableCount: Array.isArray(r.tables) ? r.tables.length : 0,
+                            narrativePreview:
+                                typeof r.narrative === 'string'
+                                    ? r.narrative.slice(0, 280)
+                                    : undefined,
+                        })
+                    },
+                    onError: (errorText) => {
+                        streamError = errorText
+                    },
+                }
+            )
+
+            if (streamError) {
+                throw new Error(streamError)
+            }
+            if (!data) {
+                throw new Error('Пустой ответ извлечения')
+            }
 
             // 4. Add AI response
+            setProgressSteps((prev) => {
+                const next = markRunningAsCompleted(prev)
+                setProgressMeta(metaFromSteps(next))
+                return next
+            })
+
             const aiMessage: ChatMessage = {
                 id: crypto.randomUUID(),
                 role: 'assistant',
@@ -263,7 +519,6 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
             // 5. Update extracted tables if AI returned new ones
             if (data.tables && data.tables.length > 0) {
                 setExtractedTables(prev => {
-                    // Merge: replace by name, add new
                     const merged = [...prev]
                     for (const newTable of data.tables) {
                         const existingIdx = merged.findIndex(t => t.name === newTable.name)
@@ -273,20 +528,19 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                             merged.push(newTable as DocumentAnalysisResult['tables'][number])
                         }
                     }
+                    const firstNewName = data.tables[0]?.name
+                    const idx = firstNewName
+                        ? merged.findIndex(t => t.name === firstNewName)
+                        : -1
+                    if (idx >= 0) {
+                        queueMicrotask(() => setActiveTableIdx(idx))
+                    }
                     return merged
                 })
                 setActiveTab('tables')
-                setActiveTableIdx(prev => {
-                    // Select the first new table
-                    const firstNewName = data.tables[0]?.name
-                    if (firstNewName) {
-                        const idx = extractedTables.findIndex(t => t.name === firstNewName)
-                        return idx >= 0 ? idx : extractedTables.length
-                    }
-                    return prev
-                })
             }
         } catch (error: any) {
+            setProgressSteps((prev) => markLastRunningAsFailed(prev))
             const errorText = error?.response?.data?.detail || error?.message || 'Неизвестная ошибка'
             const errorMessage: ChatMessage = {
                 id: crypto.randomUUID(),
@@ -299,6 +553,18 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
             setIsGenerating(false)
         }
     }
+
+    const handleClearChatHistory = () => {
+        if (isGenerating || isAnalyzing) return
+        // Оставляем первое сообщение ассистента (итог анализа файла), сбрасываем диалог.
+        setChatMessages((prev) => (prev.length > 0 ? [prev[0]] : []))
+    }
+
+    const canClearChatHistory =
+        !!analysis &&
+        !isGenerating &&
+        !isAnalyzing &&
+        chatMessages.some((m) => m.role === 'user')
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -332,7 +598,11 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
             }
 
             const metadata = {
-                name: file?.name?.replace(/\.(pdf|docx|txt|md)$/i, '') || analysis.filename,
+                name:
+                    (isEditMode && existingSource?.metadata?.name) ||
+                    file?.name?.replace(/\.(pdf|docx|txt|md)$/i, '') ||
+                    analysis.filename.replace(/\.(pdf|docx|txt|md)$/i, '') ||
+                    analysis.filename,
             }
 
             const normalizedTables = extractedTables.map((table, idx) => ({
@@ -348,7 +618,7 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
             }
 
             if (mode === 'edit' && existingSource) {
-                await update(existingSource.id, config, metadata)
+                await update(existingSource.id, config, metadata, sourceData)
             } else {
                 await create(config, metadata, sourceData)
                 notify.success(`Источник «${file?.name}» создан`)
@@ -378,7 +648,15 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
     }
 
     const isValid = !!analysis
-    const dialogTitle = `Документ — ${file?.name || 'загрузите файл'}`
+    const displayFileName = file?.name || analysis?.filename || 'загрузите файл'
+    const dialogTitle =
+        isEditMode && existingSource?.metadata?.name
+            ? `Документ — ${existingSource.metadata.name}`
+            : `Документ — ${displayFileName}`
+    const hasDocumentLoaded = !!(file || analysis)
+    /** Пустой чат без активных процессов — без overflow-y, иначе h-full + якорь дают лишний скролл */
+    const chatNeedsMessageScroll =
+        chatMessages.length > 0 || isAnalyzing || isGenerating
 
     // ═══════════════════════════════════════════════════════════════
     //  Render
@@ -396,14 +674,14 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
             onSubmit={handleSubmit}
             submitLabel={mode === 'edit' ? 'Сохранить' : '📄 Создать источник'}
             className="w-[calc(100vw-2rem)] max-w-[calc(100vw-2rem)] h-[calc(100vh-2rem)]"
-            contentClassName="overflow-hidden"
+            contentClassName="overflow-hidden !py-0 min-h-0"
         >
             <div className="flex flex-1 min-h-0">
                 {/* ═══ LEFT PANEL (40%) — Upload + Chat ═══ */}
                 <div className="w-[40%] border-r flex flex-col min-h-0">
                     {/* ── File Upload / File Info ── */}
                     <div className="p-3 border-b shrink-0">
-                        {!file && mode === 'create' ? (
+                        {mode === 'create' && !hasDocumentLoaded ? (
                             <div
                                 onDragOver={(e) => e.preventDefault()}
                                 onDrop={handleFileDrop}
@@ -421,13 +699,13 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                                     className="hidden"
                                 />
                             </div>
-                        ) : file ? (
+                        ) : hasDocumentLoaded ? (
                             <div className="flex items-center gap-2">
                                 <FileText className={cn('h-4 w-4', analysis ? DOC_TYPE_COLORS[analysis.document_type] || 'text-blue-500' : 'text-blue-500')} />
                                 <div className="flex-1 min-w-0">
-                                    <p className="text-sm font-medium truncate">{file.name}</p>
+                                    <p className="text-sm font-medium truncate">{file?.name || analysis?.filename}</p>
                                     <p className="text-xs text-muted-foreground">
-                                        {(file.size / 1024).toFixed(1)} KB
+                                        {file ? `${(file.size / 1024).toFixed(1)} KB` : 'Файл из источника'}
                                         {analysis && ` · ${DOC_TYPE_LABELS[analysis.document_type] || analysis.document_type}`}
                                         {analysis?.page_count != null && ` · ${analysis.page_count} стр.`}
                                         {analysis && ` · ${analysis.text_length.toLocaleString()} символов`}
@@ -458,14 +736,34 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                         )}
                     </div>
 
-                    <div className="px-3 py-2 bg-muted/40 text-xs text-muted-foreground border-b shrink-0">
-                        Опишите, какие данные нужно извлечь из документа
+                    <div className="px-3 py-1.5 bg-muted/40 text-xs text-muted-foreground border-b shrink-0 flex items-center justify-between gap-2">
+                        <span>Опишите, какие данные нужно извлечь из документа</span>
+                        {canClearChatHistory && (
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive shrink-0"
+                                onClick={handleClearChatHistory}
+                                title="Очистить историю диалога"
+                            >
+                                <Trash2 className="w-3 h-3 mr-1" />
+                                Очистить
+                            </Button>
+                        )}
                     </div>
 
                     {/* ── Chat Messages ── */}
-                    <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-2 min-h-0">
-                        {chatMessages.length === 0 && !isAnalyzing ? (
-                            <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground">
+                    <div
+                        className={cn(
+                            'flex-1 min-h-0 px-3 pb-3 flex flex-col',
+                            chatNeedsMessageScroll
+                                ? 'overflow-y-auto space-y-2'
+                                : 'overflow-hidden justify-center py-4'
+                        )}
+                    >
+                        {!chatNeedsMessageScroll ? (
+                            <div className="flex flex-col items-center justify-center text-center text-muted-foreground shrink-0">
                                 <MessageSquare className="w-10 h-10 mb-3 text-blue-500/30" />
                                 <p className="text-sm">Загрузите документ, чтобы начать</p>
                                 <p className="text-xs mt-1 text-muted-foreground/70">
@@ -473,90 +771,157 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                                 </p>
                             </div>
                         ) : (
-                            <div className="space-y-2 pt-2">
-                                {chatMessages.map((msg) => (
-                                    <div
-                                        key={msg.id}
-                                        className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}
-                                    >
-                                        <div className={cn(
-                                            'max-w-[90%] rounded-lg px-3 py-2 text-sm',
-                                            msg.role === 'user'
-                                                ? 'bg-primary/15'
-                                                : 'bg-muted'
-                                        )}>
-                                            {renderMessageContent(msg)}
+                            <>
+                                <div className="space-y-2 pt-2">
+                                    {chatMessages.map((msg) => (
+                                        <div
+                                            key={msg.id}
+                                            className={cn(
+                                                'flex',
+                                                msg.role === 'user' ? 'justify-end' : 'justify-start'
+                                            )}
+                                        >
+                                            <div
+                                                className={cn(
+                                                    'max-w-[90%] rounded-lg px-3 py-2 text-sm',
+                                                    msg.role === 'user'
+                                                        ? 'bg-primary/15'
+                                                        : 'bg-muted'
+                                                )}
+                                            >
+                                                {renderMessageContent(msg)}
+                                            </div>
                                         </div>
+                                    ))}
+                                </div>
+
+                                {isAnalyzing && (
+                                    <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                        Извлечение текста и таблиц из документа...
                                     </div>
-                                ))}
-                            </div>
-                        )}
+                                )}
 
-                        {/* Analyzing state */}
-                        {isAnalyzing && (
-                            <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                                Извлечение текста и таблиц из документа...
-                            </div>
-                        )}
+                                {isGenerating && (
+                                    <MultiAgentProgressBlock
+                                        runningText="AI извлекает данные из документа..."
+                                        progressMeta={progressMeta}
+                                        progressSteps={progressSteps}
+                                        variant="blue"
+                                    />
+                                )}
 
-                        {/* Generating state */}
-                        {isGenerating && (
-                            <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                                AI анализирует документ...
-                            </div>
+                                <div ref={messagesEndRef} />
+                            </>
                         )}
-
-                        <div ref={messagesEndRef} />
                     </div>
 
-                    {/* ── Chat Input ── */}
-                    <div className="p-2 border-t shrink-0">
-                        {analysis && !isGenerating && (
-                            <div className="mb-2 flex flex-wrap gap-1.5">
-                                {QUICK_PROMPTS.map((prompt) => (
-                                    <Button
-                                        key={prompt}
-                                        type="button"
-                                        variant="outline"
-                                        size="sm"
-                                        className="h-7 text-xs"
-                                        onClick={() => handleSendMessage(prompt)}
+                    {/* ── Сообщение / рекомендации (как TransformDialog) ── */}
+                    <div className="border-t flex flex-col shrink-0 min-h-0">
+                        <Tabs
+                            value={composerTab}
+                            onValueChange={(v) => setComposerTab(v as 'message' | 'suggestions')}
+                            className="flex flex-col gap-0 outline-none focus-visible:outline-none"
+                        >
+                            <TabsList className="mx-2 mt-2 h-8 w-[calc(100%-1rem)] grid grid-cols-2 shrink-0 gap-1 p-1 items-stretch">
+                                <TabsTrigger value="message" className="text-xs gap-1 px-2 h-full min-h-0">
+                                    <MessageSquare className="h-3 w-3 shrink-0" />
+                                    Сообщение
+                                </TabsTrigger>
+                                <div
+                                    className={cn(
+                                        'flex min-h-0 min-w-0 h-full rounded-sm overflow-hidden',
+                                        composerTab === 'suggestions' &&
+                                            'bg-background text-foreground shadow-sm'
+                                    )}
+                                >
+                                    <TabsTrigger
+                                        value="suggestions"
+                                        className="text-xs gap-1 px-2 h-full min-w-0 flex-1 rounded-none shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+                                        disabled={!analysis}
                                     >
-                                        {prompt}
-                                    </Button>
-                                ))}
-                            </div>
-                        )}
-                        <div className="flex gap-2 items-end">
-                            <Textarea
-                                ref={textareaRef}
-                                value={inputValue}
-                                onChange={(e) => setInputValue(e.target.value)}
-                                onKeyDown={handleKeyDown}
-                                placeholder={
-                                    !analysis
-                                        ? 'Сначала загрузите документ...'
-                                        : 'Опишите, какие данные извлечь...'
-                                }
-                                className="min-h-[44px] max-h-[100px] resize-none"
-                                disabled={!analysis || isGenerating || isAnalyzing}
-                                rows={1}
-                            />
-                            <Button
-                                onClick={() => handleSendMessage()}
-                                disabled={!inputValue.trim() || isGenerating || !analysis}
-                                size="icon"
-                                className="h-[44px] w-[44px] shrink-0"
+                                        <Lightbulb className="h-3 w-3 shrink-0" />
+                                        <span className="truncate">Рекомендации</span>
+                                    </TabsTrigger>
+                                    <button
+                                        type="button"
+                                        className={cn(
+                                            'inline-flex items-center justify-center w-7 shrink-0 rounded-none border-l border-border/60',
+                                            'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+                                            'disabled:pointer-events-none disabled:opacity-40',
+                                            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1'
+                                        )}
+                                        disabled={
+                                            composerTab !== 'suggestions' ||
+                                            !analysis ||
+                                            isGenerating ||
+                                            isAnalyzing ||
+                                            composerSuggestionsLoading
+                                        }
+                                        onClick={() => setComposerSuggestionsRefreshKey((k) => k + 1)}
+                                        title="Обновить рекомендации"
+                                        aria-label="Обновить рекомендации"
+                                    >
+                                        <RefreshCw className="h-3.5 w-3.5" />
+                                    </button>
+                                </div>
+                            </TabsList>
+                            <TabsContent
+                                value="message"
+                                className="mt-0 p-2 pt-1 m-0 border-0 outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=inactive]:hidden"
                             >
-                                {isGenerating ? (
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                ) : (
-                                    <Send className="w-4 h-4" />
+                                <div className="flex gap-2 items-end">
+                                    <Textarea
+                                        ref={textareaRef}
+                                        value={inputValue}
+                                        onChange={(e) => setInputValue(e.target.value)}
+                                        onKeyDown={handleKeyDown}
+                                        placeholder={
+                                            !analysis
+                                                ? 'Сначала загрузите документ...'
+                                                : 'Опишите, какие данные извлечь...'
+                                        }
+                                        className="min-h-[44px] max-h-[100px] resize-none"
+                                        disabled={!analysis || isGenerating || isAnalyzing}
+                                        rows={1}
+                                    />
+                                    <Button
+                                        onClick={() => handleSendMessage()}
+                                        disabled={!inputValue.trim() || isGenerating || !analysis}
+                                        size="icon"
+                                        className="h-[44px] w-[44px] shrink-0"
+                                    >
+                                        {isGenerating ? (
+                                            <Loader2 className="w-4 h-4 animate-spin" />
+                                        ) : (
+                                            <Send className="w-4 h-4" />
+                                        )}
+                                    </Button>
+                                </div>
+                            </TabsContent>
+                            <TabsContent
+                                value="suggestions"
+                                forceMount
+                                className="mt-0 m-0 p-2 pt-1 flex-none h-fit min-h-0 max-h-[min(36vh,260px)] overflow-y-auto border-0 outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=inactive]:hidden"
+                            >
+                                {analysis && documentSuggestionsPayload && (
+                                    <DocumentSuggestionsPanel
+                                        fileId={analysis.file_id}
+                                        documentPayload={documentSuggestionsPayload}
+                                        chatHistory={chatHistoryForSuggestions}
+                                        contextFingerprint={documentSuggestionsFingerprint}
+                                        suggestionsTabActive={composerTab === 'suggestions'}
+                                        isGenerating={isGenerating || isAnalyzing}
+                                        suggestionsRefreshKey={composerSuggestionsRefreshKey}
+                                        onSuggestionsLoadingChange={setComposerSuggestionsLoading}
+                                        onSuggestionClick={(prompt) => {
+                                            handleSendMessage(prompt)
+                                            setComposerTab('message')
+                                        }}
+                                    />
                                 )}
-                            </Button>
-                        </div>
+                            </TabsContent>
+                        </Tabs>
                     </div>
                 </div>
 
@@ -667,18 +1032,21 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                                                 )}
 
                                                 {/* Active table preview */}
-                                                {extractedTables[activeTableIdx] && (
+                                                {extractedTables[activeTableIdx] && (() => {
+                                                    const activeTable = extractedTables[activeTableIdx]
+                                                    const colNames = activeTable.columns.map((c) => c.name)
+                                                    return (
                                                     <div className="flex-1 flex flex-col min-h-0">
                                                         <div className="p-3 border-b bg-muted/50 shrink-0">
                                                             <h4 className="text-sm font-medium">
-                                                                {extractedTables[activeTableIdx].name}
+                                                                {activeTable.name}
                                                             </h4>
                                                             <p className="text-xs text-muted-foreground">
-                                                                {extractedTables[activeTableIdx].columns.length} столбцов
+                                                                {activeTable.columns.length} столбцов
                                                                 {' · '}
-                                                                {extractedTables[activeTableIdx].row_count || extractedTables[activeTableIdx].rows?.length || 0} строк
-                                                                {extractedTables[activeTableIdx].rows?.length < (extractedTables[activeTableIdx].row_count || 0) && (
-                                                                    <> (показано {extractedTables[activeTableIdx].rows.length})</>
+                                                                {activeTable.row_count || activeTable.rows?.length || 0} строк
+                                                                {activeTable.rows?.length < (activeTable.row_count || 0) && (
+                                                                    <> (показано {activeTable.rows.length})</>
                                                                 )}
                                                             </p>
                                                         </div>
@@ -686,7 +1054,7 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                                                             <table className="w-full text-xs">
                                                                 <thead className="bg-muted/50 sticky top-0">
                                                                     <tr>
-                                                                        {extractedTables[activeTableIdx].columns.map((col, i) => (
+                                                                        {activeTable.columns.map((col, i) => (
                                                                             <th key={i} className="p-2 text-left font-medium border-b whitespace-nowrap">
                                                                                 {col.name}
                                                                                 <span className="ml-1 text-muted-foreground font-normal">
@@ -697,20 +1065,24 @@ export function DocumentSourceDialog({ open, onOpenChange, initialPosition, exis
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody>
-                                                                    {extractedTables[activeTableIdx].rows.map((row, rowIdx) => (
-                                                                        <tr key={rowIdx} className="border-b hover:bg-muted/30">
-                                                                            {extractedTables[activeTableIdx].columns.map((col, colIdx) => (
-                                                                                <td key={colIdx} className="p-2 truncate max-w-[200px]">
-                                                                                    {row[col.name] ?? ''}
-                                                                                </td>
-                                                                            ))}
-                                                                        </tr>
-                                                                    ))}
+                                                                    {activeTable.rows.map((row, rowIdx) => {
+                                                                        const cells = rowToCellStrings(row, colNames)
+                                                                        return (
+                                                                            <tr key={rowIdx} className="border-b hover:bg-muted/30">
+                                                                                {cells.map((cell, colIdx) => (
+                                                                                    <td key={colIdx} className="p-2 truncate max-w-[200px]">
+                                                                                        {cell}
+                                                                                    </td>
+                                                                                ))}
+                                                                            </tr>
+                                                                        )
+                                                                    })}
                                                                 </tbody>
                                                             </table>
                                                         </div>
                                                     </div>
-                                                )}
+                                                    )
+                                                })()}
                                             </>
                                         )}
                                     </div>

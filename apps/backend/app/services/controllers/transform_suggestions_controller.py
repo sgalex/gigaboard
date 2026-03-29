@@ -26,6 +26,10 @@ from .base_controller import BaseController, ControllerResult
 
 logger = logging.getLogger("controller.transform_suggestions")
 
+# До CANDIDATE_POOL идей отдаём в LLM/оркестратор; клиенту — top DISPLAY_TOP по relevance
+SUGGESTION_CANDIDATE_POOL = 20
+SUGGESTION_DISPLAY_TOP = 12
+
 # Фоллбэк-подсказки (если AI недоступен)
 FALLBACK_SUGGESTIONS: List[Dict[str, Any]] = [
     {
@@ -144,8 +148,10 @@ class TransformSuggestionsController(BaseController):
                 "input_schemas": list[dict],  # [{name, columns, content_text, ...}]
                 "existing_code": str | None,
                 "chat_history": list[dict],
-                "max_suggestions": int,
             }
+
+        Размер пула для LLM и число подсказок в ответе API — константы
+        ``SUGGESTION_CANDIDATE_POOL`` и ``SUGGESTION_DISPLAY_TOP``.
 
         Returns:
             ControllerResult с suggestions list.
@@ -158,7 +164,6 @@ class TransformSuggestionsController(BaseController):
         input_schemas = ctx.get("input_schemas", [])
         existing_code = ctx.get("existing_code")
         chat_history = ctx.get("chat_history", [])
-        max_suggestions = ctx.get("max_suggestions", 6)  # Show top 6 from 10 generated
 
         # Определить режим
         mode = "improve" if existing_code else "new"
@@ -202,7 +207,7 @@ class TransformSuggestionsController(BaseController):
             "input_data_preview": input_data_preview,
             "existing_code": existing_code,
             "chat_history": chat_history,
-            "max_suggestions": max_suggestions,
+            "max_suggestions": SUGGESTION_CANDIDATE_POOL,
             "keep_tabular_context_in_prompt": True,
         }
         if primary_content_node_id:
@@ -275,7 +280,7 @@ class TransformSuggestionsController(BaseController):
             return self._fallback_result(start_time)
 
         # Форматировать в suggestions для UI
-        suggestions = self._format_suggestions(findings, max_suggestions)
+        suggestions = self._format_suggestions(findings, SUGGESTION_DISPLAY_TOP)
 
         return ControllerResult(
             status="success",
@@ -334,13 +339,17 @@ class TransformSuggestionsController(BaseController):
                 request += f"  {i}. [{role}]: {content}\n"
 
         request += (
-            "\n🎯 ЗАДАЧА: Проанализируй данные и предложи 10 разнообразных вариантов ТРАНСФОРМАЦИИ:\n"
+            "\n🎯 ЗАДАЧА: Проанализируй данные и предложи до 20 разнообразных вариантов ТРАНСФОРМАЦИИ "
+            "(минимум 12, если данных достаточно):\n"
             "  • filter — фильтрация данных (отбор строк)\n"
             "  • aggregation — группировка и агрегация (сумма, среднее, COUNT)\n"
             "  • calculation — вычисляемые столбцы (новые колонки, формулы)\n"
             "  • sorting — сортировка и ранжирование (TOP N, RANK)\n"
             "  • cleaning — очистка данных (NULL, дубликаты)\n"
-            "  • merge — объединение таблиц (JOIN)\n"
+            "  • merge — объединение таблиц (JOIN); для связей В ПЕРВУЮ ОЧЕРЕДЬ используй суррогатные ключи из источников: "
+            "GUID/UUID и столбцы с суффиксом _id; учитывай имена полей как подсказку: например company_id к таблице company, "
+            "product_company_id — возможная связь таблиц product и company; не предлагай join только по «человеческим» полям, "
+            "если для тех же сущностей уже есть технический идентификатор\n"
             "  • reshape — изменение структуры (PIVOT, транспонирование)\n\n"
             "⚠️ ОГРАНИЧЕНИЯ:\n"
             "  • НЕ предлагай визуализации (графики, chart, dashboard) — только трансформации данных\n"
@@ -361,8 +370,8 @@ class TransformSuggestionsController(BaseController):
     ) -> List[Dict[str, Any]]:
         """
         Конвертирует findings в формат UI-подсказок.
-        
-        Генерируем 10 рекомендаций, возвращаем top 6 по relevance.
+
+        Берём все подходящие findings, сортируем по relevance, возвращаем top max_count.
 
         Finding (AgentPayload) → Suggestion (UI):
             {type, text, severity, confidence, refs, action, metadata}
@@ -370,7 +379,7 @@ class TransformSuggestionsController(BaseController):
         """
         suggestions: List[Dict[str, Any]] = []
 
-        # Обрабатываем ВСЕ findings (до 10), потом отфильтруем топ-N
+        # Обрабатываем все findings, потом сортируем и берём топ-N
         for i, finding in enumerate(findings):
             # Finding fields: text (описание), action (рекомендуемое действие),
             # confidence, refs (ссылки на колонки), severity
@@ -446,8 +455,10 @@ class TransformSuggestionsController(BaseController):
             }
             suggestions.append(suggestion)
 
-        # Сортировка по relevance (убывание), затем берем top N
-        suggestions.sort(key=lambda s: s.get("relevance", 0), reverse=True)
+        # Сортировка по relevance (убывание), затем стабильно по label
+        suggestions.sort(
+            key=lambda s: (-float(s.get("relevance") or 0), (s.get("label") or "").lower())
+        )
         top_suggestions = suggestions[:max_count]
         
         self.logger.info(

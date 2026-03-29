@@ -4,7 +4,7 @@
  * Теперь SourceNode наследует ContentNode и содержит данные.
  * Поэтому карточка показывает как конфигурацию источника, так и извлечённые данные.
  * 
- * См. docs/SOURCE_NODE_CONCEPT.md
+ * См. docs/SOURCE_NODE_CONCEPT_V2.md
  */
 import { memo, useState } from 'react'
 import { useFilterStore } from '@/store/filterStore'
@@ -62,12 +62,19 @@ import { JSONSourceDialog } from '../dialogs/sources/JSONSourceDialog'
 import { ExcelSourceDialog } from '../dialogs/sources/ExcelSourceDialog'
 import { ManualSourceDialog } from '../dialogs/sources/ManualSourceDialog'
 import { DatabaseSourceDialog } from '../dialogs/sources/DatabaseSourceDialog'
+import { ResearchSourceDialog } from '../dialogs/sources/ResearchSourceDialog'
 
 interface SourceNodeCardProps extends NodeProps {
     data: {
         sourceNode: SourceNode
     }
 }
+
+/** Документ и поиск с ИИ: данные уже в ContentNode; серверный refresh не вызываем (см. настройки источника для повторной обработки). */
+const SOURCE_TYPES_WITHOUT_SERVER_REFRESH: ReadonlyArray<SourceType> = [
+    SourceType.DOCUMENT,
+    SourceType.RESEARCH,
+]
 
 // Icon mapping for source types
 const sourceTypeIcons: Record<SourceType, React.ComponentType<{ className?: string }>> = {
@@ -139,7 +146,7 @@ const sourceTypeLabels: Record<SourceType, string> = {
     [SourceType.DOCUMENT]: 'Документ',
     [SourceType.API]: 'API',
     [SourceType.DATABASE]: 'База данных',
-    [SourceType.RESEARCH]: 'AI Research',
+    [SourceType.RESEARCH]: 'Поиск с ИИ',
     [SourceType.MANUAL]: 'Ручной ввод',
     [SourceType.STREAM]: 'Стрим',
 }
@@ -173,13 +180,13 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
     const Icon = sourceTypeIcons[sourceNode.source_type] || FileText
     const colors = sourceTypeColors[sourceNode.source_type] || sourceTypeColors[SourceType.MANUAL]
     const typeLabel = sourceTypeLabels[sourceNode.source_type] || sourceNode.source_type
+    const skipServerRefresh = SOURCE_TYPES_WITHOUT_SERVER_REFRESH.includes(sourceNode.source_type)
 
     // Get content data (SourceNode now has content field from ContentNode inheritance)
     const content = sourceNode.content
     const filteredEntry = useFilterStore((s) => s.filteredNodeData?.[sourceNode.id] ?? null)
     const isFiltered = filteredEntry !== null
     const tables = filteredEntry?.tables ?? content?.tables ?? []
-    /** Иконка фильтра: при активном фильтре данные ноды отфильтрованы, значит все таблицы в бейджах затронуты. */
     const tableCount = tables.length
     const totalRows = tables.reduce((sum: number, t: any) => sum + (t.row_count || 0), 0)
     const hasText = !!content?.text
@@ -221,6 +228,9 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
     }
 
     const handleRefresh = async () => {
+        if (skipServerRefresh) {
+            return
+        }
         setIsRefreshing(true)
         try {
             await refreshSourceNode(sourceNode.id)
@@ -331,8 +341,14 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                 return `${config.db_type || 'DB'}: ${config.database || 'unknown'}`
             case SourceType.API:
                 return config.url || 'URL не указан'
-            case SourceType.RESEARCH:
-                return config.query?.substring(0, 40) + '...' || 'Запрос не указан'
+            case SourceType.RESEARCH: {
+                const prompt =
+                    (typeof config.initial_prompt === 'string' && config.initial_prompt.trim()) ||
+                    (typeof config.query === 'string' && config.query.trim()) ||
+                    ''
+                if (!prompt) return 'Запрос не указан'
+                return prompt.length > 40 ? `${prompt.slice(0, 40)}…` : prompt
+            }
             case SourceType.STREAM:
                 return config.stream_url || 'URL не указан'
             case SourceType.MANUAL:
@@ -561,8 +577,12 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                                 size="icon"
                                 className="h-7 w-7"
                                 onClick={handleRefresh}
-                                disabled={isRefreshing}
-                                title="Обновить данные"
+                                disabled={isRefreshing || skipServerRefresh}
+                                title={
+                                    skipServerRefresh
+                                        ? 'Для документа и поиска с ИИ серверное обновление не используется — на карточке уже сохранённые данные узла'
+                                        : 'Обновить данные'
+                                }
                             >
                                 <RefreshCw className={cn(
                                     "h-3.5 w-3.5",
@@ -603,7 +623,15 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                                         </>
                                     )}
                                     <DropdownMenuSeparator />
-                                    <DropdownMenuItem onClick={handleRefresh} disabled={isRefreshing}>
+                                    <DropdownMenuItem
+                                        onClick={handleRefresh}
+                                        disabled={isRefreshing || skipServerRefresh}
+                                        title={
+                                            skipServerRefresh
+                                                ? 'Для документа и поиска с ИИ обновление не вызывается'
+                                                : undefined
+                                        }
+                                    >
                                         <RefreshCw className="mr-2 h-4 w-4" />
                                         Обновить данные
                                     </DropdownMenuItem>
@@ -635,30 +663,30 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                         </div>
                     )}
 
-                    {/* Data preview (tables as clickable badges; filter icon inside badge when filter affects this table) */}
+                    {/* Data preview (tables as clickable badges) */}
                     {tableCount > 0 && (
                         <div className="flex flex-wrap gap-1.5">
+                            {isFiltered && (
+                                <Filter
+                                    className="w-3 h-3 text-blue-600"
+                                    aria-label="Фильтр активен"
+                                />
+                            )}
                             {tables.map((table, idx: number) => (
                                 <Badge
                                     key={idx}
                                     variant="outline"
-                                    className="group cursor-pointer hover:bg-primary hover:text-primary-foreground transition-colors text-xs gap-1"
+                                    className="cursor-pointer hover:bg-primary hover:text-primary-foreground transition-colors text-xs"
                                     onClick={() => {
                                         setActiveTableIndex(idx)
                                         setShowPreviewModal(true)
                                     }}
                                 >
-                                    <Table2 className="h-3 w-3 shrink-0" />
+                                    <Table2 className="h-3 w-3 mr-1" />
                                     <span className="font-medium">{table.name}</span>
-                                    <span className="ml-0.5 px-1.5 py-0.5 bg-primary/10 rounded text-[10px] font-semibold">
+                                    <span className="ml-1.5 px-1.5 py-0.5 bg-primary/10 rounded text-[10px] font-semibold">
                                         {table.row_count || 0}
                                     </span>
-                                    {isFiltered && (
-                                        <Filter
-                                            className="h-3 w-3 shrink-0 text-blue-600 group-hover:text-primary-foreground ml-0.5 transition-colors"
-                                            aria-label="Фильтр затрагивает таблицу"
-                                        />
-                                    )}
                                 </Badge>
                             ))}
                         </div>
@@ -820,8 +848,17 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                 />
             )}
 
+            {sourceNode.source_type === SourceType.RESEARCH && (
+                <ResearchSourceDialog
+                    open={showSettingsDialog}
+                    onOpenChange={setShowSettingsDialog}
+                    existingSource={sourceNode}
+                    mode="edit"
+                />
+            )}
+
             {/* Fallback for other source types */}
-            {![SourceType.CSV, SourceType.JSON, SourceType.EXCEL, SourceType.MANUAL, SourceType.DATABASE].includes(sourceNode.source_type) && (
+            {![SourceType.CSV, SourceType.JSON, SourceType.EXCEL, SourceType.MANUAL, SourceType.DATABASE, SourceType.RESEARCH].includes(sourceNode.source_type) && (
                 <Dialog open={showSettingsDialog} onOpenChange={setShowSettingsDialog}>
                     <DialogContent className="max-w-2xl">
                         <DialogHeader>

@@ -12,11 +12,9 @@ import {
     type ProgressMeta as SharedProgressMeta,
     mergePlanSteps,
     applyProgressToSteps,
-    updateMetaFromPlanEvent,
-    updateMetaFromProgressEvent,
+    metaFromSteps,
     markRunningAsCompleted,
     markLastRunningAsFailed,
-    finalizeMeta,
 } from '@/lib/multiAgentProgress'
 
 type PlaygroundMessage = {
@@ -86,20 +84,29 @@ export function MultiAgentPlaygroundPanel() {
 
             await runPlaygroundStream(text, historyForRequest, {
                 onPlanUpdate: (steps, meta) => {
-                    setPlaygroundProgressSteps((prev) =>
-                        mergePlanSteps(prev, steps, meta?.completedCount, 'playground')
-                    )
-                    setPlaygroundProgressMeta((prev) =>
-                        updateMetaFromPlanEvent(prev, steps.length, meta?.completedCount)
-                    )
+                    setPlaygroundProgressSteps((prev) => {
+                        const next = mergePlanSteps(prev, steps, meta?.completedCount, 'playground')
+                        setPlaygroundProgressMeta(metaFromSteps(next))
+                        return next
+                    })
                 },
                 onProgress: (_agentLabel, task, meta) => {
-                    setPlaygroundProgressSteps((prev) =>
-                        applyProgressToSteps(prev, task, meta?.stepIndex, 'playground')
-                    )
-                    setPlaygroundProgressMeta((prev) =>
-                        updateMetaFromProgressEvent(prev, meta?.stepIndex, meta?.totalSteps)
-                    )
+                    setPlaygroundProgressSteps((prev) => {
+                        const next = applyProgressToSteps(prev, task, meta?.stepIndex, 'playground')
+                        let metaNext = metaFromSteps(next)
+                        if (
+                            typeof meta?.totalSteps === 'number' &&
+                            meta.totalSteps > 0 &&
+                            metaNext.total != null
+                        ) {
+                            metaNext = {
+                                ...metaNext,
+                                total: Math.max(metaNext.total, meta.totalSteps),
+                            }
+                        }
+                        setPlaygroundProgressMeta(metaNext)
+                        return next
+                    })
                 },
                 onResult: (result) => {
                     finalResult = result
@@ -115,8 +122,11 @@ export function MultiAgentPlaygroundPanel() {
             if (!finalResult) {
                 throw new Error('Playground не вернул финальный результат')
             }
-            setPlaygroundProgressSteps((prev) => markRunningAsCompleted(prev))
-            setPlaygroundProgressMeta((prev) => finalizeMeta(prev, playgroundProgressSteps.length))
+            setPlaygroundProgressSteps((prev) => {
+                const next = markRunningAsCompleted(prev)
+                setPlaygroundProgressMeta(metaFromSteps(next))
+                return next
+            })
 
             const displayText = formatPlaygroundResult(finalResult)
             const assistantMsg: PlaygroundMessage = {

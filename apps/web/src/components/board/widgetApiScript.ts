@@ -82,36 +82,51 @@ export function buildWidgetApiScript(params: {
             });
 
             window.fetchContentData = async function() {
-                // Use pipeline-precomputed tables if available (dashboard filtering)
-                if (window.__PRECOMPUTED_TABLES) {
+                // Pipeline snapshot: не-null массив с данными — без сетевого запроса
+                if (window.__PRECOMPUTED_TABLES != null && window.__PRECOMPUTED_TABLES.length > 0) {
                     return {
                         tables: window.__PRECOMPUTED_TABLES,
                         text: '',
                         metadata: {}
                     };
                 }
-                try {
-                    var url = window.API_BASE + '/api/v1/content-nodes/' + window.CONTENT_NODE_ID;
-                    if (window.ACTIVE_FILTERS) {
-                        url += '?filters=' + window.ACTIVE_FILTERS;
-                    }
-                    const response = await fetch(url, {
-                        headers: {
-                            'Authorization': 'Bearer ' + window.AUTH_TOKEN,
-                            'Content-Type': 'application/json'
-                        }
-                    });
-                    if (!response.ok) throw new Error('HTTP ' + response.status + ': ' + response.statusText);
-                    const contentNode = await response.json();
-                    return {
-                        tables: contentNode.content?.tables || [],
-                        text: contentNode.content?.text || '',
-                        metadata: contentNode.metadata || {}
-                    };
-                } catch (error) {
-                    console.error('Error fetching content data:', error);
+                // Явно пустой снимок от compute-filtered (например, фильтр отсёк все строки)
+                if (Array.isArray(window.__PRECOMPUTED_TABLES) && window.__PRECOMPUTED_TABLES.length === 0) {
                     return { tables: [], text: '', metadata: {} };
                 }
+                // Сетевой путь: временные сбои (429, сеть, cold start) раньше сразу давали пустые tables —
+                // виджет показывал «нет данных» до ручного обновления. Несколько попыток с задержкой.
+                var maxAttempts = 3;
+                var lastErr = null;
+                for (var attempt = 0; attempt < maxAttempts; attempt++) {
+                    try {
+                        if (attempt > 0) {
+                            await new Promise(function(r) { setTimeout(r, 120 * attempt); });
+                        }
+                        var url = window.API_BASE + '/api/v1/content-nodes/' + window.CONTENT_NODE_ID;
+                        if (window.ACTIVE_FILTERS) {
+                            url += '?filters=' + window.ACTIVE_FILTERS;
+                        }
+                        var response = await fetch(url, {
+                            headers: {
+                                'Authorization': 'Bearer ' + window.AUTH_TOKEN,
+                                'Content-Type': 'application/json'
+                            }
+                        });
+                        if (!response.ok) throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+                        var contentNode = await response.json();
+                        return {
+                            tables: (contentNode.content && contentNode.content.tables) ? contentNode.content.tables : [],
+                            text: (contentNode.content && contentNode.content.text) ? contentNode.content.text : '',
+                            metadata: contentNode.metadata || {}
+                        };
+                    } catch (error) {
+                        lastErr = error;
+                        console.error('Error fetching content data (attempt ' + (attempt + 1) + '/' + maxAttempts + '):', error);
+                    }
+                }
+                console.error('Error fetching content data:', lastErr);
+                return { tables: [], text: '', metadata: {} };
             };
 
             window.getTable = async function(nameOrIndex) {

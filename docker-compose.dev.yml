@@ -10,6 +10,7 @@ services:
     volumes:
       - ./apps/backend/app:/app/app
     environment:
+      GIGABOARD_IN_DOCKER: "1"
       DEBUG: "true"
       ENVIRONMENT: development
       SKIP_ALEMBIC_UPGRADE: ${SKIP_ALEMBIC_UPGRADE:-0}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -24,9 +24,14 @@ import {
     ChartColumn,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { contentNodesAPI } from '@/services/api'
+import {
+    getInitialTooltipViewportPos,
+    placeTooltipInViewport,
+    tooltipLayoutEqual,
+    type SuggestionTooltipPlacement,
+} from '@/lib/suggestionTooltipPlacement'
 
 interface Suggestion {
     id: string
@@ -44,6 +49,11 @@ interface SuggestionsPanelProps {
     contentNodeId: string
     chatHistory: Array<{ role: string; content: string }>
     currentWidgetCode?: string
+    suggestionsTabActive: boolean
+    /** Пока ИИ отвечает — выбор рекомендации недоступен (как поле ввода) */
+    isGenerating?: boolean
+    suggestionsRefreshKey?: number
+    onSuggestionsLoadingChange?: (loading: boolean) => void
     onSuggestionClick: (prompt: string) => void
 }
 
@@ -173,6 +183,8 @@ const PRIORITY_BADGE_COLORS = {
     low: 'bg-gray-400 text-white hover:bg-gray-500',
 }
 
+const SUGGESTIONS_DEBOUNCE_MS = 450
+
 const TYPE_LABELS = {
     improvement: 'Улучшение',
     alternative: 'Альтернатива',
@@ -185,81 +197,157 @@ export const SuggestionsPanel = ({
     contentNodeId,
     chatHistory,
     currentWidgetCode,
+    suggestionsTabActive,
+    isGenerating = false,
+    suggestionsRefreshKey = 0,
+    onSuggestionsLoadingChange,
     onSuggestionClick,
 }: SuggestionsPanelProps) => {
     const [suggestions, setSuggestions] = useState<Suggestion[]>([])
     const [isLoading, setIsLoading] = useState(false)
+    const [loadingMode, setLoadingMode] = useState<'load' | 'refresh'>('load')
     const [error, setError] = useState<string | null>(null)
     const [hoveredSuggestion, setHoveredSuggestion] = useState<string | null>(null)
-    const [tooltipPosition, setTooltipPosition] = useState({ top: 0, left: 0 })
+    const [tooltipLayout, setTooltipLayout] = useState<{
+        top: number
+        left: number
+        placement: SuggestionTooltipPlacement
+    } | null>(null)
     const badgeRefs = useRef<{ [key: string]: HTMLDivElement | null }>({})
-    const isFirstRender = useRef(true)
+    const tooltipRef = useRef<HTMLDivElement | null>(null)
 
-    const loadSuggestions = async () => {
-        if (!contentNodeId) return
+    const contextFingerprint = useMemo(
+        () => `${contentNodeId}|${currentWidgetCode ?? ''}`,
+        [contentNodeId, currentWidgetCode]
+    )
 
-        setIsLoading(true)
-        setError(null)
+    const chatHistoryRef = useRef(chatHistory)
+    const widgetCodeRef = useRef(currentWidgetCode)
+    chatHistoryRef.current = chatHistory
+    widgetCodeRef.current = currentWidgetCode
 
-        try {
-            const response = await contentNodesAPI.analyzeSuggestions(contentNodeId, {
-                chat_history: chatHistory,
-                current_widget_code: currentWidgetCode || null,
-                max_suggestions: 6,
-            })
+    const lastFetchedFingerprintRef = useRef<string | null>(null)
+    const inFlightFingerprintRef = useRef<string | null>(null)
+    const contextFingerprintRef = useRef(contextFingerprint)
+    contextFingerprintRef.current = contextFingerprint
+    const outstandingFetchesRef = useRef(0)
+    const skipExternalRefreshClearRef = useRef(true)
+    const hasCompletedFetchRef = useRef(false)
 
-            setSuggestions(response.data.suggestions)
-        } catch (err: any) {
-            console.error('Failed to load suggestions:', err)
-            console.error('Request details:', {
-                contentNodeId,
-                chatHistoryLength: chatHistory.length,
-                hasWidgetCode: !!currentWidgetCode,
-            })
-
-            // Better error messages based on status code
-            if (err.response?.status === 503) {
-                const detail = err.response?.data?.detail || 'Service unavailable'
-                console.error('Backend error:', err.response.data)
-
-                if (detail.includes('Redis') || detail.includes('GigaChat')) {
-                    setError('AI рекомендации недоступны. Проверьте подключение к Redis и GigaChat.')
-                } else {
-                    setError('Сервис рекомендаций временно недоступен')
-                }
-            } else if (err.response?.data) {
-                console.error('Backend error:', err.response.data)
-                setError('Не удалось загрузить рекомендации')
-            } else {
-                setError('Не удалось загрузить рекомендации')
-            }
-        } finally {
-            setIsLoading(false)
-        }
-    }
-
-    // Reload suggestions when contentNodeId changes or when currentWidgetCode changes
-    // Skip first render to wait for currentWidgetCode to be set in edit mode
     useEffect(() => {
-        if (isFirstRender.current) {
-            isFirstRender.current = false
-            // In edit mode (currentWidgetCode exists), wait for it to be set
-            // In new widget mode (currentWidgetCode undefined), load immediately
-            if (currentWidgetCode === undefined) {
-                // New widget - load suggestions immediately
-                loadSuggestions()
-            }
+        hasCompletedFetchRef.current = false
+    }, [contentNodeId])
+
+    useEffect(() => {
+        if (skipExternalRefreshClearRef.current) {
+            skipExternalRefreshClearRef.current = false
             return
         }
+        lastFetchedFingerprintRef.current = null
+    }, [suggestionsRefreshKey])
 
-        loadSuggestions()
-    }, [contentNodeId, currentWidgetCode])
+    useEffect(() => {
+        onSuggestionsLoadingChange?.(isLoading)
+    }, [isLoading, onSuggestionsLoadingChange])
+
+    useEffect(() => {
+        if (!contentNodeId || !suggestionsTabActive) return
+        if (lastFetchedFingerprintRef.current === contextFingerprint) return
+        if (inFlightFingerprintRef.current === contextFingerprint) return
+
+        setLoadingMode(hasCompletedFetchRef.current ? 'refresh' : 'load')
+        setIsLoading(true)
+        setError(null)
+        setSuggestions([])
+
+        const fpLocked = contextFingerprint
+        let debouncePending = true
+        const timer = window.setTimeout(() => {
+            debouncePending = false
+            if (inFlightFingerprintRef.current === fpLocked) return
+            inFlightFingerprintRef.current = fpLocked
+
+            void (async () => {
+                outstandingFetchesRef.current += 1
+                try {
+                    const response = await contentNodesAPI.analyzeSuggestions(contentNodeId, {
+                        chat_history: chatHistoryRef.current,
+                        current_widget_code: widgetCodeRef.current || null,
+                    })
+
+                    if (contextFingerprintRef.current !== fpLocked) {
+                        return
+                    }
+
+                    setSuggestions(response.data.suggestions)
+                    lastFetchedFingerprintRef.current = fpLocked
+                } catch (err: any) {
+                    console.error('Failed to load suggestions:', err)
+                    console.error('Request details:', {
+                        contentNodeId,
+                        chatHistoryLength: chatHistoryRef.current.length,
+                        hasWidgetCode: !!widgetCodeRef.current,
+                    })
+
+                    if (contextFingerprintRef.current !== fpLocked) {
+                        return
+                    }
+
+                    if (err.response?.status === 503) {
+                        const detail = err.response?.data?.detail || 'Service unavailable'
+                        console.error('Backend error:', err.response.data)
+
+                        if (detail.includes('Redis') || detail.includes('GigaChat')) {
+                            setError('AI рекомендации недоступны. Проверьте подключение к Redis и GigaChat.')
+                        } else {
+                            setError('Сервис рекомендаций временно недоступен')
+                        }
+                    } else if (err.response?.data) {
+                        console.error('Backend error:', err.response.data)
+                        setError('Не удалось загрузить рекомендации')
+                    } else {
+                        setError('Не удалось загрузить рекомендации')
+                    }
+                } finally {
+                    if (inFlightFingerprintRef.current === fpLocked) {
+                        inFlightFingerprintRef.current = null
+                    }
+                    outstandingFetchesRef.current -= 1
+                    if (outstandingFetchesRef.current <= 0) {
+                        outstandingFetchesRef.current = 0
+                        if (contextFingerprintRef.current === fpLocked) {
+                            setIsLoading(false)
+                            hasCompletedFetchRef.current = true
+                        }
+                    }
+                }
+            })()
+        }, SUGGESTIONS_DEBOUNCE_MS)
+
+        return () => {
+            window.clearTimeout(timer)
+            if (debouncePending) {
+                setIsLoading(false)
+            }
+        }
+    }, [contentNodeId, contextFingerprint, suggestionsTabActive, suggestionsRefreshKey])
+
+    useLayoutEffect(() => {
+        if (!hoveredSuggestion || !tooltipRef.current) return
+        const anchor = badgeRefs.current[hoveredSuggestion]?.getBoundingClientRect()
+        if (!anchor) return
+        const el = tooltipRef.current
+        const next = placeTooltipInViewport(anchor, el.offsetWidth, el.offsetHeight)
+        setTooltipLayout((prev) => (prev && tooltipLayoutEqual(prev, next) ? prev : next))
+    }, [hoveredSuggestion, suggestions])
 
     if (isLoading) {
         return (
             <div className="flex items-center justify-center p-8">
                 <Loader2 className="w-6 h-6 animate-spin text-purple-600" />
-                <span className="ml-2 text-sm text-gray-600">Загрузка рекомендаций</span>
+                <span className="ml-2 text-sm text-gray-600">
+                    {loadingMode === 'refresh' ? 'Обновление рекомендаций' : 'Загрузка рекомендаций'}
+                </span>
             </div>
         )
     }
@@ -275,16 +363,18 @@ export const SuggestionsPanel = ({
 
     if (suggestions.length === 0) {
         return (
-            <div className="p-8 text-center text-gray-500 text-sm">
+            <div className="p-6 text-center text-gray-500 text-sm">
                 <Lightbulb className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                <p>Начните диалог с AI, чтобы увидеть рекомендации</p>
+                <p>Нет рекомендаций для текущего контекста</p>
+                <p className="text-xs mt-1 opacity-80">Уточните задачу во вкладке «Сообщение»</p>
             </div>
         )
     }
 
     return (
-        <div className="p-2">
-            {/* Compact tag view with tooltips */}
+        <div className={cn('p-1', isGenerating && 'opacity-60')} aria-busy={isGenerating || undefined}>
+            <div className="text-xs font-medium mb-1.5 text-muted-foreground">✨ Рекомендации визуализаций</div>
+            {/* Compact tag view — 6×2 для двенадцати подсказок */}
             <div className="grid w-full grid-cols-6 gap-1.5">
                 {suggestions.map((suggestion, index) => {
                     const { Icon, className: vizClass } = vizConfig(
@@ -306,21 +396,25 @@ export const SuggestionsPanel = ({
                             ref={(el) => (badgeRefs.current[suggestion.id] = el)}
                             onMouseEnter={(e) => {
                                 const rect = e.currentTarget.getBoundingClientRect()
-                                setTooltipPosition({
-                                    top: rect.bottom + window.scrollY + 8,
-                                    left: rect.left + window.scrollX
-                                })
+                                setTooltipLayout(getInitialTooltipViewportPos(rect))
                                 setHoveredSuggestion(suggestion.id)
                             }}
-                            onMouseLeave={() => setHoveredSuggestion(null)}
+                            onMouseLeave={() => {
+                                setHoveredSuggestion(null)
+                                setTooltipLayout(null)
+                            }}
                         >
                             <Badge
                                 variant="outline"
                                 className={cn(
                                     'w-full min-w-0 cursor-pointer text-[11px] px-3 py-0.5 flex items-center gap-1.5 transition-all justify-start',
-                                    vizClass
+                                    vizClass,
+                                    isGenerating && 'cursor-not-allowed'
                                 )}
-                                onClick={() => onSuggestionClick(suggestion.prompt)}
+                                onClick={() => {
+                                    if (isGenerating) return
+                                    onSuggestionClick(suggestion.prompt)
+                                }}
                             >
                                 <Icon className="w-2.5 h-2.5 flex-shrink-0 opacity-90" />
                                 <span className="truncate min-w-0 flex-1">
@@ -346,12 +440,13 @@ export const SuggestionsPanel = ({
             </div>
 
             {/* Global tooltip portal */}
-            {hoveredSuggestion && createPortal(
+            {hoveredSuggestion && tooltipLayout && createPortal(
                 <div
+                    ref={tooltipRef}
                     className="fixed w-72 bg-white border border-gray-200 rounded-lg shadow-xl p-3 z-[9999] pointer-events-none"
                     style={{
-                        top: `${tooltipPosition.top}px`,
-                        left: `${tooltipPosition.left}px`,
+                        top: `${tooltipLayout.top}px`,
+                        left: `${tooltipLayout.left}px`,
                     }}
                 >
                     {(() => {
@@ -362,6 +457,7 @@ export const SuggestionsPanel = ({
                         )
                         const TypeIcon =
                             SUGGESTION_TYPE_ICONS[suggestion.type] || Sparkles
+                        const placement = tooltipLayout.placement
 
                         return (
                             <>
@@ -409,8 +505,11 @@ export const SuggestionsPanel = ({
                                     </div>
                                 )}
 
-                                {/* Arrow pointer */}
-                                <div className="absolute -top-1 left-4 w-2 h-2 bg-white border-l border-t border-gray-200 transform rotate-45" />
+                                {placement === 'below' ? (
+                                    <div className="absolute -top-1 left-4 z-10 w-2 h-2 bg-white border-l border-t border-gray-200 rotate-45" />
+                                ) : (
+                                    <div className="absolute -bottom-1 left-4 z-10 w-2 h-2 bg-white border-r border-b border-gray-200 rotate-45" />
+                                )}
                             </>
                         )
                     })()}

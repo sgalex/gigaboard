@@ -1,18 +1,18 @@
-# План реализации источника AI Research
+# План реализации источника «Поиск с ИИ»
 
 **Статус**: ✅ Реализовано (март 2026)  
-**Дата обновления**: 11 марта 2026  
-**Связь**: [SOURCE_NODE_CONCEPT.md](./SOURCE_NODE_CONCEPT.md) (раздел 7), [MULTI_AGENT.md](./MULTI_AGENT.md), [API.md](./API.md) (Research Chat), [ADMIN_AND_SYSTEM_LLM.md](./ADMIN_AND_SYSTEM_LLM.md) (Playground)
+**Дата обновления**: 28 марта 2026  
+**Связь**: [SOURCE_NODE_CONCEPT.md](./SOURCE_NODE_CONCEPT.md) (раздел 7), [MULTI_AGENT.md](./MULTI_AGENT.md), [API.md](./API.md) (Research Chat, §5.1 refresh), [ADMIN_AND_SYSTEM_LLM.md](./ADMIN_AND_SYSTEM_LLM.md) (Playground)
 
 ---
 
 ## Executive Summary
 
-Источник **AI Research** работает на базе мультиагентного пайплайна (Deep search → контент и таблицы). Реализовано:
+Источник **Поиск с ИИ** работает на базе мультиагентного пайплайна (Deep search → контент и таблицы). Реализовано:
 
-1. **Backend**: `ResearchController` → `Orchestrator.process_request`; `ResearchSource` делегирует в контроллер; `SourceNodeService` поддерживает создание/refresh и предзаполнение `content` из диалога (`data` в create).
-2. **API**: `POST /api/v1/research/chat` — narrative, tables, sources, session_id.
-3. **Frontend**: `ResearchSourceDialog` — чат слева (Markdown), превью справа; единый плейсхолдер при отсутствии данных; «Создать источник» передаёт последний результат в `data`.
+1. **Backend**: `ResearchController` → `Orchestrator.process_request`; `ResearchSource` делегирует в контроллер; `SourceNodeService` — создание с опциональным `data`, **refresh** для `RESEARCH` через явную ветку `_extract_research_content` (не только `extract_data`). Текст запроса для извлечения: **`_effective_initial_prompt`** — `initial_prompt` или первая user-реплика в `conversation_history`.
+2. **API**: `POST /api/v1/research/chat` — narrative, tables, sources, session_id; `POST /api/v1/source-nodes/{id}/refresh` для research — см. [API.md](./API.md) §5.1.
+3. **Frontend**: `ResearchSourceDialog` — чат и превью; режимы **create** и **edit** (`existingSource` с доски); «Создать источник» / «Сохранить»; на карточке SourceNode кнопка **«Обновить данные» для `research` отключена** (данные уже в узле; повтор — через настройки). См. [SOURCE_NODE_CONCEPT.md](./SOURCE_NODE_CONCEPT.md) §7.
 
 ---
 
@@ -23,8 +23,8 @@
 | ResearchAgent (multi-agent) | ✅ Пайплайн Discovery → Research → Structurizer → Analyst → Reporter |
 | SourceType.RESEARCH, ResearchSourceConfig | ✅ Модели и схемы |
 | ResearchSource (`app.sources.research`) | ✅ Вызов `ResearchController`, `ExtractionResult` с narrative/tables/sources |
-| SourceNodeService | ✅ RESEARCH в create (extract + опционально `data` без повторного исследования), в `_get_extractor` / `extract_data` |
-| ResearchSourceDialog | ✅ Две колонки, `researchAPI.chat`, превью, создание ноды с `data` |
+| SourceNodeService | ✅ RESEARCH в create; refresh — ветка `_extract_research_content`; `_effective_initial_prompt` в `ResearchSource` |
+| ResearchSourceDialog | ✅ Две колонки, `researchAPI.chat` / stream, превью, create + **edit** с доски, `data` при создании |
 | Playground (admin) vs Research Chat | ✅ Один и тот же Orchestrator; отличие — форма `user_request` (см. §2.0.1) |
 
 ---
@@ -76,10 +76,11 @@
 
 **Файл**: `apps/backend/app/sources/research/extractor.py`
 
-- В `extract()` получать `orchestrator` из `kwargs` (передаётся из SourceNodeService/роута).
+- В `extract()` вычислять **`_effective_initial_prompt(config)`**: непустой `initial_prompt`, иначе первая реплика `role: user` из `conversation_history`; при полном отсутствии текста — `ExtractionResult.failure` с понятным сообщением (без вызова оркестратора).
+- Получать `orchestrator` из `kwargs` (передаётся из SourceNodeService/роута).
 - В `_run_research()`:
   - Создать `ResearchController(orchestrator)`.
-  - Вызвать `controller.process_request(message=initial_prompt, chat_history=config.get("conversation_history", []))`.
+  - Вызвать `controller.process_request` с текстом effective prompt и контекстом, в т.ч. `conversation_history` → `chat_history` в контроллере.
   - По результату контроллера: при успехе — собрать `ExtractionResult(success=True, text=result.narrative, tables=..., metadata={"sources": result.sources})`; при ошибке — `ExtractionResult.failure(result.error)`.
 - Таблицы из контроллера уже в формате list[dict] (ContentTable-like); конвертировать в `TableData` / формат `ExtractionResult.tables` при необходимости в самом extractor.
 - Обработка ошибок: при `status == "error"` у контроллера возвращать `ExtractionResult.failure(error)`.
@@ -108,15 +109,14 @@
   - Вызвать `extractor.extract(config, orchestrator=orchestrator)`.
   - По результату: при успехе — `content, lineage = result.to_content(), lineage_research`; при ошибке — логировать, создавать ноду с пустым `content` или с `content.text` = сообщение об ошибке (на усмотрение продукта).
 
-**Refresh / extract_data:**
+**Refresh (`refresh_source_data`):**
 
-- В `_get_extractor()` добавить ветку для `SourceType.RESEARCH`: возвращать экземпляр из `get_source_handler("research")` (или фабрику, создающую ResearchSource).
-- В `extract_data()` для `source_type == SourceType.RESEARCH`:
-  - Подготавливать `extraction_params`: `orchestrator=get_orchestrator()`, при необходимости `db`, `source`.
-  - Вызывать `extractor.extract(source.config, **extraction_params)`.
-  - Результат приводить к формату ответа: `success=result.is_success` (или `result.success`), `content=result.to_content_dict()` (или `result.to_content()`), `errors=...`.
+- Для `SourceType.RESEARCH` — **отдельная ветка**: вызывается `_extract_research_content(config)` (тот же `ResearchSource.extract` с оркестратором, что и при создании без prefilled `data`). Ошибка извлечения возвращается в ответ клиенту (не «тихий» `None`).
 
-Учесть, что сейчас `extract_data` использует старые экстракторы с сигнатурой `extract(config, params)` и полями `is_success`, `to_content_dict()`. После введения совместимости в `ExtractionResult` вызов для RESEARCH может выглядеть так: `result = await extractor.extract(source.config, **extraction_params)` с проверкой `result.is_success` и `result.to_content_dict()`.
+**Прочие вызовы (`extract_data`, валидация):**
+
+- В `_get_extractor()` для `SourceType.RESEARCH` возвращается `get_source_handler("research")`.
+- В `extract_data()` для RESEARCH передаётся `orchestrator` в `extractor.extract(source.config, **extraction_params)` — используется интеграциями; карточка доски для research **не вызывает** refresh (см. [API.md](./API.md) §5.1).
 
 ### 2.4. API для чата исследования (Research Dialog)
 
@@ -183,7 +183,7 @@
 
 ### 3.4. Детали UI
 
-- Заголовок диалога: «🔍 AI Research — [имя/превью]» или «🔍 AI Research» до именования.
+- Заголовок диалога: «🔍 Поиск с ИИ — [имя/превью]» или «🔍 Поиск с ИИ» до именования.
 - Имя ноды при создании: из первого предложения запроса (как сейчас) или редактируемое поле в футере.
 - Адаптивность: на узких экранах можно показывать чат и превью табами (Чат | Результат) вместо двух колонок.
 - Доступность: фокус в поле ввода при открытии, корректные aria-labels для списка сообщений и таблиц.
@@ -205,7 +205,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 🔍 AI Research — [Название / «Новое исследование»]                         [✕]  │
+│ 🔍 Поиск с ИИ — [Название / «Новое исследование»]                         [✕]  │
 ├──────────────────────────────────────┬──────────────────────────────────────────┤
 │                                      │                                          │
 │  ┌─ AI Ассистент ───────────────────┐│  ┌─ Результат исследования ──────────────┐│
@@ -300,7 +300,7 @@
 
 ## 5. Связанные документы
 
-- [SOURCE_NODE_CONCEPT.md](./SOURCE_NODE_CONCEPT.md) — раздел 7 (AI Research Dialog)
+- [SOURCE_NODE_CONCEPT.md](./SOURCE_NODE_CONCEPT.md) — раздел 7 (Диалог «Поиск с ИИ»)
 - [MULTI_AGENT.md](./MULTI_AGENT.md) — Research pipeline, форматы AgentPayload
 - [API.md](./API.md) — актуализация после добавления `POST /api/v1/research/chat`
 - [BOARD_SYSTEM.md](./BOARD_SYSTEM.md) — тип источника research, refresh

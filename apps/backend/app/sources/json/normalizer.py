@@ -47,6 +47,34 @@ def _relative_column_path(base_path: str, absolute_path: str) -> str:
     return absolute_path
 
 
+def _column_description_pk(table_id: str, table_name: str) -> str:
+    """Человекочитаемое описание суррогатного PK для метаданных столбца."""
+    return (
+        f"Суррогатный первичный ключ (PK) таблицы «{table_name}» (id={table_id})."
+    )
+
+
+def _column_description_fk(
+    ref_table: str,
+    ref_column: str,
+    child_table_id: str,
+    child_table_name: str,
+) -> str:
+    """Описание FK: на какую таблицу и столбец ссылается дочерняя таблица."""
+    return (
+        f"Внешний ключ (FK) на таблицу «{ref_table}», столбец {ref_column} "
+        f"(дочерняя таблица «{child_table_name}», id={child_table_id})."
+    )
+
+
+def _column_description_data_field(table_id: str, table_name: str, relative_path: str) -> str:
+    """Описание обычного поля мэппинга (не ключ)."""
+    return (
+        f"Поле данных из JSON по пути {relative_path}; относится к таблице «{table_name}» "
+        f"(id={table_id}). Не ключ."
+    )
+
+
 @dataclass
 class _TableDraft:
     table_id: str
@@ -222,7 +250,23 @@ def auto_normalize_json(data: Any, max_rows: int | None = None) -> AutoNormaliza
         columns = []
         for col in ordered_columns:
             samples = draft.column_samples.get(col, [row.get(col) for row in draft.rows])
-            columns.append({"name": col, "type": _infer_type(samples)})
+            ct = _infer_type(samples)
+            if col == draft.pk_column:
+                desc = _column_description_pk(draft.table_id, draft.name)
+            elif col == draft.fk_column and draft.parent_table:
+                desc = _column_description_fk(
+                    draft.parent_table,
+                    f"{draft.parent_table}_id",
+                    draft.table_id,
+                    draft.name,
+                )
+            else:
+                rel = _relative_column_path(
+                    draft.base_path,
+                    draft.column_paths.get(col, f"$.{col}"),
+                )
+                desc = _column_description_data_field(draft.table_id, draft.name, rel)
+            columns.append({"name": col, "type": ct, "description": desc})
 
         rows = []
         for row in draft.rows[: max_rows or len(draft.rows)]:
@@ -252,6 +296,7 @@ def auto_normalize_json(data: Any, max_rows: int | None = None) -> AutoNormaliza
                         draft.column_paths.get(col["name"], f"$.{col['name']}"),
                     ),
                     "nullable": True,
+                    "description": col["description"],
                 }
                 for col in columns
                 if col["name"] not in {draft.pk_column, draft.fk_column}
@@ -313,7 +358,14 @@ def extract_tables_from_mapping(
         ref_table = str(fk_entry.get("ref_table")) if isinstance(fk_entry, dict) and fk_entry.get("ref_table") else None
         column_cfgs = [c for c in (table_cfg.get("columns") or []) if isinstance(c, dict)]
 
-        matches = _iter_matches(data, base_path)
+        fk_ref_base_path: str | None = None
+        if fk_column and ref_table:
+            for t in sorted_tables:
+                if isinstance(t, dict) and str(t.get("id", "")) == ref_table:
+                    fk_ref_base_path = str(t.get("base_path", "$"))
+                    break
+
+        matches = _iter_matches(data, base_path, fk_ref_base_path)
         rows: list[dict[str, Any]] = []
         for match in matches:
             if max_rows and len(rows) >= max_rows:
@@ -341,23 +393,58 @@ def extract_tables_from_mapping(
     result: list[TableData] = []
     for table_cfg in sorted_tables:
         table_id = str(table_cfg.get("id", "table"))
+        table_name = str(table_cfg.get("name", table_id))
         rows = table_rows.get(table_id, [])
         column_cfgs = [c for c in (table_cfg.get("columns") or []) if isinstance(c, dict)]
         pk_column = str(table_cfg.get("pk", {}).get("column", f"{table_id}_id"))
         fk_cfg = table_cfg.get("fk") or []
         fk_entry = fk_cfg[0] if isinstance(fk_cfg, list) and fk_cfg else None
         fk_column = str(fk_entry.get("column")) if isinstance(fk_entry, dict) and fk_entry.get("column") else None
+        ref_table = str(fk_entry.get("ref_table")) if isinstance(fk_entry, dict) and fk_entry.get("ref_table") else None
+        ref_column = str(fk_entry.get("ref_column")) if isinstance(fk_entry, dict) and fk_entry.get("ref_column") else ""
 
-        col_defs = [{"name": pk_column, "type": "text"}]
-        if fk_column:
-            col_defs.append({"name": fk_column, "type": "text"})
-        col_defs.extend(
+        col_defs: list[dict[str, Any]] = [
             {
-                "name": str(c.get("name", "col")),
-                "type": str(c.get("type", "text")),
+                "name": pk_column,
+                "type": "text",
+                "description": _column_description_pk(table_id, table_name),
             }
-            for c in column_cfgs
-        )
+        ]
+        if fk_column and ref_table:
+            rc = ref_column or f"{ref_table}_id"
+            col_defs.append(
+                {
+                    "name": fk_column,
+                    "type": "text",
+                    "description": _column_description_fk(ref_table, rc, table_id, table_name),
+                }
+            )
+        elif fk_column:
+            col_defs.append(
+                {
+                    "name": fk_column,
+                    "type": "text",
+                    "description": (
+                        f"Внешний ключ (FK) таблицы «{table_name}» (id={table_id}); "
+                        "см. mapping_spec.fk для целевой таблицы."
+                    ),
+                }
+            )
+
+        for c in column_cfgs:
+            col_name = str(c.get("name", "col"))
+            col_path = str(c.get("path", "$"))
+            raw_desc = c.get("description")
+            desc = str(raw_desc).strip() if raw_desc is not None else ""
+            if not desc:
+                desc = _column_description_data_field(table_id, table_name, col_path)
+            col_defs.append(
+                {
+                    "name": col_name,
+                    "type": str(c.get("type", "text")),
+                    "description": desc,
+                }
+            )
 
         normalized_rows = []
         for row in rows:
@@ -378,25 +465,42 @@ def extract_tables_from_mapping(
     return result
 
 
-def _iter_matches(data: Any, base_path: str) -> list[dict[str, Any]]:
+def _iter_matches(
+    data: Any,
+    base_path: str,
+    fk_ref_base_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Walk JSON and collect row objects at base_path.
+
+    When fk_ref_base_path is set (must be a prefix of base_path), parent_obj on each
+    match is the object at the end of that prefix — the same dict identity used when
+    indexing the referenced parent table rows for surrogate FK joins.
+    """
     tokens = _parse_base_path(base_path)
+    ref_tokens = _parse_base_path(fk_ref_base_path) if fk_ref_base_path else []
+    if ref_tokens and (
+        len(ref_tokens) > len(tokens) or tokens[: len(ref_tokens)] != ref_tokens
+    ):
+        ref_tokens = []
+
     matches: list[dict[str, Any]] = []
 
-    def _walk(current: Any, idx: int, owner_obj: dict[str, Any] | None) -> None:
+    def _walk(current: Any, idx: int, fk_parent: dict[str, Any] | None) -> None:
+        if ref_tokens and len(ref_tokens) < len(tokens) and idx == len(ref_tokens):
+            fk_parent = current if isinstance(current, dict) else None
         if idx >= len(tokens):
-            matches.append({"value": current, "parent_obj": owner_obj})
+            matches.append({"value": current, "parent_obj": fk_parent})
             return
         token = tokens[idx]
         if token == "[*]":
             if isinstance(current, list):
                 for item in current:
-                    _walk(item, idx + 1, owner_obj)
+                    _walk(item, idx + 1, fk_parent)
             return
 
         if isinstance(current, dict) and token in current:
             next_value = current[token]
-            next_owner = current if isinstance(next_value, list) else owner_obj
-            _walk(next_value, idx + 1, next_owner)
+            _walk(next_value, idx + 1, fk_parent)
 
     _walk(data, 0, None)
     return matches

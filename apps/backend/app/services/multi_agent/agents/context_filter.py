@@ -126,7 +126,7 @@ class ContextFilterAgent(BaseAgent):
                         raise ValueError("filter_expression must be object with 'type'")
                 return data
 
-            parsed = await self._call_gigachat_with_json_retry(
+            parsed = await self._call_llm_with_json_retry(
                 messages=messages,
                 parse_fn=_parse_response,
                 context=context,

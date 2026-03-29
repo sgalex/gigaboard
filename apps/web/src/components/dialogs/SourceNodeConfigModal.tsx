@@ -129,7 +129,7 @@ export function SourceNodeConfigModal({
                 [SourceType.DOCUMENT]: 'Документ',
                 [SourceType.API]: 'API',
                 [SourceType.DATABASE]: 'База данных',
-                [SourceType.RESEARCH]: 'AI Research',
+                [SourceType.RESEARCH]: 'Поиск с ИИ',
                 [SourceType.MANUAL]: 'Ручной ввод',
                 [SourceType.STREAM]: 'Стрим',
             }
@@ -218,7 +218,7 @@ export function SourceNodeConfigModal({
 
                 case SourceType.RESEARCH:
                     if (!prompt.trim()) {
-                        notify.error('Введите запрос для AI Research')
+                        notify.error('Введите запрос для поиска с ИИ')
                         return
                     }
                     config = {
@@ -412,7 +412,7 @@ export function SourceNodeConfigModal({
                                 <SelectItem value={SourceType.DOCUMENT}>📄 Документ (PDF, DOCX, TXT)</SelectItem>
                                 <SelectItem value={SourceType.API}>🔗 REST API</SelectItem>
                                 <SelectItem value={SourceType.DATABASE}>🗄️ База данных</SelectItem>
-                                <SelectItem value={SourceType.RESEARCH}>🔍 AI Research</SelectItem>
+                                <SelectItem value={SourceType.RESEARCH}>🔍 Поиск с ИИ</SelectItem>
                                 <SelectItem value={SourceType.MANUAL}>✏️ Ручной ввод</SelectItem>
                                 <SelectItem value={SourceType.STREAM} disabled>📡 Стрим (скоро)</SelectItem>
                             </SelectContent>
@@ -500,7 +500,7 @@ export function SourceNodeConfigModal({
                         {/* RESEARCH Tab */}
                         <TabsContent value={SourceType.RESEARCH} className="space-y-4 mt-4">
                             <div className="space-y-2">
-                                <Label htmlFor="prompt">Запрос для AI Research *</Label>
+                                <Label htmlFor="prompt">Запрос для поиска с ИИ *</Label>
                                 <Textarea
                                     id="prompt"
                                     placeholder="Опишите, какие данные нужно найти и структурировать..."

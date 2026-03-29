@@ -559,9 +559,13 @@ export function ManualSourceDialog({ open, onOpenChange, initialPosition, existi
         t.columns.some(col => (row[col.id] || '').trim() !== '')
     ).length, 0)
 
+    const defaultManualTitle = 'Ручной ввод'
+    const trimmedName = nodeName.trim()
     const dialogTitle = isEditMode
-        ? `✏️ Редактирование — ${nodeName}`
-        : `✏️ Ручной ввод — ${nodeName}`
+        ? `Редактирование: ${trimmedName || defaultManualTitle}`
+        : trimmedName && trimmedName !== defaultManualTitle
+            ? `${defaultManualTitle} — ${trimmedName}`
+            : defaultManualTitle
 
     const dialogDescription = isEditMode
         ? 'Редактируйте таблицы и сохраните изменения'
@@ -577,7 +581,7 @@ export function ManualSourceDialog({ open, onOpenChange, initialPosition, existi
             isLoading={isLoading}
             isValid={true}
             onSubmit={handleSubmit}
-            submitLabel={isEditMode ? 'Сохранить' : '✏️ Создать источник'}
+            submitLabel={isEditMode ? 'Сохранить' : 'Создать источник'}
             className="max-w-5xl"
             contentClassName="overflow-hidden"
         >

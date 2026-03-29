@@ -339,6 +339,14 @@ class TestAgentPayloadFactories:
         p = AgentPayload.make_error(agent="planner", error_message="Timeout")
         assert p.suggestions == []
 
+    def test_error_with_metadata(self):
+        p = AgentPayload.make_error(
+            agent="research",
+            error_message="fail",
+            metadata={"task_relevance": {"scores": []}},
+        )
+        assert p.metadata.get("task_relevance", {}).get("scores") == []
+
     def test_partial(self):
         p = AgentPayload.partial(
             agent="discovery",

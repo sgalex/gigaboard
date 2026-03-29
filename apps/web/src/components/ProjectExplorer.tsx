@@ -40,6 +40,14 @@ import { cn } from '@/lib/utils'
 import { SourceVitrina } from './SourceVitrina'
 import type { BoardWithNodes } from '@/types'
 import type { Dashboard, ProjectWidget, ProjectTable } from '@/types/dashboard'
+import type { DimensionType } from '@/types/crossFilter'
+
+/** Значения селекта «Тип» → API DimensionType */
+function mapCreateDimTypeToApi(v: string): DimensionType {
+    if (v === 'temporal') return 'date'
+    if (v === 'numerical') return 'number'
+    return 'string'
+}
 
 /** Icon + color per widget_type stored in config */
 const WIDGET_TYPE_ICONS: Record<string, { icon: React.ElementType; color: string }> = {
@@ -133,7 +141,7 @@ export function ProjectExplorer({ context = 'overview' }: ProjectExplorerProps) 
         await createDimension(projectId, {
             name: createDimForm.name.trim(),
             display_name: createDimForm.display_name.trim() || createDimForm.name.trim(),
-            dim_type: createDimForm.dim_type,
+            dim_type: mapCreateDimTypeToApi(createDimForm.dim_type),
         })
         setCreateDimOpen(false)
         setCreateDimForm({ name: '', display_name: '', dim_type: 'categorical' })
@@ -175,7 +183,7 @@ export function ProjectExplorer({ context = 'overview' }: ProjectExplorerProps) 
                 library: true,
                 tables: false,
                 dataSources: false,
-                dimensions: true,
+                dimensions: false,
             }
         }
         if (context === 'board') {
@@ -185,7 +193,7 @@ export function ProjectExplorer({ context = 'overview' }: ProjectExplorerProps) 
                 library: false,
                 tables: false,
                 dataSources: true,
-                dimensions: true,
+                dimensions: false,
             }
         }
         return {
@@ -194,7 +202,7 @@ export function ProjectExplorer({ context = 'overview' }: ProjectExplorerProps) 
             library: false,
             tables: true,
             dataSources: true,
-            dimensions: true,
+            dimensions: false,
         }
     })
 

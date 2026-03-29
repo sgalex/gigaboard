@@ -1,5 +1,10 @@
 # Backend Dockerfile for GigaBoard
 # Сборка из корня репозитория: docker build -f apps/backend/Dockerfile .
+#
+# В docker-compose.yml (production) код app/ КОПИРУЕТСЯ в образ — bind-mount нет.
+# Изменения в apps/backend/app попадут в контейнер только после:
+#   docker compose build backend && docker compose up -d backend
+# В docker-compose.dev.yml каталог ./apps/backend/app смонтирован в /app/app — там код обновляется без пересборки.
 
 FROM python:3.12-slim AS base
 
@@ -19,8 +24,11 @@ ENV UV_HTTP_TIMEOUT=300
 ARG PYPI_INDEX_URL=https://pypi.org/simple
 ENV UV_INDEX_URL=${PYPI_INDEX_URL}
 
-# Зависимости строго по uv.lock (без установки самого пакета в site-packages — код на PYTHONPATH)
-COPY apps/backend/pyproject.toml apps/backend/uv.lock ./
+# Workspace: корневой uv.lock — единственный актуальный lock (в нём pypdf, python-docx и др.).
+# Не использовать только apps/backend/uv.lock: он мог устареть относительно apps/backend/pyproject.toml.
+COPY pyproject.toml ./
+COPY uv.lock ./
+COPY apps/backend/pyproject.toml ./apps/backend/
 
 # Сначала основной индекс; при сбое — публичные зеркала (удобно, если pypi.org недоступен из Docker VM)
 RUN uv export --frozen --no-dev --no-hashes --no-emit-package gigaboard-backend -o /tmp/requirements.txt \
@@ -31,6 +39,11 @@ RUN uv export --frozen --no-dev --no-hashes --no-emit-package gigaboard-backend 
     && ( UV_INDEX_URL="${PYPI_INDEX_URL}" uv pip install --system --no-cache "python-multipart>=0.0.6" \
     || UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv pip install --system --no-cache "python-multipart>=0.0.6" \
     || UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ uv pip install --system --no-cache "python-multipart>=0.0.6" )
+
+# Явно: PDF/DOCX (если образ собран со старым кэшем или export без этих строк — иначе ModuleNotFoundError в runtime)
+RUN ( UV_INDEX_URL="${PYPI_INDEX_URL}" uv pip install --system --no-cache "pypdf>=4.0" "python-docx>=1.1.0" \
+    || UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv pip install --system --no-cache "pypdf>=4.0" "python-docx>=1.1.0" \
+    || UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ uv pip install --system --no-cache "pypdf>=4.0" "python-docx>=1.1.0" )
 
 COPY apps/backend/app ./app
 COPY apps/backend/migrations ./migrations

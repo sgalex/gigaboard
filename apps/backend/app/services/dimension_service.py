@@ -217,74 +217,6 @@ class DimensionService:
         return True
 
     @staticmethod
-    async def merge_dimensions(
-        db: AsyncSession,
-        project_id: UUID,
-        source_ids: list[UUID],
-        target_id: UUID,
-    ) -> dict[str, int]:
-        """Merge source dimensions into target_id.
-
-        All DimensionColumnMappings from source dimensions are re-pointed to target.
-        Duplicate mappings (same node/table/column already in target) are dropped.
-        Source dimensions are deleted after transfer.
-
-        Returns dict with 'transferred' and 'deleted' counts.
-        """
-        # Verify target belongs to this project
-        target = await DimensionService.get_dimension(db, target_id)
-        if not target or target.project_id != project_id:
-            raise ValueError(f"Target dimension {target_id} not found in project {project_id}")
-
-        # Existing mappings for target (to detect duplicates before inserting)
-        existing_q = await db.execute(
-            select(DimensionColumnMapping).where(
-                DimensionColumnMapping.dimension_id == target_id
-            )
-        )
-        existing_mappings: set[tuple] = {
-            (str(m.node_id), m.table_name, m.column_name)
-            for m in existing_q.scalars().all()
-        }
-
-        transferred = 0
-        for source_id in source_ids:
-            if source_id == target_id:
-                continue
-            source = await DimensionService.get_dimension(db, source_id)
-            if not source or source.project_id != project_id:
-                logger.warning("merge_dimensions: source %s not found, skipping", source_id)
-                continue
-
-            # Load all mappings for this source
-            src_mappings_q = await db.execute(
-                select(DimensionColumnMapping).where(
-                    DimensionColumnMapping.dimension_id == source_id
-                )
-            )
-            for m in src_mappings_q.scalars().all():
-                key = (str(m.node_id), m.table_name, m.column_name)
-                if key in existing_mappings:
-                    # Target already has this mapping → just delete the duplicate
-                    await db.delete(m)
-                else:
-                    # Re-point to target
-                    m.dimension_id = target_id
-                    existing_mappings.add(key)
-                    transferred += 1
-
-            await db.flush()
-            await db.delete(source)
-            logger.info("merge_dimensions: merged '%s' → '%s'", source.name, target.name)
-
-        await db.flush()
-        logger.info(
-            "merge_dimensions: transferred=%d mappings, deleted=%d sources",
-            transferred, len(source_ids),
-        )
-        return {"transferred": transferred, "deleted": len(source_ids)}
-
-    @staticmethod
     async def get_dimension_values(
         db: AsyncSession,
         dim_id: UUID,
@@ -596,7 +528,7 @@ class DimensionService:
                         node_id=node_id,
                         table_name=table_name,
                         column_name=col_name,
-                        mapping_source="auto_detected",
+                        mapping_source="auto",
                         confidence=round(confidence, 2),
                     )
                     db.add(mapping)

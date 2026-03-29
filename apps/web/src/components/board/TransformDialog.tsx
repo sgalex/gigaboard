@@ -11,7 +11,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Code, Loader2, Send, Eye, Save, Trash2, Sparkles } from 'lucide-react'
+import { Code, Loader2, Send, Eye, Save, Trash2, Sparkles, MessageSquare, Lightbulb, RefreshCw } from 'lucide-react'
 import { ContentNode } from '@/types'
 import { cn } from '@/lib/utils'
 import { TransformSuggestionsPanel } from './TransformSuggestionsPanel'
@@ -22,11 +22,9 @@ import {
     type ProgressMeta as SharedProgressMeta,
     mergePlanSteps,
     applyProgressToSteps,
-    updateMetaFromPlanEvent,
-    updateMetaFromProgressEvent,
+    metaFromSteps,
     markRunningAsCompleted,
     markLastRunningAsFailed,
-    finalizeMeta,
 } from '@/lib/multiAgentProgress'
 
 interface TransformDialogProps {
@@ -114,6 +112,9 @@ export function TransformDialog({
     const [currentTransformation, setCurrentTransformation] = useState<TransformationState | null>(null)
     const [editedCode, setEditedCode] = useState<string | null>(null)
     const [rightPanelTab, setRightPanelTab] = useState<'preview' | 'code'>('preview')
+    const [composerTab, setComposerTab] = useState<'message' | 'suggestions'>('message')
+    const [composerSuggestionsRefreshKey, setComposerSuggestionsRefreshKey] = useState(0)
+    const [composerSuggestionsLoading, setComposerSuggestionsLoading] = useState(false)
     const [selectedSourceTableIndex, setSelectedSourceTableIndex] = useState(0)
     // Autocomplete state
     const [showAutocomplete, setShowAutocomplete] = useState(false)
@@ -133,6 +134,11 @@ export function TransformDialog({
 
     // Result tables from the current transformation preview
     const resultPreviewTables = currentTransformation?.previewData?.tables ?? []
+
+    const chatHistoryForSuggestions = useMemo(
+        () => chatMessages.map(msg => ({ role: msg.role, content: msg.content })),
+        [chatMessages]
+    )
 
     // Combined pool: source tables + result tables (deduplicated by name)
     const allTablePool = useMemo(() => {
@@ -344,6 +350,7 @@ export function TransformDialog({
 
         // Always reset isGenerating when dialog opens
         setIsGenerating(false)
+        setComposerTab('message')
 
         if (initialCode && initialTransformationId) {
             // Edit mode: restore data
@@ -450,6 +457,13 @@ export function TransformDialog({
         loadPreview()
     }, [open, initialCode, initialTransformationId, primaryNode?.id])
 
+    // После отправки сбрасываем инлайн-height — иначе остаётся высота многострочного ввода
+    useEffect(() => {
+        const el = textareaRef.current
+        if (!el || inputValue !== '') return
+        el.style.height = ''
+    }, [inputValue])
+
     // Auto-scroll chat
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -534,19 +548,28 @@ export function TransformDialog({
                 },
                 {
                     onPlanUpdate: (steps, meta) => {
-                        setProgressSteps((prev) =>
-                            mergePlanSteps(prev, steps, meta?.completedCount, 'transform')
-                        )
-                        setProgressMeta((prev) =>
-                            updateMetaFromPlanEvent(prev, steps.length, meta?.completedCount)
-                        )
+                        setProgressSteps((prev) => {
+                            const next = mergePlanSteps(prev, steps, meta?.completedCount, 'transform')
+                            setProgressMeta(metaFromSteps(next))
+                            return next
+                        })
                     },
                     onProgress: (_agentLabel, task, meta) => {
-                        setProgressSteps((prev) =>
-                            applyProgressToSteps(prev, task, meta?.stepIndex, 'transform')
-                        )
-                        setProgressMeta((prev) => {
-                            return updateMetaFromProgressEvent(prev, meta?.stepIndex, meta?.totalSteps)
+                        setProgressSteps((prev) => {
+                            const next = applyProgressToSteps(prev, task, meta?.stepIndex, 'transform')
+                            let metaNext = metaFromSteps(next)
+                            if (
+                                typeof meta?.totalSteps === 'number' &&
+                                meta.totalSteps > 0 &&
+                                metaNext.total != null
+                            ) {
+                                metaNext = {
+                                    ...metaNext,
+                                    total: Math.max(metaNext.total, meta.totalSteps),
+                                }
+                            }
+                            setProgressMeta(metaNext)
+                            return next
                         })
                     },
                     onResult: (result) => {
@@ -563,8 +586,11 @@ export function TransformDialog({
             if (!data) {
                 throw new Error('Пустой результат трансформации')
             }
-            setProgressSteps((prev) => markRunningAsCompleted(prev))
-            setProgressMeta((prev) => finalizeMeta(prev, progressSteps.length))
+            setProgressSteps((prev) => {
+                const next = markRunningAsCompleted(prev)
+                setProgressMeta(metaFromSteps(next))
+                return next
+            })
 
             console.log('🤖 AI response received:', data)
             console.log('📄 Code length:', data.code?.length || 0, 'chars')
@@ -709,8 +735,9 @@ export function TransformDialog({
         setInputValue(newValue)
 
         const textarea = e.target
+        const minH = 56 // ~2 строки text-sm + py-1.5
         textarea.style.height = 'auto'
-        textarea.style.height = `${Math.min(textarea.scrollHeight, 120)}px`
+        textarea.style.height = `${Math.max(minH, Math.min(textarea.scrollHeight, 120))}px`
 
         const cursorPos = textarea.selectionStart
         const textBeforeCursor = newValue.substring(0, cursorPos)
@@ -917,10 +944,10 @@ export function TransformDialog({
                 <DialogHeader className="px-6 py-1.5 border-b shrink-0">
                     <DialogTitle className="flex items-center gap-2 text-sm leading-tight">
                         <Code className="h-3.5 w-3.5 text-blue-500" />
-                        AI-ассистент трансформаций
+                        ИИ-ассистент трансформаций
                     </DialogTitle>
                     <DialogDescription className="text-xs leading-tight mt-0.5">
-                        Создайте трансформацию с помощью AI или отредактируйте код вручную
+                        Создайте трансформацию с помощью ИИ или отредактируйте код вручную
                     </DialogDescription>
                 </DialogHeader>
 
@@ -950,7 +977,7 @@ export function TransformDialog({
 
                         {/* Chat Messages */}
                         <div className="flex items-center justify-between px-3 pt-2 pb-1">
-                            <span className="text-xs font-medium text-muted-foreground">💬 Диалог с AI</span>
+                            <span className="text-xs font-medium text-muted-foreground">💬 Диалог с ИИ</span>
                             {chatMessages.length > 0 && (
                                 <Button
                                     variant="ghost"
@@ -967,7 +994,14 @@ export function TransformDialog({
                                 </Button>
                             )}
                         </div>
-                        <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-2">
+                        <div
+                            className={cn(
+                                'flex-1 min-h-0 px-3 pb-3 space-y-2',
+                                chatMessages.length === 0 && !isGenerating
+                                    ? 'overflow-y-hidden'
+                                    : 'overflow-y-auto'
+                            )}
+                        >
                             {chatMessages.length === 0 ? (
                                 <div key="empty-placeholder" className="flex flex-col items-center justify-center h-full text-center text-muted-foreground">
                                     <Sparkles className="w-10 h-10 mb-3 text-blue-500/30" />
@@ -1009,7 +1043,7 @@ export function TransformDialog({
                             )}
                             {isGenerating && (
                                 <MultiAgentProgressBlock
-                                    runningText="AI создаёт код трансформации..."
+                                    runningText="ИИ создаёт код трансформации..."
                                     progressMeta={progressMeta}
                                     progressSteps={progressSteps}
                                     variant="blue"
@@ -1018,79 +1052,134 @@ export function TransformDialog({
                             <div ref={messagesEndRef} />
                         </div>
 
-                        {/* Suggestions Panel */}
-                        <div className="border-t overflow-y-auto max-h-[120px]">
-                            <TransformSuggestionsPanel
-                                contentNodeId={primaryNode.id}
-                                chatHistory={chatMessages.map(msg => ({
-                                    role: msg.role,
-                                    content: msg.content
-                                }))}
-                                currentCode={currentTransformation?.code}
-                                onSuggestionClick={handleSendMessage}
-                            />
-                        </div>
-
-                        {/* Chat Input */}
-                        <div className="p-2 border-t relative">
-                            {/* Autocomplete dropdown */}
-                            {showAutocomplete && autocompleteItems.length > 0 && (
-                                <div
-                                    ref={autocompleteRef}
-                                    className="absolute bottom-full left-2 right-2 mb-1 bg-popover border rounded-md shadow-lg max-h-[200px] overflow-y-auto z-50"
-                                >
-                                    {autocompleteKind === 'column' && (
-                                        <div className="px-3 py-1 text-xs text-muted-foreground border-b bg-muted/50 font-medium select-none">
-                                            Колонки @{autocompleteTableCtx}
-                                        </div>
-                                    )}
-                                    {autocompleteItems.map((item, idx) => (
-                                        <button
-                                            key={item.insertText}
-                                            onClick={() => insertMention(item)}
-                                            onMouseEnter={() => setAutocompleteIndex(idx)}
-                                            className={cn(
-                                                'w-full px-3 py-2 text-left text-sm flex items-center justify-between hover:bg-accent transition-colors',
-                                                idx === autocompleteIndex && 'bg-accent'
-                                            )}
+                        {/* Сообщение / рекомендации — отдельные вкладки; рекомендации грузятся только на вкладке */}
+                        <div className="border-t flex flex-col shrink-0 min-h-0">
+                            <Tabs
+                                value={composerTab}
+                                onValueChange={(v) => setComposerTab(v as 'message' | 'suggestions')}
+                                className="flex flex-col gap-0"
+                            >
+                                <TabsList className="mx-2 mt-2 h-8 w-[calc(100%-1rem)] grid grid-cols-2 shrink-0 gap-1 p-1 items-stretch">
+                                    <TabsTrigger value="message" className="text-xs gap-1 px-2 h-full min-h-0">
+                                        <MessageSquare className="h-3 w-3 shrink-0" />
+                                        Сообщение
+                                    </TabsTrigger>
+                                    <div
+                                        className={cn(
+                                            'flex min-h-0 min-w-0 h-full rounded-sm overflow-hidden',
+                                            composerTab === 'suggestions' &&
+                                                'bg-background text-foreground shadow-sm'
+                                        )}
+                                    >
+                                        <TabsTrigger
+                                            value="suggestions"
+                                            className="text-xs gap-1 px-2 h-full min-w-0 flex-1 rounded-none shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
                                         >
-                                            <span className="flex items-center gap-1.5 font-mono">
-                                                {item.kind === 'source_table' && <span className="text-blue-500 text-[10px]">📊</span>}
-                                                {item.kind === 'result_table' && <span className="text-green-500 text-[10px] font-bold">→</span>}
-                                                {item.kind === 'column' && <span className="text-muted-foreground text-[10px]">·</span>}
-                                                {item.label}
-                                            </span>
-                                            <span className="text-xs text-muted-foreground">{item.hint}</span>
+                                            <Lightbulb className="h-3 w-3 shrink-0" />
+                                            <span className="truncate">Рекомендации</span>
+                                        </TabsTrigger>
+                                        <button
+                                            type="button"
+                                            className={cn(
+                                                'inline-flex items-center justify-center w-7 shrink-0 rounded-none border-l border-border/60',
+                                                'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+                                                'disabled:pointer-events-none disabled:opacity-40',
+                                                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1'
+                                            )}
+                                            disabled={
+                                                composerTab !== 'suggestions' ||
+                                                isGenerating ||
+                                                isSaving ||
+                                                composerSuggestionsLoading
+                                            }
+                                            onClick={() => setComposerSuggestionsRefreshKey((k) => k + 1)}
+                                            title="Обновить рекомендации"
+                                            aria-label="Обновить рекомендации"
+                                        >
+                                            <RefreshCw className="h-3.5 w-3.5" />
                                         </button>
-                                    ))}
-                                </div>
-                            )}
+                                    </div>
+                                </TabsList>
+                                <TabsContent value="message" className="mt-0 p-2 pt-1 m-0 border-0 focus-visible:outline-none data-[state=inactive]:hidden">
+                                    <div className="relative">
+                                        {showAutocomplete && autocompleteItems.length > 0 && (
+                                            <div
+                                                ref={autocompleteRef}
+                                                className="absolute bottom-full left-0 right-0 mb-1 bg-popover border rounded-md shadow-lg max-h-[200px] overflow-y-auto z-50"
+                                            >
+                                                {autocompleteKind === 'column' && (
+                                                    <div className="px-3 py-1 text-xs text-muted-foreground border-b bg-muted/50 font-medium select-none">
+                                                        Колонки @{autocompleteTableCtx}
+                                                    </div>
+                                                )}
+                                                {autocompleteItems.map((item, idx) => (
+                                                    <button
+                                                        key={item.insertText}
+                                                        onClick={() => insertMention(item)}
+                                                        onMouseEnter={() => setAutocompleteIndex(idx)}
+                                                        className={cn(
+                                                            'w-full px-3 py-2 text-left text-sm flex items-center justify-between hover:bg-accent transition-colors',
+                                                            idx === autocompleteIndex && 'bg-accent'
+                                                        )}
+                                                    >
+                                                        <span className="flex items-center gap-1.5 font-mono">
+                                                            {item.kind === 'source_table' && <span className="text-blue-500 text-[10px]">📊</span>}
+                                                            {item.kind === 'result_table' && <span className="text-green-500 text-[10px] font-bold">→</span>}
+                                                            {item.kind === 'column' && <span className="text-muted-foreground text-[10px]">·</span>}
+                                                            {item.label}
+                                                        </span>
+                                                        <span className="text-xs text-muted-foreground">{item.hint}</span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
 
-                            <div className="flex gap-2 items-end">
-                                <Textarea
-                                    ref={textareaRef}
-                                    value={inputValue}
-                                    onChange={handleInputChange}
-                                    onKeyDown={handleKeyDown}
-                                    placeholder={allTablePool.length > 0 ? `Опишите трансформацию (@tableName для таблицы, @tableName.col для колонки)...` : "Опишите трансформацию..."}
-                                    className="min-h-[32px] py-1.5 px-2 resize-none text-sm overflow-hidden"
-                                    style={{ height: '32px' }}
-                                    disabled={isGenerating}
-                                    rows={1}
-                                />
-                                <Button
-                                    onClick={() => handleSendMessage()}
-                                    disabled={!inputValue.trim() || isGenerating}
-                                    size="icon"
-                                    className="h-[32px] w-[32px] shrink-0 bg-blue-500 hover:bg-blue-600"
+                                        <div className="flex gap-2 items-end">
+                                            <Textarea
+                                                ref={textareaRef}
+                                                value={inputValue}
+                                                onChange={handleInputChange}
+                                                onKeyDown={handleKeyDown}
+                                                placeholder={allTablePool.length > 0 ? `Опишите трансформацию (@tableName для таблицы, @tableName.col для колонки)...` : 'Опишите трансформацию...'}
+                                                className="min-h-[56px] py-1.5 px-2 resize-none text-sm overflow-hidden"
+                                                disabled={isGenerating}
+                                                rows={2}
+                                            />
+                                            <Button
+                                                onClick={() => handleSendMessage()}
+                                                disabled={!inputValue.trim() || isGenerating}
+                                                size="icon"
+                                                className="h-[32px] w-[32px] shrink-0 bg-blue-500 hover:bg-blue-600"
+                                            >
+                                                {isGenerating ? (
+                                                    <Loader2 className="w-5 h-5 animate-spin" />
+                                                ) : (
+                                                    <Send className="w-5 h-5" />
+                                                )}
+                                            </Button>
+                                        </div>
+                                    </div>
+                                </TabsContent>
+                                <TabsContent
+                                    value="suggestions"
+                                    forceMount
+                                    className="mt-0 m-0 p-2 pt-1 flex-none h-fit min-h-0 max-h-[min(36vh,260px)] overflow-y-auto border-0 focus-visible:outline-none data-[state=inactive]:hidden"
                                 >
-                                    {isGenerating ? (
-                                        <Loader2 className="w-5 h-5 animate-spin" />
-                                    ) : (
-                                        <Send className="w-5 h-5" />
-                                    )}
-                                </Button>
-                            </div>
+                                    <TransformSuggestionsPanel
+                                        contentNodeId={primaryNode.id}
+                                        chatHistory={chatHistoryForSuggestions}
+                                        currentCode={currentTransformation?.code}
+                                        suggestionsTabActive={composerTab === 'suggestions'}
+                                        isGenerating={isGenerating}
+                                        suggestionsRefreshKey={composerSuggestionsRefreshKey}
+                                        onSuggestionsLoadingChange={setComposerSuggestionsLoading}
+                                        onSuggestionClick={(prompt) => {
+                                            handleSendMessage(prompt)
+                                            setComposerTab('message')
+                                        }}
+                                    />
+                                </TabsContent>
+                            </Tabs>
                         </div>
                     </div>
 

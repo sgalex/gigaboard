@@ -110,7 +110,7 @@
 - Transform Suggestions: предложения трансформаций
 - Widget: генерация визуализаций
 - Widget Suggestions: предложения визуализаций на основе данных
-- Research: источник AI Research и API `POST /api/v1/research/chat` (`ResearchController` → Orchestrator)
+- Research: источник «Поиск с ИИ» и API `POST /api/v1/research/chat` (`ResearchController` → Orchestrator)
 **Коммуникация**: Orchestrator через Redis Message Bus (`request_response()`)
 **Ожидаемый результат**:
 - Сложные многошаговые аналитические задачи решаются автоматически
@@ -1292,7 +1292,7 @@ SourceNode (источник, наследует ContentNode) ──TRANSFORMATI
 **Операции SourceNode**:
 - **extract**: Извлечь данные из источника → сохранить в SourceNode (text + tables)
 - **validate**: Проверить подключение/валидность источника
-- **refresh**: Принудительно обновить данные
+- **refresh**: Принудительно обновить данные (`POST /api/v1/source-nodes/{id}/refresh`). На **карточке доски** кнопка обновления **не вызывает** refresh для типов **document** и **research** — повторное извлечение через настройки источника; см. [API.md](./API.md) §5.1.
 - **archive**: Сохранить активные данные в архив (для stream)
 
 **Streaming Support** (уникальная возможность):

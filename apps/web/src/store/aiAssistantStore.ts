@@ -8,6 +8,11 @@ import { useAuthStore } from '@/store/authStore'
 import { notify } from './notificationStore'
 import type { ChatMessage, AIChatRequest } from '@/types'
 import { MessageRole } from '@/types'
+import {
+    mergePlanSteps,
+    applyProgressToSteps,
+    metaFromSteps,
+} from '@/lib/multiAgentProgress'
 
 interface SendAssistantMessageOptions {
     allowAutoFilter?: boolean
@@ -36,10 +41,6 @@ type AssistantProgressEvent = {
     step_index?: number
     total_steps?: number
     completed_count?: number
-}
-
-function _normalizeProgressText(value: unknown): string {
-    return String(value || '').trim()
 }
 
 interface AIAssistantStore {
@@ -122,61 +123,20 @@ export const useAIAssistantStore = create<AIAssistantStore>((set, get) => ({
     handleStreamProgress: (payload: AssistantProgressEvent) => {
         if (payload?.event === 'plan_update' && Array.isArray(payload.steps) && payload.steps.length > 0) {
             set((state) => {
-                const incomingSteps = payload.steps
-                    .map((s) => _normalizeProgressText(s))
+                const incomingSteps = (payload.steps ?? [])
+                    .map((s) => String(s || '').trim())
                     .filter((s) => s.length > 0)
                 if (incomingSteps.length === 0) return {}
 
-                const prevRunningTexts = state.progressSteps
-                    .filter((s) => s.status === 'running')
-                    .map((s) => _normalizeProgressText(s.text))
-                    .filter((s) => s.length > 0)
-
-                const preservedDone = state.progressSteps.filter(
-                    (s) => s.status === 'completed' || s.status === 'failed'
+                const nextSteps = mergePlanSteps(
+                    state.progressSteps,
+                    incomingSteps,
+                    payload.completed_count,
+                    'assistant'
                 )
-                const preservedTexts = new Set(
-                    preservedDone.map((s) => _normalizeProgressText(s.text))
-                )
-
-                const completedCount = Math.max(
-                    0,
-                    Math.min(Number(payload.completed_count || 0), incomingSteps.length)
-                )
-                const tailFromServer = incomingSteps.slice(completedCount)
-                const mergedTail = tailFromServer.filter((text) => !preservedTexts.has(text))
-                const nextTail: AssistantProgressStep[] = mergedTail.map((stepText, idx) => ({
-                    id: `assistant-plan-tail-${idx}-${Math.random().toString(36).slice(2, 6)}`,
-                    text: stepText,
-                    status: 'pending',
-                }))
-                let nextSteps: AssistantProgressStep[] = [...preservedDone, ...nextTail]
-
-                // Preserve spinner on the currently running step if it still exists after plan update.
-                let runningIdx = nextSteps.findIndex(
-                    (step) =>
-                        step.status === 'pending' &&
-                        prevRunningTexts.includes(_normalizeProgressText(step.text))
-                )
-                // Fallback: if no direct match, keep spinner on first pending step.
-                if (runningIdx < 0) {
-                    runningIdx = nextSteps.findIndex((step) => step.status === 'pending')
-                }
-                if (runningIdx >= 0) {
-                    nextSteps = nextSteps.map((step, idx) =>
-                        idx === runningIdx ? { ...step, status: 'running' } : step
-                    )
-                }
-
-                const completedNow = nextSteps.filter((s) => s.status === 'completed').length
-                const runningNow = nextSteps.some((s) => s.status === 'running')
-
                 return {
                     progressSteps: nextSteps,
-                    progressMeta: {
-                        current: runningNow ? Math.min(completedNow + 1, nextSteps.length) : completedNow,
-                        total: nextSteps.length,
-                    },
+                    progressMeta: metaFromSteps(nextSteps),
                 }
             })
             return
@@ -189,100 +149,23 @@ export const useAIAssistantStore = create<AIAssistantStore>((set, get) => ({
                 typeof stepIndexRaw === 'number' && stepIndexRaw > 0 ? Math.floor(stepIndexRaw) : null
             const totalSteps =
                 typeof totalStepsRaw === 'number' && totalStepsRaw > 0 ? Math.floor(totalStepsRaw) : null
-            const taskText = _normalizeProgressText(payload?.task)
+            const taskText = String(payload?.task || '').trim()
 
-            let nextSteps = state.progressSteps
-
-            const matchedIdx =
-                taskText.length > 0
-                    ? nextSteps.findIndex(
-                          (step) =>
-                              _normalizeProgressText(step.text) === taskText &&
-                              step.status !== 'completed' &&
-                              step.status !== 'failed'
-                      )
-                    : -1
-
-            if (matchedIdx >= 0) {
-                nextSteps = nextSteps.map((step, idx) => {
-                    if (step.status === 'failed') return step
-                    if (idx < matchedIdx) {
-                        return step.status === 'completed' ? step : { ...step, status: 'completed' as const }
-                    }
-                    if (idx === matchedIdx) {
-                        return { ...step, status: 'running' as const }
-                    }
-                    return step.status === 'completed' ? step : { ...step, status: 'pending' as const }
-                })
-            } else if (stepIndex != null && nextSteps.length >= stepIndex) {
-                const runningIdx = Math.max(0, stepIndex - 1)
-                nextSteps = nextSteps.map((step, idx) => ({
-                    ...step,
-                    status:
-                        step.status === 'failed'
-                            ? 'failed'
-                            : step.status === 'completed'
-                            ? 'completed'
-                            : idx < runningIdx
-                            ? 'completed'
-                            : idx === runningIdx
-                            ? 'running'
-                            : 'pending',
-                }))
-            } else {
-                // Fallback path: if we got progress but no matching step in plan yet.
-                const fallbackText = taskText || 'Выполняю шаг'
-                const existingIdx = nextSteps.findIndex(
-                    (step) =>
-                        _normalizeProgressText(step.text) === fallbackText &&
-                        step.status !== 'completed' &&
-                        step.status !== 'failed'
-                )
-                if (existingIdx >= 0) {
-                    nextSteps = nextSteps.map((step, idx) => ({
-                        ...step,
-                        status:
-                            step.status === 'failed'
-                                ? 'failed'
-                                : step.status === 'completed'
-                                ? 'completed'
-                                : idx < existingIdx
-                                ? 'completed'
-                                : idx === existingIdx
-                                ? 'running'
-                                : 'pending',
-                    }))
-                } else {
-                    nextSteps = [
-                        ...nextSteps.map((step) =>
-                            step.status === 'running' ? { ...step, status: 'completed' as const } : step
-                        ),
-                        {
-                            id: `assistant-step-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                            text: fallbackText,
-                            status: 'running' as const,
-                        },
-                    ]
-                }
-            }
-
-            const doneCount = nextSteps.filter((s) => s.status === 'completed').length
-            const runningCount = nextSteps.filter((s) => s.status === 'running').length
+            let nextSteps = applyProgressToSteps(
+                state.progressSteps,
+                taskText,
+                stepIndex ?? undefined,
+                'assistant'
+            )
 
             const prevMeta = state.progressMeta
             const nextTotal = totalSteps != null ? Math.max(prevMeta.total ?? 0, totalSteps) : prevMeta.total
-            const nextCurrent =
-                stepIndex != null
-                    ? stepIndex
-                    : runningCount > 0
-                    ? Math.min(doneCount + 1, nextTotal ?? doneCount + 1)
-                    : doneCount
-
+            const meta = metaFromSteps(nextSteps)
             return {
                 progressSteps: nextSteps,
                 progressMeta: {
-                    current: nextCurrent,
-                    total: nextTotal ?? (nextSteps.length > 0 ? nextSteps.length : null),
+                    current: meta.current,
+                    total: nextTotal ?? meta.total,
                 },
             }
         })

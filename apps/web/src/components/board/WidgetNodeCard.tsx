@@ -502,6 +502,7 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
                 >
                     {node.html_code ? (
                         <iframe
+                            key={refreshKey}
                             ref={iframeRef}
                             className="w-full h-full border-0 pointer-events-auto"
                             style={{

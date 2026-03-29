@@ -6,6 +6,20 @@
 
 **Ключевые файлы:** корневой `docker-compose.yml`, `apps/backend/Dockerfile`, `apps/web/Dockerfile`, шаблон [`.env.example`](../.env.example), вспомогательные ресурсы в [`res/`](../res/) (см. [`res/README.md`](../res/README.md)).
 
+**База данных в контейнере:** сервис `backend` получает `DATABASE_URL` **только** из `docker-compose.yml` (хост `postgres`, не `localhost`). Строка `DATABASE_URL` в корневом `.env` на машине разработчика **не подменяет** подключение внутри контейнера: при старте в логах backend будет строка вида `Database target (DATABASE_URL): postgres:5432/gigaboard`. Локальный `run-backend.ps1` и Docker — это **разные** экземпляры Postgres, если вы не настраиваете общий хост вручную.
+
+### Почему «тот же файл» ведёт себя по-разному (Docker vs локальный uvicorn)
+
+Это **не один и тот же запуск приложения** с точки зрения данных и окружения:
+
+1. **Разные базы и файлы.** Загрузка через UI на `localhost:5173` + `run-backend.ps1` пишет в **Postgres на хосте** (и/или в каталог из `.env`). Загрузка через UI на `localhost:3000` (nginx в Compose) пишет в **Postgres в контейнере** и в том хранилище, которое задано **для backend-контейнера**. Даже один и тот же PDF на диске — это **два разных upload** и два разных `file_id`; сравнивать нужно байты и логи, а не «один URL в браузере».
+
+2. **Корневой `.env` и контейнер.** В контейнере `GIGABOARD_IN_DOCKER=1`, поэтому Python **не читает** корневой `.env` / `.env.local` как при локальном запуске ([`app/core/config.py`](../apps/backend/app/core/config.py)). Переменные в процессе backend в Docker задаёт **только** то, что передано в `docker-compose.yml` (и подстановка `${VAR}` из корневого `.env` **для Compose** — это отдельный механизм: значения из `.env` подставляются в YAML, но файл целиком в приложение не монтируется).
+
+3. **`STORAGE_BACKEND` и путь к файлам.** Если в корневом `.env` для разработки на хосте указано `STORAGE_BACKEND=local`, то при `docker compose up` эта же переменная может **подставиться** в сервис `backend` (`${STORAGE_BACKEND:-database}`). Тогда в контейнере включается файловое хранилище с путём по умолчанию `data/uploads` относительно рабочего каталога — это **`/app/data/uploads`**, тогда как том в Compose смонтирован на **`/app/uploads`**. В `docker-compose.yml` задан дефолт `STORAGE_LOCAL_PATH=/app/uploads`, чтобы при `STORAGE_BACKEND=local` файлы попадали в тот же том, что и ожидается. Проверка: в логах при старте backend есть строка `File storage: STORAGE_BACKEND=... STORAGE_LOCAL_PATH=...`.
+
+4. **Одинаковый код, разные ОС в рантайме.** Образ backend — Linux; локально на Windows — другой event loop и иногда другие версии Python, если venv не синхронизирован с `uv.lock`. Критичные места (BYTEA, `memoryview`) в коде учитываются, но диагностика всё равно должна опираться на лог `analyze-document failed ... detail=...` и на строку `File storage:` при старте.
+
 ---
 
 ## Требования к ВМ
@@ -255,6 +269,7 @@ docker compose exec postgres pg_dump -U gigaboard gigaboard > backup_$(date +%Y%
 | **Порт занят** | `FRONTEND_PORT` в `.env`; при использовании `docker-compose.publish-internal-ports.yml` — также `POSTGRES_PORT`, `REDIS_PORT`, `BACKEND_PORT` |
 | **502 / нет API с браузера** | `docker compose ps`, логи `backend`; CORS — `CORS_ORIGINS` должен включать Origin браузера |
 | **307 на POST, затем ERR_CONNECTION_REFUSED** | Редирект trailing slash строил URL на `backend:8000`. В образе включены `uvicorn --proxy-headers`, nginx передаёт `Host` / `X-Forwarded-Host` (`$http_host`). Пересоберите `frontend` + `backend` |
+| **413 при загрузке файла (Excel и др.)** | Nginx по умолчанию режет тело запроса (**1 MB**). В `apps/web/nginx.conf` задано `client_max_body_size` (согласуйте с `STORAGE_MAX_FILE_SIZE_MB`). После правки: `docker compose build frontend && docker compose up -d frontend`. Внешний nginx на ВМ — см. `res/nginx-vm-gigaboard.conf` (`client_max_body_size`) |
 | **Миграции** | Логи старта backend; локально: `cd apps/backend/migrations && uv run alembic heads` |
 | **Чистая переустановка БД** | `docker compose down` и удаление тома `*_postgres_data` (**удалит данные**) |
 

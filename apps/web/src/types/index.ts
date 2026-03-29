@@ -201,6 +201,8 @@ export interface SourceNodeUpdate {
     config?: Record<string, any>;
     metadata?: Record<string, any>;
     position?: { x: number; y: number };
+    /** Обновление извлечённого контента (например document: text + tables из диалога). */
+    data?: { text?: string; tables?: Array<Record<string, unknown>> };
 }
 
 // ContentNode - result of data processing
@@ -436,6 +438,22 @@ export interface ResearchChatMessage {
 export interface ResearchSourceRef {
     url: string;
     title: string;
+    /** MIME из ответа HTTP (research), если был fetch */
+    mime_type?: string;
+    /** Семантика ресурса: html_page, image, video, json, … */
+    resource_kind?: string;
+    metadata?: Record<string, unknown>;
+}
+
+/** Каталог URL из ResearchAgent (страницы + вложенные медиа и т.д.) */
+export interface ResearchDiscoveredResourceRef {
+    url: string;
+    resource_kind?: string;
+    mime_type?: string;
+    parent_url?: string;
+    origin?: string;
+    tag?: string;
+    title?: string;
 }
 
 export interface ResearchChatRequest {
@@ -448,6 +466,7 @@ export interface ResearchChatResponse {
     narrative: string;
     tables: Array<{ name?: string; columns?: Array<{ name: string; type?: string }>; rows?: Record<string, unknown>[] }>;
     sources: ResearchSourceRef[];
+    discovered_resources?: ResearchDiscoveredResourceRef[];
     session_id: string;
     execution_time_ms?: number;
     plan?: Record<string, unknown>;

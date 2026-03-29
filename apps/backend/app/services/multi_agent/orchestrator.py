@@ -113,6 +113,409 @@ def _trim_tool_result_cache(cache: Dict[str, Any]) -> None:
         cache.pop(next(iter(cache)))
 
 
+def _trace_include_table_contents(agent_context: Dict[str, Any]) -> bool:
+    """Включить в JSONL-трейс превью строк таблиц (см. MULTI_AGENT_TRACE_TABLE_*)."""
+    if not ma_bool("MULTI_AGENT_TRACE_TABLE_CONTENTS", True):
+        return False
+    tt = str((agent_context or {}).get("task_type") or "").strip()
+    if tt == "document_extraction":
+        return True
+    return ma_bool("MULTI_AGENT_TRACE_TABLE_CONTENTS_ALL", False)
+
+
+def _serialize_tables_for_trace(
+    tables: Any,
+    *,
+    max_tables: int = 8,
+    max_rows_per_table: int = 40,
+    max_cell_chars: int = 600,
+) -> list[dict[str, Any]]:
+    """Усечённое представление таблиц для JSONL (читаемость трейса без гигабайт логов)."""
+    if not tables:
+        return []
+    out: list[dict[str, Any]] = []
+    for t in tables[:max_tables]:
+        if hasattr(t, "model_dump"):
+            d = t.model_dump()
+        elif isinstance(t, dict):
+            d = t
+        else:
+            continue
+        cols_raw = d.get("columns") or []
+        col_names: list[str] = []
+        for c in cols_raw:
+            if isinstance(c, dict):
+                col_names.append(str(c.get("name", "")))
+            else:
+                col_names.append(str(c))
+        rows_in = d.get("rows") or []
+        rows_out: list[Any] = []
+        for r in rows_in[:max_rows_per_table]:
+            if isinstance(r, dict):
+                row_out: dict[str, Any] = {}
+                for k, v in r.items():
+                    sv = "" if v is None else str(v)
+                    if len(sv) > max_cell_chars:
+                        sv = sv[:max_cell_chars] + "…"
+                    row_out[str(k)] = sv
+                rows_out.append(row_out)
+            elif isinstance(r, list):
+                rows_out.append(
+                    [
+                        (
+                            (str(x)[:max_cell_chars] + "…")
+                            if x is not None and len(str(x)) > max_cell_chars
+                            else (None if x is None else x)
+                        )
+                        for x in r
+                    ]
+                )
+            else:
+                s = "" if r is None else str(r)
+                rows_out.append(s[:max_cell_chars] + ("…" if len(s) > max_cell_chars else ""))
+        out.append(
+            {
+                "name": d.get("name"),
+                "id": d.get("id"),
+                "column_names": col_names,
+                "row_count": d.get("row_count", len(rows_in)),
+                "rows_preview": rows_out,
+                "rows_omitted": max(0, len(rows_in) - len(rows_out)),
+            }
+        )
+    return out
+
+
+def _tables_snapshot_from_results(results: Dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+    """Сводка таблиц из всех результатов structurizer* (финальный снимок для трейса)."""
+    if not isinstance(results, dict):
+        return None
+    merged: list[dict[str, Any]] = []
+    for key, payload in results.items():
+        if not isinstance(payload, dict):
+            continue
+        if not str(key).startswith("structurizer"):
+            continue
+        tbls = payload.get("tables") or []
+        merged.extend(
+            _serialize_tables_for_trace(
+                tbls,
+                max_tables=ma_int("MULTI_AGENT_TRACE_TABLE_CONTENTS_MAX_TABLES", 8),
+                max_rows_per_table=ma_int("MULTI_AGENT_TRACE_TABLE_CONTENTS_MAX_ROWS", 40),
+                max_cell_chars=ma_int("MULTI_AGENT_TRACE_TABLE_CONTENTS_MAX_CELL_CHARS", 600),
+            )
+        )
+    return merged or None
+
+
+def _trace_agent_result_data_enabled() -> bool:
+    """Писать в JSONL полезную нагрузку агентов (narrative, таблицы, findings, …)."""
+    return ma_bool("MULTI_AGENT_TRACE_AGENT_RESULT_DATA", True)
+
+
+def _truncate_trace_str(s: Any, max_len: int) -> str:
+    if s is None:
+        return ""
+    t = str(s)
+    if len(t) <= max_len:
+        return t
+    return t[:max_len] + "…"
+
+
+def _source_metadata_for_trace(meta: Any, max_chars: int) -> Any:
+    """Усечённая копия metadata для JSONL (вложенные списки, лимит по сериализованному размеру)."""
+    if meta is None:
+        return None
+    if not isinstance(meta, dict):
+        return _truncate_trace_str(str(meta), max_chars)
+    out: Dict[str, Any] = dict(meta)
+    em = out.get("embedded_media")
+    if isinstance(em, list) and len(em) > 16:
+        out["embedded_media"] = em[:16]
+        out["embedded_media_omitted"] = len(em) - 16
+    try:
+        dumped = json.dumps(out, ensure_ascii=False, default=str)
+        if len(dumped) > max_chars:
+            return _truncate_trace_str(dumped, max_chars)
+    except Exception:
+        return _truncate_trace_str(str(out), max_chars)
+    return out
+
+
+def _serialize_agent_payload_for_trace(payload: AgentPayload) -> Dict[str, Any]:
+    """Усечённый снимок AgentPayload для JSONL (все агенты)."""
+    out: Dict[str, Any] = {
+        "status": payload.status,
+        "agent": payload.agent,
+    }
+    if payload.error:
+        out["error"] = _truncate_trace_str(payload.error, 8000)
+    if payload.suggestions:
+        out["suggestions"] = [
+            _truncate_trace_str(s, 2000) for s in (payload.suggestions or [])[:20]
+        ]
+    nar = payload.narrative
+    if nar is not None and getattr(nar, "text", None):
+        out["narrative"] = _truncate_trace_str(
+            nar.text,
+            ma_int("MULTI_AGENT_TRACE_NARRATIVE_MAX_CHARS", 16000),
+        )
+    if payload.tables:
+        out["tables"] = _serialize_tables_for_trace(
+            payload.tables,
+            max_tables=ma_int("MULTI_AGENT_TRACE_TABLE_CONTENTS_MAX_TABLES", 8),
+            max_rows_per_table=ma_int("MULTI_AGENT_TRACE_TABLE_CONTENTS_MAX_ROWS", 40),
+            max_cell_chars=ma_int("MULTI_AGENT_TRACE_TABLE_CONTENTS_MAX_CELL_CHARS", 600),
+        )
+    if payload.findings:
+        fmax = ma_int("MULTI_AGENT_TRACE_FINDINGS_MAX", 80)
+        out["findings"] = []
+        for f in (payload.findings or [])[:fmax]:
+            fd = f.model_dump() if hasattr(f, "model_dump") else (f if isinstance(f, dict) else {})
+            out["findings"].append(
+                {
+                    "type": fd.get("type"),
+                    "severity": fd.get("severity"),
+                    "text": _truncate_trace_str(fd.get("text", ""), 6000),
+                }
+            )
+    if payload.sources:
+        smax = ma_int("MULTI_AGENT_TRACE_SOURCES_MAX", 30)
+        snip = ma_int("MULTI_AGENT_TRACE_SOURCE_SNIPPET_CHARS", 800)
+        meta_max = ma_int("MULTI_AGENT_TRACE_SOURCE_METADATA_MAX_CHARS", 4000)
+        out["sources"] = []
+        for s in (payload.sources or [])[:smax]:
+            sd = s.model_dump() if hasattr(s, "model_dump") else (s if isinstance(s, dict) else {})
+            meta_for_trace = _source_metadata_for_trace(sd.get("metadata"), meta_max)
+            entry: Dict[str, Any] = {
+                "url": sd.get("url"),
+                "title": sd.get("title"),
+                "snippet": _truncate_trace_str(sd.get("snippet") or "", snip),
+                "fetched": sd.get("fetched"),
+                "mime_type": sd.get("mime_type"),
+                "resource_kind": sd.get("resource_kind"),
+                "status_code": sd.get("status_code"),
+                "crawl_depth": sd.get("crawl_depth"),
+                "content_size": sd.get("content_size"),
+            }
+            if meta_for_trace is not None:
+                entry["metadata"] = meta_for_trace
+            out["sources"].append(entry)
+    if payload.discovered_resources:
+        drmax = ma_int("MULTI_AGENT_TRACE_DISCOVERED_RESOURCES_MAX", 40)
+        url_max = ma_int("MULTI_AGENT_TRACE_DISCOVERED_RESOURCE_URL_CHARS", 2000)
+        out["discovered_resources"] = []
+        for dr in (payload.discovered_resources or [])[:drmax]:
+            dd = dr.model_dump() if hasattr(dr, "model_dump") else (dr if isinstance(dr, dict) else {})
+            out["discovered_resources"].append(
+                {
+                    "url": _truncate_trace_str(str(dd.get("url") or ""), url_max),
+                    "resource_kind": dd.get("resource_kind"),
+                    "mime_type": dd.get("mime_type"),
+                    "parent_url": _truncate_trace_str(str(dd.get("parent_url") or ""), url_max)
+                    if dd.get("parent_url")
+                    else None,
+                    "origin": dd.get("origin"),
+                    "tag": dd.get("tag"),
+                    "title": _truncate_trace_str(str(dd.get("title") or ""), 400)
+                    if dd.get("title")
+                    else None,
+                }
+            )
+    if payload.code_blocks:
+        cmax = ma_int("MULTI_AGENT_TRACE_CODE_BLOCKS_MAX", 12)
+        ccl = ma_int("MULTI_AGENT_TRACE_CODE_MAX_CHARS", 48000)
+        out["code_blocks"] = []
+        for cb in (payload.code_blocks or [])[:cmax]:
+            cbd = cb.model_dump() if hasattr(cb, "model_dump") else (cb if isinstance(cb, dict) else {})
+            out["code_blocks"].append(
+                {
+                    "language": cbd.get("language"),
+                    "purpose": cbd.get("purpose"),
+                    "code": _truncate_trace_str(cbd.get("code") or "", ccl),
+                }
+            )
+    if payload.plan is not None:
+        pd = payload.plan.model_dump() if hasattr(payload.plan, "model_dump") else {}
+        steps = pd.get("steps") or []
+        out["plan"] = {
+            "plan_id": pd.get("plan_id"),
+            "steps": [
+                {
+                    "step_id": st.get("step_id"),
+                    "agent": st.get("agent"),
+                    "task_description": _truncate_trace_str(
+                        str((st.get("task") or {}).get("description", "")),
+                        4000,
+                    ),
+                }
+                for st in steps[:60]
+            ],
+        }
+    if payload.validation is not None:
+        vd = (
+            payload.validation.model_dump()
+            if hasattr(payload.validation, "model_dump")
+            else {}
+        )
+        issues = vd.get("issues") or []
+        recs = vd.get("recommendations") or []
+        out["validation"] = {
+            "valid": vd.get("valid"),
+            "confidence": vd.get("confidence"),
+            "message": _truncate_trace_str(vd.get("message") or "", 8000),
+            "issues_preview": [
+                {
+                    "type": it.get("type") if isinstance(it, dict) else None,
+                    "text": _truncate_trace_str(
+                        (it.get("text") if isinstance(it, dict) else "") or "",
+                        4000,
+                    ),
+                }
+                for it in issues[:30]
+            ],
+            "recommendations_preview": [
+                {
+                    "type": r.get("type") if isinstance(r, dict) else None,
+                    "text": _truncate_trace_str(
+                        (r.get("text") if isinstance(r, dict) else "") or "",
+                        4000,
+                    ),
+                }
+                for r in recs[:20]
+            ],
+        }
+        sr = vd.get("suggested_replan")
+        if isinstance(sr, dict) and sr.get("reason"):
+            out["validation"]["suggested_replan"] = {
+                "reason": _truncate_trace_str(sr.get("reason") or "", 4000),
+                "additional_steps_count": len(sr.get("additional_steps") or []),
+            }
+    if payload.metadata:
+        try:
+            dumped = json.dumps(payload.metadata, ensure_ascii=False, default=str)
+            mlim = ma_int("MULTI_AGENT_TRACE_METADATA_MAX_CHARS", 12000)
+            if len(dumped) > mlim:
+                out["metadata"] = _truncate_trace_str(dumped, mlim)
+            else:
+                out["metadata"] = payload.metadata
+        except Exception:
+            out["metadata"] = "<unserializable>"
+    if payload.tool_requests:
+        out["tool_requests"] = []
+        for r in (payload.tool_requests or [])[:20]:
+            rd = r.model_dump() if hasattr(r, "model_dump") else r
+            if not isinstance(rd, dict):
+                continue
+            args = rd.get("arguments") or {}
+            try:
+                args_s = json.dumps(args, ensure_ascii=False, default=str)
+            except Exception:
+                args_s = str(args)
+            out["tool_requests"].append(
+                {
+                    "tool_name": rd.get("tool_name"),
+                    "reason": _truncate_trace_str(rd.get("reason") or "", 2000),
+                    "arguments": _truncate_trace_str(args_s, 8000),
+                }
+            )
+    if payload.tool_results:
+        out["tool_results"] = []
+        for tr in (payload.tool_results or [])[:25]:
+            trd = tr.model_dump() if hasattr(tr, "model_dump") else tr
+            if not isinstance(trd, dict):
+                continue
+            data = trd.get("data")
+            try:
+                data_s = (
+                    json.dumps(data, ensure_ascii=False, default=str)
+                    if data is not None
+                    else ""
+                )
+            except Exception:
+                data_s = str(data)
+            out["tool_results"].append(
+                {
+                    "tool_name": trd.get("tool_name"),
+                    "success": trd.get("success"),
+                    "error": _truncate_trace_str(trd.get("error") or "", 4000),
+                    "data": _truncate_trace_str(
+                        data_s,
+                        ma_int("MULTI_AGENT_TRACE_TOOL_RESULT_DATA_MAX_CHARS", 12000),
+                    ),
+                }
+            )
+    return out
+
+
+def _serialize_results_dict_for_trace(results: Dict[str, Any]) -> Dict[str, Any]:
+    """Снимок `process_return['results']` — по ключу агента."""
+    out: Dict[str, Any] = {}
+    if not isinstance(results, dict):
+        return out
+    for k, v in results.items():
+        if not isinstance(v, dict):
+            out[str(k)] = _truncate_trace_str(v, 2000)
+            continue
+        try:
+            ap = AgentPayload.model_validate(v)
+            out[str(k)] = _serialize_agent_payload_for_trace(ap)
+        except Exception:
+            try:
+                raw = json.dumps(v, ensure_ascii=False, default=str)
+                out[str(k)] = _truncate_trace_str(raw, ma_int("MULTI_AGENT_TRACE_RAW_RESULT_MAX_CHARS", 100000))
+            except Exception:
+                out[str(k)] = "<unserializable>"
+    return out
+
+
+def _build_agent_call_end_details(
+    payload: AgentPayload,
+    *,
+    agent_context: Optional[Dict[str, Any]] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Счётчики + при включённом флаге полный `agent_result_data`, иначе опционально превью таблиц."""
+    details: Dict[str, Any] = {
+        "findings": len(payload.findings or []),
+        "tables": len(payload.tables or []),
+        "sources": len(payload.sources or []),
+        "code_blocks": len(payload.code_blocks or []),
+    }
+    if extra:
+        details.update(extra)
+    if _trace_agent_result_data_enabled():
+        try:
+            details["agent_result_data"] = _serialize_agent_payload_for_trace(payload)
+        except Exception:
+            logger.debug(
+                "Trace: failed to serialize agent_result_data for %s",
+                getattr(payload, "agent", "?"),
+                exc_info=True,
+            )
+    elif agent_context is not None and _trace_include_table_contents(agent_context) and getattr(
+        payload, "tables", None
+    ):
+        try:
+            details["tables_content_preview"] = _serialize_tables_for_trace(
+                payload.tables,
+                max_tables=ma_int("MULTI_AGENT_TRACE_TABLE_CONTENTS_MAX_TABLES", 8),
+                max_rows_per_table=ma_int(
+                    "MULTI_AGENT_TRACE_TABLE_CONTENTS_MAX_ROWS", 40
+                ),
+                max_cell_chars=ma_int(
+                    "MULTI_AGENT_TRACE_TABLE_CONTENTS_MAX_CELL_CHARS", 600
+                ),
+            )
+        except Exception:
+            logger.debug(
+                "Trace: failed to serialize tables_content_preview for %s",
+                getattr(payload, "agent", "?"),
+                exc_info=True,
+            )
+    return details
+
+
 def _store_tool_result_in_pipeline_cache(
     pipeline_context: Dict[str, Any],
     *,
@@ -351,13 +754,26 @@ def _trim_analyst_tool_requests_for_round(
 
 
 class MultiAgentTraceLogger:
-    """Append-only JSONL trace logger for end-to-end orchestrator runs."""
+    """Append-only JSONL trace logger for end-to-end orchestrator runs.
+
+    Обычно включается ``MULTI_AGENT_TRACE_ENABLED`` (по умолчанию true).
+    Запуски из DocumentSourceDialog (``task_type=document_extraction``) дополнительно
+    пишутся при ``MULTI_AGENT_TRACE_DOCUMENT_FORCE`` (по умолчанию true), даже если
+    общий трейс выключен — чтобы анализировать извлечение из документов.
+    """
 
     _lock = asyncio.Lock()
 
     @classmethod
     def is_enabled(cls) -> bool:
         return ma_bool("MULTI_AGENT_TRACE_ENABLED", True)
+
+    @classmethod
+    def should_force_document_trace(cls, context: Optional[Dict[str, Any]]) -> bool:
+        """Трейс для чата/рекомендаций документа — отдельный переключатель."""
+        if (context or {}).get("task_type") != "document_extraction":
+            return False
+        return ma_bool("MULTI_AGENT_TRACE_DOCUMENT_FORCE", True)
 
     @classmethod
     def _trace_dir(cls) -> Path:
@@ -369,8 +785,13 @@ class MultiAgentTraceLogger:
         return backend_root / "logs" / "multi_agent_traces"
 
     @classmethod
-    async def write_trace(cls, trace_data: Dict[str, Any]) -> Optional[Path]:
-        if not cls.is_enabled():
+    async def write_trace(
+        cls,
+        trace_data: Dict[str, Any],
+        *,
+        force: bool = False,
+    ) -> Optional[Path]:
+        if not force and not cls.is_enabled():
             return None
         try:
             trace_dir = cls._trace_dir()
@@ -648,6 +1069,8 @@ class Orchestrator:
         trace_status = "unknown"
         trace_error: Optional[str] = None
         trace_file_path: Optional[str] = None
+        # Ссылка на dict ответа — в `finally` добавляем trace_file_path после записи JSONL
+        process_return: Optional[Dict[str, Any]] = None
         time_to_first_result_ms: Optional[int] = None
         planner_error_streak = 0
         max_planner_error_streak = 0
@@ -793,6 +1216,9 @@ class Orchestrator:
         ) -> AgentPayload:
             nonlocal time_to_first_result_ms, planner_error_streak, max_planner_error_streak
             nonlocal last_context_compaction_level, last_fallback_reason
+            # Сброс на каждый вызов агента: иначе reason/уровень compact от retry предыдущего шага
+            # «протекают» в agent_call_end следующего (например research → structurizer).
+            last_fallback_reason = None
             task_type = task.get("type") if isinstance(task, dict) else None
             runtime_options = agent_runtime_options_map.get(agent_name)
             policy: ExecutionPolicy = resolve_execution_policy(
@@ -801,6 +1227,7 @@ class Orchestrator:
                 runtime_options=runtime_options,
             )
             initial_compaction = policy.context_ladder[0] if policy.context_ladder else "full"
+            last_context_compaction_level = initial_compaction
             effective_context = select_context_for_step(
                 agent_name,
                 agent_context,
@@ -908,6 +1335,14 @@ class Orchestrator:
                 time_to_first_result_ms = int((time.perf_counter() - overall_t0) * 1000)
             if payload.status != "error" and agent_name == "planner":
                 planner_error_streak = 0
+            _end_details = _build_agent_call_end_details(
+                payload,
+                agent_context=agent_context,
+                extra={
+                    "context_compaction_level": last_context_compaction_level,
+                    "fallback_reason": last_fallback_reason,
+                },
+            )
             _log_trace(
                 event="agent_call_end",
                 phase=phase,
@@ -917,14 +1352,7 @@ class Orchestrator:
                 duration_ms=elapsed_ms,
                 status=payload.status,
                 error=payload.error if payload.status == "error" else None,
-                details={
-                    "findings": len(payload.findings or []),
-                    "tables": len(payload.tables or []),
-                    "sources": len(payload.sources or []),
-                    "code_blocks": len(payload.code_blocks or []),
-                    "context_compaction_level": last_context_compaction_level,
-                    "fallback_reason": last_fallback_reason,
-                },
+                details=_end_details,
             )
             return payload
 
@@ -1140,6 +1568,18 @@ class Orchestrator:
             pipeline_context["force_tool_data_access"] = (
                 tools_enabled and ma_bool("MULTI_AGENT_FORCE_TOOL_DATA_ACCESS", True)
             )
+            # Document extraction: текст из файла уже в промпте; инструменты доски дают ложные UUID/имя файла.
+            if str(pipeline_context.get("task_type") or "").strip() == "document_extraction":
+                pipeline_context["tools_enabled"] = False
+                pipeline_context["force_tool_data_access"] = False
+            # Поиск с ИИ: данные с веба в agent_results; readTableList/readTableData без нод на доске
+            # и с плейсхолдерами в nodeIds ломают structurizer (см. ResearchController).
+            if (
+                str(pipeline_context.get("controller") or "").strip() == "research"
+                and str(pipeline_context.get("mode") or "").strip() == "research"
+            ):
+                pipeline_context["tools_enabled"] = False
+                pipeline_context["force_tool_data_access"] = False
             pipeline_context["_trace_event"] = _log_trace
             if self.llm_router:
                 try:
@@ -1150,7 +1590,11 @@ class Orchestrator:
             pipeline_context["_agent_runtime_options_map"] = agent_runtime_options_map
 
             _ctrl = (context or {}).get("controller") or ""
-            suggestions_fast = _ctrl in ("transform_suggestions", "widget_suggestions")
+            suggestions_fast = _ctrl in (
+                "transform_suggestions",
+                "widget_suggestions",
+                "document_suggestions",
+            )
             pipeline_context["suggestions_fast_path"] = suggestions_fast
             assistant_simple_qa = self._is_simple_assistant_qa(pipeline_context)
             pipeline_context["assistant_simple_qa"] = assistant_simple_qa
@@ -1163,8 +1607,19 @@ class Orchestrator:
                 details={
                     "suggestions_fast_path": suggestions_fast,
                     "assistant_simple_qa": assistant_simple_qa,
+                    "tools_enabled": bool(pipeline_context.get("tools_enabled")),
                     "force_tool_data_access": bool(
                         pipeline_context.get("force_tool_data_access")
+                    ),
+                    "document_extraction_tools_off": str(
+                        pipeline_context.get("task_type") or ""
+                    ).strip()
+                    == "document_extraction",
+                    "research_tools_off": (
+                        str(pipeline_context.get("controller") or "").strip()
+                        == "research"
+                        and str(pipeline_context.get("mode") or "").strip()
+                        == "research"
                     ),
                     "disable_heavy_decomposition": disable_heavy_decomposition,
                     "context_estimates": summarize_context_estimates(pipeline_context),
@@ -1180,6 +1635,12 @@ class Orchestrator:
                 self._logger.info(
                     f"📋 [{session_id}] Suggestions fast path ({_ctrl}): analyst → reporter"
                 )
+                # document_suggestions: в description — фрагмент извлечённого текста + мета (см. DocumentSuggestionsController)
+                _sugg_desc_limit = (
+                    50000
+                    if _ctrl == "document_suggestions"
+                    else 4000
+                )
                 plan = {
                     "plan_id": str(uuid4()),
                     "user_request": user_request,
@@ -1187,7 +1648,7 @@ class Orchestrator:
                         {
                             "step_id": "1",
                             "agent": "analyst",
-                            "task": {"description": user_request[:4000]},
+                            "task": {"description": user_request[:_sugg_desc_limit]},
                             "depends_on": [],
                         },
                         {
@@ -1246,10 +1707,11 @@ class Orchestrator:
                         status="error",
                         error=error_message,
                     )
-                    return self._error_result(
+                    process_return = self._error_result(
                         session_id, start_time,
                         error_message,
                     )
+                    return process_return
 
             steps = plan.get("steps", [])
             _plan_agents = [s.get("agent") if isinstance(s, dict) else "?" for s in steps]
@@ -1440,12 +1902,12 @@ class Orchestrator:
                         duration_ms=int((time.perf_counter() - _cf_t0) * 1000),
                         status=step_payload.status,
                         error=step_payload.error if step_payload.status == "error" else None,
-                        details={
-                            "findings": len(step_payload.findings or []),
-                            "tables": len(step_payload.tables or []),
-                            "sources": len(step_payload.sources or []),
-                            "code_blocks": len(step_payload.code_blocks or []),
-                        },
+                        details=_build_agent_call_end_details(
+                            step_payload,
+                            agent_context={
+                                "task_type": pipeline_context.get("task_type"),
+                            },
+                        ),
                     )
                     result_dict = step_payload.model_dump()
                     pipeline_context["agent_results"].append(result_dict)
@@ -2027,12 +2489,12 @@ class Orchestrator:
                         duration_ms=int((time.perf_counter() - _val_t0) * 1000),
                         status=validation_payload.status,
                         error=validation_payload.error if validation_payload.status == "error" else None,
-                        details={
-                            "findings": len(validation_payload.findings or []),
-                            "tables": len(validation_payload.tables or []),
-                            "sources": len(validation_payload.sources or []),
-                            "code_blocks": len(validation_payload.code_blocks or []),
-                        },
+                        details=_build_agent_call_end_details(
+                            validation_payload,
+                            agent_context={
+                                "task_type": pipeline_context.get("task_type"),
+                            },
+                        ),
                     )
                     # Записываем результат валидации в хронологию
                     val_result_dict = (
@@ -2261,7 +2723,7 @@ class Orchestrator:
                 },
             )
 
-            return {
+            process_return = {
                 "status": final_status,
                 "session_id": session_id,
                 "plan": plan,
@@ -2279,6 +2741,7 @@ class Orchestrator:
                 "validator_parse_fallback_count": validator_parse_fallback_count,
                 "validator_missing_validation_field_count": validator_missing_validation_field_count,
             }
+            return process_return
 
         except Exception as e:
             self._logger.error(f"❌ [{session_id}] Failed: {e}", exc_info=True)
@@ -2290,9 +2753,12 @@ class Orchestrator:
                 status="error",
                 error=str(e),
             )
-            return self._error_result(session_id, start_time, str(e))
+            process_return = self._error_result(session_id, start_time, str(e))
+            return process_return
         finally:
-            if MultiAgentTraceLogger.is_enabled():
+            _ctx = context or {}
+            _doc_trace_force = MultiAgentTraceLogger.should_force_document_trace(context)
+            if MultiAgentTraceLogger.is_enabled() or _doc_trace_force:
                 if trace_status == "unknown":
                     trace_status = "error"
                     trace_error = trace_error or "Orchestrator finished without terminal status"
@@ -2315,11 +2781,27 @@ class Orchestrator:
                     if ev.get("status") == "error":
                         item["errors"] += 1
 
+                _results_for_trace = (
+                    (process_return or {}).get("results")
+                    if isinstance(process_return, dict)
+                    else None
+                )
+                _tables_snap = None
+                if (
+                    not _trace_agent_result_data_enabled()
+                    and _trace_include_table_contents(_ctx)
+                    and isinstance(_results_for_trace, dict)
+                ):
+                    _tables_snap = _tables_snapshot_from_results(_results_for_trace)
+
                 trace_payload = {
                     "trace_version": 1,
                     "session_id": session_id,
                     "board_id": board_id,
                     "user_id": str(user_id) if user_id else None,
+                    "task_type": _ctx.get("task_type"),
+                    "controller": _ctx.get("controller"),
+                    "filename": _ctx.get("filename"),
                     "request_preview": user_request[:500],
                     "started_at": start_time.isoformat(),
                     "finished_at": datetime.now().isoformat(),
@@ -2330,10 +2812,30 @@ class Orchestrator:
                     "agent_metrics": aggregate,
                     "events": trace_events,
                 }
-                file_path = await MultiAgentTraceLogger.write_trace(trace_payload)
+                if _trace_agent_result_data_enabled() and isinstance(
+                    _results_for_trace, dict
+                ):
+                    trace_payload["results_snapshot"] = _serialize_results_dict_for_trace(
+                        _results_for_trace
+                    )
+                elif _tables_snap:
+                    trace_payload["structurizer_tables_snapshot"] = _tables_snap
+                _write_force = _doc_trace_force and not MultiAgentTraceLogger.is_enabled()
+                file_path = await MultiAgentTraceLogger.write_trace(
+                    trace_payload,
+                    force=_write_force,
+                )
                 trace_file_path = str(file_path) if file_path else None
                 if trace_file_path:
                     self._logger.info("🧾 [%s] Trace saved: %s", session_id, trace_file_path)
+                if process_return is not None and trace_file_path:
+                    process_return["trace_file_path"] = trace_file_path
+                if trace_file_path and _ctx.get("task_type") == "document_extraction":
+                    self._logger.info(
+                        "📄 [document_extraction] session_id=%s trace_file=%s",
+                        session_id,
+                        trace_file_path,
+                    )
             if ma_token is not None:
                 reset_ma_overrides_token(ma_token)
 
