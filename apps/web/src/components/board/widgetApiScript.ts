@@ -297,6 +297,71 @@ export function buildWidgetApiScript(params: {
                 if (intervalId) clearInterval(intervalId);
             };
 
+            // ECharts в about:srcdoc: init до layout → canvas 0×0 → InvalidStateError drawImage.
+            // Патчим init (echarts подключается отдельным script — опрос), min-height на контейнер, resize после layout.
+            (function gigaboardEchartsIframeGuard() {
+                var resizeTimer = null;
+                function gigaboardResizeAllCharts() {
+                    if (resizeTimer) return;
+                    resizeTimer = setTimeout(function() {
+                        resizeTimer = null;
+                        try {
+                            if (window.dispatchEvent) window.dispatchEvent(new Event('resize'));
+                        } catch (e) {}
+                        try {
+                            if (typeof echarts === 'undefined' || !echarts.getInstanceByDom) return;
+                            var divs = document.getElementsByTagName('div');
+                            for (var i = 0; i < divs.length; i++) {
+                                var el = divs[i];
+                                var inst = echarts.getInstanceByDom(el);
+                                if (inst && typeof inst.resize === 'function') {
+                                    try { inst.resize(); } catch (err) {}
+                                }
+                            }
+                        } catch (e) {}
+                    }, 32);
+                }
+                var poll = 0;
+                function patchEchartsInit() {
+                    if (typeof echarts === 'undefined' || typeof echarts.init !== 'function') {
+                        if (poll++ < 400) setTimeout(patchEchartsInit, 25);
+                        return;
+                    }
+                    if (echarts.__gigaboardPatchedInit) return;
+                    echarts.__gigaboardPatchedInit = true;
+                    var origInit = echarts.init;
+                    echarts.init = function(dom, theme, opts) {
+                        try {
+                            if (dom && dom.nodeType === 1) {
+                                var w = dom.clientWidth;
+                                var h = dom.clientHeight;
+                                if (w === 0 || h === 0) {
+                                    if (!dom.style.minHeight) dom.style.minHeight = '200px';
+                                    if (!dom.style.minWidth) dom.style.minWidth = '100%';
+                                    dom.style.boxSizing = 'border-box';
+                                }
+                            }
+                        } catch (e) {}
+                        return origInit.call(echarts, dom, theme, opts);
+                    };
+                }
+                patchEchartsInit();
+                window.addEventListener('load', function() {
+                    requestAnimationFrame(function() {
+                        requestAnimationFrame(gigaboardResizeAllCharts);
+                    });
+                });
+                if (typeof ResizeObserver !== 'undefined') {
+                    function roObserve() {
+                        if (!document.body) return;
+                        var ro = new ResizeObserver(function() { gigaboardResizeAllCharts(); });
+                        ro.observe(document.body);
+                    }
+                    if (document.body) roObserve();
+                    else document.addEventListener('DOMContentLoaded', roObserve);
+                }
+            })();
+
             window.__GIGABOARD_API_READY = true;
         </script>`
 }
