@@ -44,14 +44,14 @@ import type {
 } from '@/types/dashboard'
 
 /** Пустой env → относительные URL (Vite proxy / nginx в Docker). Не использовать `|| localhost:8000`: пустая строка falsy и уводила бы UI на хостовый :8000. */
-const API_URL = getViteApiBaseUrl()
-
 const api: AxiosInstance = axios.create({
-    baseURL: API_URL,
+    baseURL: getViteApiBaseUrl(),
 })
 
-// Add token to requests
+// baseURL на каждый запрос: при первом импорте модуля window уже есть, но так гарантированно
+// применяется актуальный getViteApiBaseUrl() (HTTPS / Mixed Content, смена origin).
 api.interceptors.request.use((config) => {
+    config.baseURL = getViteApiBaseUrl()
     const token = useAuthStore.getState().token
     if (token) {
         config.headers.Authorization = `Bearer ${token}`

@@ -18,6 +18,23 @@ export function getViteApiBaseUrl(): string {
     }
     let trimmed = String(v).trim()
 
+    if (typeof window !== 'undefined') {
+        try {
+            const u = new URL(trimmed)
+            // Страница по HTTPS, в бандле http://тот-же-хост — Mixed Content. Порты не сравниваем:
+            // за reverse proxy location.port может не совпадать с портом в VITE_API_URL.
+            if (
+                window.location.protocol === 'https:' &&
+                u.protocol === 'http:' &&
+                u.hostname === window.location.hostname
+            ) {
+                return ''
+            }
+        } catch {
+            /* ignore malformed URL */
+        }
+    }
+
     if (typeof window !== 'undefined' && import.meta.env.PROD) {
         try {
             const u = new URL(trimmed)
@@ -25,17 +42,6 @@ export function getViteApiBaseUrl(): string {
             if (
                 u.origin !== pageOrigin &&
                 (u.hostname === 'localhost' || u.hostname === '127.0.0.1')
-            ) {
-                return ''
-            }
-
-            const sameHost =
-                u.hostname === window.location.hostname &&
-                String(u.port || '') === String(window.location.port || '')
-            if (
-                window.location.protocol === 'https:' &&
-                u.protocol === 'http:' &&
-                sameHost
             ) {
                 return ''
             }
