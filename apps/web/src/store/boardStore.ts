@@ -33,6 +33,63 @@ import type {
     EdgeCreate,
     EdgeUpdate,
 } from '@/types'
+import { EdgeType } from '@/types'
+
+/** Тип source для EdgeCreate — как в backend (snake_case). */
+function resolveSourceNodeTypeForEdge(
+    sourceId: string,
+    sourceNodes: SourceNode[],
+    contentNodes: ContentNode[]
+): string {
+    if (sourceNodes.some((s) => s.id === sourceId)) return 'source_node'
+    if (contentNodes.some((c) => c.id === sourceId)) return 'content_node'
+    return 'content_node'
+}
+
+/**
+ * Входящие TRANSFORMATION к исходному узлу (те же источники, что на графе).
+ * Если рёбер нет — fallback по lineage.source_node_ids / source_node_id.
+ */
+function getTransformationSourcesForDuplicate(
+    node: ContentNode,
+    edges: Edge[],
+    sourceNodes: SourceNode[],
+    contentNodes: ContentNode[]
+): Array<{ sourceId: string; sourceType: string; template?: Edge }> {
+    const incoming = edges.filter(
+        (e) =>
+            e.target_node_id === node.id &&
+            String(e.edge_type) === String(EdgeType.TRANSFORMATION)
+    )
+    if (incoming.length > 0) {
+        return incoming.map((e) => ({
+            sourceId: e.source_node_id,
+            sourceType: e.source_node_type,
+            template: e,
+        }))
+    }
+    const lineage = node.lineage as Record<string, unknown> | undefined
+    if (!lineage) return []
+    const idSet = new Set<string>()
+    const multi = lineage.source_node_ids
+    if (Array.isArray(multi)) {
+        for (const x of multi) {
+            if (typeof x === 'string') idSet.add(x)
+        }
+    }
+    const single = lineage.source_node_id
+    if (typeof single === 'string' && single) idSet.add(single)
+    const parents = lineage.parent_content_ids
+    if (Array.isArray(parents)) {
+        for (const x of parents) {
+            if (typeof x === 'string') idSet.add(x)
+        }
+    }
+    return Array.from(idSet).map((id) => ({
+        sourceId: id,
+        sourceType: resolveSourceNodeTypeForEdge(id, sourceNodes, contentNodes),
+    }))
+}
 
 interface BoardStore {
     // State
@@ -57,6 +114,8 @@ interface BoardStore {
     // WidgetNode Actions
     fetchWidgetNodes: (boardId: string) => Promise<void>
     createWidgetNode: (boardId: string, data: WidgetNodeCreate) => Promise<WidgetNode | null>
+    /** Копия виджета и новой связи VISUALIZATION к тому же ContentNode/SourceNode. */
+    duplicateWidgetNode: (widget: WidgetNode) => Promise<WidgetNode | null>
     updateWidgetNode: (boardId: string, widgetNodeId: string, data: WidgetNodeUpdate) => Promise<void>
     deleteWidgetNode: (boardId: string, widgetNodeId: string, projectId?: string) => Promise<void>
 
@@ -79,6 +138,8 @@ interface BoardStore {
     // ContentNode Actions
     fetchContentNodes: (boardId: string) => Promise<void>
     createContentNode: (boardId: string, data: ContentNodeCreate) => Promise<ContentNode | null>
+    /** Независимая копия ContentNode (те же данные и lineage, новое имя и позиция). */
+    duplicateContentNode: (node: ContentNode) => Promise<ContentNode | null>
     updateContentNode: (contentNodeId: string, data: ContentNodeUpdate) => Promise<void>
     deleteContentNode: (contentNodeId: string) => Promise<void>
     getContentTable: (contentNodeId: string, tableIndex: number) => Promise<any>
@@ -289,6 +350,84 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
             }
             console.error('createWidgetNode error:', error, 'data:', data)
             notify.error(message, { title: 'Ошибка создания' })
+            return null
+        }
+    },
+
+    duplicateWidgetNode: async (widget: WidgetNode) => {
+        const boardId = widget.board_id
+        const state = get()
+        const fromConfig = widget.config?.sourceContentNodeId as string | undefined
+        const fromEdge = state.edges.find(
+            (e) => e.target_node_id === widget.id && e.edge_type === 'VISUALIZATION'
+        )
+        const sourceId = fromConfig || fromEdge?.source_node_id
+        if (!sourceId) {
+            notify.error('Не удалось определить исходный узел данных для копии виджета', {
+                title: 'Ошибка',
+            })
+            return null
+        }
+        const isSource = state.sourceNodes.some((n) => n.id === sourceId)
+        const sourceNodeType = isSource ? 'SourceNode' : 'ContentNode'
+        const offset = 48
+        const x = Math.round((widget.x ?? 0) + offset)
+        const y = Math.round((widget.y ?? 0) + offset)
+        const baseName = widget.name?.trim() ? widget.name.trim() : 'Виджет'
+        const copySuffix = ' (копия)'
+        const newName =
+            baseName.length + copySuffix.length > 200
+                ? `${baseName.slice(0, 200 - copySuffix.length)}${copySuffix}`
+                : `${baseName}${copySuffix}`
+
+        try {
+            const cfg = widget.config ? { ...widget.config } : {}
+            if (!cfg.sourceContentNodeId) {
+                cfg.sourceContentNodeId = sourceId
+            }
+
+            const response = await widgetNodesAPI.create(boardId, {
+                name: newName,
+                description: widget.description || '',
+                html_code: widget.html_code || '',
+                css_code: widget.css_code ?? undefined,
+                js_code: widget.js_code ?? undefined,
+                config: cfg,
+                x,
+                y,
+                width: widget.width ?? undefined,
+                height: widget.height ?? undefined,
+                auto_refresh: widget.auto_refresh,
+                refresh_interval: widget.refresh_interval ?? undefined,
+                generated_by: widget.generated_by ?? undefined,
+                generation_prompt: widget.generation_prompt ?? undefined,
+            })
+            const newWidget = response.data
+
+            await edgesAPI.create(boardId, {
+                source_node_id: sourceId,
+                target_node_id: newWidget.id,
+                source_node_type: sourceNodeType,
+                target_node_type: 'WidgetNode',
+                edge_type: EdgeType.VISUALIZATION,
+                label: `Visualizes: ${newWidget.name}`,
+            })
+
+            await Promise.all([get().fetchWidgetNodes(boardId), get().fetchEdges(boardId)])
+            notify.success('Копия виджета создана', { title: 'Успех' })
+            return newWidget
+        } catch (error: any) {
+            let message = 'Не удалось создать копию виджета'
+            if (error.response?.data?.detail) {
+                const detail = error.response.data.detail
+                if (Array.isArray(detail)) {
+                    message = detail.map((err: any) => `${err.loc?.join('.')}: ${err.msg}`).join(', ')
+                } else if (typeof detail === 'string') {
+                    message = detail
+                }
+            }
+            console.error('duplicateWidgetNode error:', error)
+            notify.error(message, { title: 'Ошибка' })
             return null
         }
     },
@@ -749,6 +888,104 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
             }
             console.error('createContentNode error:', error, 'data:', data)
             notify.error(message, { title: 'Ошибка создания' })
+            return null
+        }
+    },
+
+    duplicateContentNode: async (node: ContentNode) => {
+        const boardId = get().currentBoard?.id
+        if (!boardId) {
+            notify.error('Доска не выбрана', { title: 'Ошибка' })
+            return null
+        }
+
+        await get().fetchEdges(boardId)
+        const st = get()
+        const transformationSources = getTransformationSourcesForDuplicate(
+            node,
+            st.edges,
+            st.sourceNodes,
+            st.contentNodes
+        )
+
+        const offset = 48
+        const pos = node.position || { x: 0, y: 0 }
+        const metaName = node.metadata?.name
+        const tableName = node.content?.tables?.[0]?.name
+        const baseTitle = (metaName || tableName || 'Узел данных').trim() || 'Узел данных'
+        const copySuffix = ' (копия)'
+        const newName =
+            baseTitle.length + copySuffix.length > 500
+                ? `${baseTitle.slice(0, 500 - copySuffix.length)}${copySuffix}`
+                : `${baseTitle}${copySuffix}`
+
+        const content = JSON.parse(JSON.stringify(node.content ?? { text: '', tables: [] }))
+        const lineage = JSON.parse(
+            JSON.stringify(
+                node.lineage ?? {
+                    operation: 'copy',
+                    timestamp: new Date().toISOString(),
+                }
+            )
+        )
+        const metadata = JSON.parse(JSON.stringify(node.metadata ?? {}))
+        metadata.name = newName
+
+        try {
+            const response = await contentNodesAPI.create({
+                board_id: boardId,
+                content,
+                lineage,
+                metadata,
+                position: { x: pos.x + offset, y: pos.y + offset },
+            })
+            const newNode = response.data
+
+            set((state) => ({
+                contentNodes: [...state.contentNodes, newNode],
+            }))
+
+            for (const src of transformationSources) {
+                const t = src.template
+                const sourceType = t ? t.source_node_type : src.sourceType
+                await edgesAPI.create(boardId, {
+                    source_node_id: src.sourceId,
+                    source_node_type: sourceType,
+                    target_node_id: newNode.id,
+                    target_node_type: 'content_node',
+                    edge_type: EdgeType.TRANSFORMATION,
+                    label: t?.label ?? undefined,
+                    parameter_mapping: t?.parameter_mapping ?? undefined,
+                    transformation_code: t?.transformation_code ?? undefined,
+                    transformation_params: t?.transformation_params
+                        ? { ...t.transformation_params }
+                        : { duplicated_from_content_node_id: node.id },
+                    visual_config: t?.visual_config ?? undefined,
+                })
+            }
+
+            await get().fetchEdges(boardId)
+
+            const projectId = get().currentBoard?.project_id
+            if (projectId) {
+                const boards = get().boards.filter((b) => b.project_id === projectId)
+                useLibraryStore.getState().refreshProjectTree(projectId, boards)
+            }
+
+            notify.success('Копия узла данных создана', { title: 'Успех' })
+            return newNode
+        } catch (error: any) {
+            let message = 'Не удалось создать копию узла данных'
+            if (error.response?.data?.detail) {
+                const detail = error.response.data.detail
+                if (Array.isArray(detail)) {
+                    message = detail.map((err: any) => `${err.loc?.join('.')}: ${err.msg}`).join(', ')
+                } else if (typeof detail === 'string') {
+                    message = detail
+                }
+            }
+            console.error('duplicateContentNode error:', error)
+            notify.error(message, { title: 'Ошибка' })
             return null
         }
     },

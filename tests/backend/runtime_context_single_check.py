@@ -108,6 +108,36 @@ def print_trace_summary(trace):
             "->",
             selection.get("agent_results_after"),
         )
+        eff = details.get("context_efficiency") or {}
+        if eff:
+            print(
+                "TRACE_CONTEXT_EFFICIENCY",
+                event.get("agent"),
+                "graph_slice_len",
+                eff.get("graph_slice_text_len"),
+                "graph_nodes",
+                eff.get("graph_nodes_total"),
+                "primary",
+                eff.get("graph_primary"),
+                "budget_items",
+                eff.get("selected_budget_items"),
+                "budget_chars_est",
+                eff.get("selected_budget_chars_est"),
+                "tool_cache",
+                eff.get("tool_result_cache_entries"),
+            )
+        ce = details.get("context_estimates") or {}
+        if ce:
+            print(
+                "TRACE_CONTEXT_ESTIMATES",
+                event.get("agent"),
+                "ctx_total_chars",
+                ce.get("context_total_chars"),
+                "ar_chars",
+                ce.get("agent_results_chars"),
+                "ar_count",
+                ce.get("agent_results_count"),
+            )
     run_finish = [e for e in trace.get("events", []) if e.get("event") == "run_finish"]
     if run_finish:
         details = run_finish[-1].get("details") or {}
@@ -125,6 +155,27 @@ def print_trace_summary(trace):
             details.get("validator_timeout_count"),
             "validator_parse_fallback_count",
             details.get("validator_parse_fallback_count"),
+        )
+
+    for event in trace.get("events", []):
+        evn = event.get("event")
+        if evn in ("expand_step_evaluated", "expand_step_skipped", "context_compaction_budget", "context_graph_llm_compressed"):
+            print("TRACE_CONTEXT_FLOW", evn, event.get("phase"), event.get("agent"), event.get("details"))
+    for event in trace.get("events", []):
+        if event.get("event") != "tool_result":
+            continue
+        det = event.get("details") or {}
+        if not det.get("context_pull_kind"):
+            continue
+        print(
+            "TRACE_CONTEXT_PULL",
+            event.get("agent"),
+            det.get("tool_name"),
+            det.get("context_pull_kind"),
+            "chars",
+            det.get("context_pull_content_chars")
+            or det.get("context_pull_json_chars")
+            or det.get("context_pull_body_chars"),
         )
 
 

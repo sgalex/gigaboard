@@ -1,12 +1,21 @@
 """Board service."""
 from uuid import UUID
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
-from sqlalchemy import func, text
-from fastapi import HTTPException, status
 
-from app.models import Board, Project, SourceNode, ContentNode, WidgetNode, CommentNode
+from fastapi import HTTPException, status
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import (
+    Board,
+    CommentNode,
+    ContentNode,
+    Project,
+    ProjectCollaborator,
+    SourceNode,
+    WidgetNode,
+)
 from app.schemas import BoardCreate, BoardUpdate
+from app.services.project_access_service import ProjectAccessService
 
 
 class BoardService:
@@ -19,20 +28,7 @@ class BoardService:
         board_data: BoardCreate
     ) -> Board:
         """Create a new board."""
-        # Verify project exists and user owns it
-        result = await db.execute(
-            select(Project).where(
-                Project.id == board_data.project_id,
-                Project.user_id == user_id
-            )
-        )
-        project = result.scalar_one_or_none()
-        
-        if not project:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found or access denied"
-            )
+        await ProjectAccessService.require_project_edit_access(db, board_data.project_id, user_id)
         
         board = Board(
             project_id=board_data.project_id,
@@ -53,21 +49,28 @@ class BoardService:
         board_id: UUID,
         user_id: UUID
     ) -> Board:
-        """Get board by ID (user must be owner)."""
-        result = await db.execute(
-            select(Board).where(
-                Board.id == board_id,
-                Board.user_id == user_id
-            )
-        )
+        """Get board by ID (project owner or collaborator)."""
+        result = await db.execute(select(Board).where(Board.id == board_id))
         board = result.scalar_one_or_none()
-        
+
         if not board:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Board not found"
+                detail="Board not found",
             )
-        
+
+        await ProjectAccessService.require_project_access(db, board.project_id, user_id)
+        return board
+
+    @staticmethod
+    async def get_board_for_edit(
+        db: AsyncSession,
+        board_id: UUID,
+        user_id: UUID,
+    ) -> Board:
+        """Доска доступна на изменение (не режим «только просмотр»)."""
+        board = await BoardService.get_board(db, board_id, user_id)
+        await ProjectAccessService.require_project_edit_access(db, board.project_id, user_id)
         return board
     
     @staticmethod
@@ -77,11 +80,21 @@ class BoardService:
         project_id: UUID | None = None
     ) -> list[Board]:
         """List all boards for user, optionally filtered by project."""
-        query = select(Board).where(Board.user_id == user_id)
-        
         if project_id:
-            query = query.where(Board.project_id == project_id)
-        
+            await ProjectAccessService.require_project_access(db, project_id, user_id)
+            query = select(Board).where(Board.project_id == project_id)
+        else:
+            accessible = (
+                select(Project.id)
+                .where(Project.user_id == user_id)
+                .union_all(
+                    select(ProjectCollaborator.project_id).where(
+                        ProjectCollaborator.user_id == user_id
+                    )
+                )
+            ).scalar_subquery()
+            query = select(Board).where(Board.project_id.in_(accessible))
+
         query = query.order_by(Board.updated_at.desc())
         
         result = await db.execute(query)
@@ -98,6 +111,21 @@ class BoardService:
         """List all boards with node counts."""
         # Скалярные подзапросы вместо нескольких outerjoin к подклассам nodes
         # (иначе SAWarning: overlapping tables / joined inheritance).
+        if project_id:
+            await ProjectAccessService.require_project_access(db, project_id, user_id)
+            scope = Board.project_id == project_id
+        else:
+            accessible = (
+                select(Project.id)
+                .where(Project.user_id == user_id)
+                .union_all(
+                    select(ProjectCollaborator.project_id).where(
+                        ProjectCollaborator.user_id == user_id
+                    )
+                )
+            ).scalar_subquery()
+            scope = Board.project_id.in_(accessible)
+
         query = (
             select(
                 Board,
@@ -118,12 +146,9 @@ class BoardService:
                 .scalar_subquery()
                 .label("comment_nodes_count"),
             )
-            .where(Board.user_id == user_id)
+            .where(scope)
             .order_by(Board.updated_at.desc())
         )
-        
-        if project_id:
-            query = query.where(Board.project_id == project_id)
         
         result = await db.execute(query)
         
@@ -209,7 +234,7 @@ class BoardService:
         board_data: BoardUpdate
     ) -> Board:
         """Update board."""
-        board = await BoardService.get_board(db, board_id, user_id)
+        board = await BoardService.get_board_for_edit(db, board_id, user_id)
         
         # Update only provided fields
         if board_data.name is not None:
@@ -238,7 +263,7 @@ class BoardService:
         we use raw SQL to avoid SQLAlchemy ORM issues with joined table inheritance.
         board_id exists only in nodes table, child tables use id as FK to nodes.id
         """
-        board = await BoardService.get_board(db, board_id, user_id)
+        board = await BoardService.get_board_for_edit(db, board_id, user_id)
         
         # Use raw SQL to delete in correct order
         # Step 1: Delete edges (has board_id)

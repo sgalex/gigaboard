@@ -21,6 +21,7 @@ import { contentNodesAPI, widgetNodesAPI, edgesAPI } from '@/services/api'
 import { findOptimalNodePosition, convertNodesToBounds } from '@/lib/nodePositioning'
 import { useBoardStore } from '@/store/boardStore'
 import { SuggestionsPanel } from './SuggestionsPanel'
+import { getViteApiBaseUrl } from '@/config/apiBase'
 import { buildWidgetApiScript, injectApiScript, unescapeWidgetHtml } from './widgetApiScript'
 import { MultiAgentProgressBlock } from '@/components/shared/MultiAgentProgressBlock'
 import {
@@ -258,6 +259,7 @@ export const WidgetDialog = ({
 
         // Build API injection script
         const apiScript = buildWidgetApiScript({
+            appOrigin: getViteApiBaseUrl(),
             contentNodeId: contentNode.id,
             authToken: localStorage.getItem('token') || '',
             autoRefresh,

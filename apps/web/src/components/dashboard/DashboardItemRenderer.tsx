@@ -515,6 +515,7 @@ function WidgetContent({ item }: { item: DashboardItem }) {
 
         const apiScript = sourceContentNodeId
             ? buildWidgetApiScript({
+                appOrigin: getViteApiBaseUrl(),
                 contentNodeId: sourceContentNodeId,
                 authToken,
                 autoRefresh: false,

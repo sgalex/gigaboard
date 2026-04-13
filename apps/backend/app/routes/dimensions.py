@@ -2,15 +2,16 @@
 
 See docs/CROSS_FILTER_SYSTEM.md §3.1, §5
 """
-from uuid import UUID
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_db
-from app.models import User, ContentNode
+from app.models import ContentNode, User
 from app.middleware import get_current_user
+from app.services.project_access_service import ProjectAccessService
 from app.schemas.cross_filter import (
     DimensionCreate,
     DimensionUpdate,
@@ -20,12 +21,22 @@ from app.schemas.cross_filter import (
     MergeDimensionsRequest,
     MergeDimensionsResponse,
 )
-from app.services.dimension_service import DimensionService
 from app.services.content_node_service import ContentNodeService
+from app.services.dimension_service import DimensionService
+
+
+async def _require_project_view(
+    project_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    await ProjectAccessService.require_project_view_access(db, project_id, current_user.id)
+
 
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}/dimensions",
     tags=["dimensions"],
+    dependencies=[Depends(_require_project_view)],
 )
 
 
@@ -52,6 +63,7 @@ async def create_dimension(
     current_user: User = Depends(get_current_user),
 ):
     """Create a new dimension in a project."""
+    await ProjectAccessService.require_project_edit_access(db, project_id, current_user.id)
     dim = await DimensionService.create_dimension(db, project_id, data)
     await db.commit()
     await db.refresh(dim)
@@ -81,6 +93,7 @@ async def update_dimension(
     current_user: User = Depends(get_current_user),
 ):
     """Update a dimension."""
+    await ProjectAccessService.require_project_edit_access(db, project_id, current_user.id)
     dim = await DimensionService.update_dimension(db, dim_id, data)
     if not dim or dim.project_id != project_id:
         raise HTTPException(status_code=404, detail="Dimension not found")
@@ -97,6 +110,7 @@ async def delete_dimension(
     current_user: User = Depends(get_current_user),
 ):
     """Delete a dimension and all its mappings."""
+    await ProjectAccessService.require_project_edit_access(db, project_id, current_user.id)
     deleted = await DimensionService.delete_dimension(db, dim_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Dimension not found")
@@ -120,6 +134,7 @@ async def merge_dimensions(
     All column mappings from source dimensions are transferred to the target.
     Duplicate mappings are silently dropped. Source dimensions are deleted.
     """
+    await ProjectAccessService.require_project_edit_access(db, project_id, current_user.id)
     try:
         result = await DimensionService.merge_dimensions(
             db, project_id, list(data.source_ids), data.target_id
@@ -170,6 +185,7 @@ async def create_mapping(
     current_user: User = Depends(get_current_user),
 ):
     """Create a column mapping for a dimension."""
+    await ProjectAccessService.require_project_edit_access(db, project_id, current_user.id)
     # Ensure the dimension_id matches the path
     data.dimension_id = dim_id
     mapping = await DimensionService.create_mapping(db, data)
@@ -186,6 +202,7 @@ async def delete_mapping(
     current_user: User = Depends(get_current_user),
 ):
     """Delete a column mapping."""
+    await ProjectAccessService.require_project_edit_access(db, project_id, current_user.id)
     deleted = await DimensionService.delete_mapping(db, mapping_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Mapping not found")

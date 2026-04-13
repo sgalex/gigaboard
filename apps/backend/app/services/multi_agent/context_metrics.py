@@ -46,6 +46,55 @@ def summarize_agent_results_stats(agent_results: Any) -> Dict[str, int]:
     }
 
 
+def summarize_context_efficiency_snapshot(context: Any) -> Dict[str, Any]:
+    """
+    Компактные поля для trace/логов: граф, graph-primary, бюджетный список, размер среза.
+    Не сериализует полные agent_results.
+    """
+    if not isinstance(context, dict):
+        return {}
+
+    out: Dict[str, Any] = {}
+    meta = context.get("_context_graph_slice_meta")
+    if isinstance(meta, dict):
+        out["graph_slice_meta"] = {
+            "nodes_included": meta.get("nodes_included"),
+            "chars": meta.get("chars"),
+            "skipped": meta.get("skipped"),
+            "max_chars": meta.get("max_chars"),
+            "compaction_level": meta.get("compaction_level"),
+        }
+    cg = context.get("_context_graph_slice")
+    if isinstance(cg, str):
+        out["graph_slice_text_len"] = len(cg)
+
+    out["graph_primary"] = bool(context.get("_context_graph_primary"))
+    bud = context.get("_agent_results_selected_budget")
+    if isinstance(bud, list):
+        out["selected_budget_items"] = len(bud)
+        st = summarize_agent_results_stats(bud)
+        out["selected_budget_chars_est"] = st.get("total_chars", 0)
+        out["selected_budget_largest_item_chars"] = st.get("largest_item_chars", 0)
+
+    out["selection_compaction_level"] = context.get("_context_selection_compaction_level")
+    sel_for = context.get("_context_selection_applied_for")
+    if sel_for:
+        out["selection_applied_for"] = sel_for
+
+    g = context.get("context_graph")
+    if isinstance(g, dict) and isinstance(g.get("nodes"), dict):
+        out["graph_nodes_total"] = len(g["nodes"])
+
+    cache = context.get("_tool_result_cache")
+    if isinstance(cache, dict):
+        out["tool_result_cache_entries"] = len(cache)
+    dig = context.get("tool_request_cache_digest_lines")
+    if isinstance(dig, list):
+        out["tool_digest_lines"] = len(dig)
+
+    return out
+
+
 def summarize_context_estimates(context: Any) -> Dict[str, int]:
     """
     Оценка ключевых контекстных секций, влияющих на размер prompt payload.

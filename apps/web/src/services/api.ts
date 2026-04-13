@@ -1,4 +1,4 @@
-import axios, { AxiosInstance } from 'axios'
+import axios, { AxiosHeaders, AxiosInstance } from 'axios'
 import { useAuthStore } from '../store/authStore'
 import { notify } from '@/store/notificationStore'
 import { getViteApiBaseUrl } from '@/config/apiBase'
@@ -7,6 +7,8 @@ import type {
     ProjectWithBoards,
     ProjectCreate,
     ProjectUpdate,
+    ProjectCollaboratorEntry,
+    UserSearchResult,
     Board,
     BoardWithNodes,
     BoardCreate,
@@ -43,7 +45,7 @@ import type {
     PublicDashboard,
 } from '@/types/dashboard'
 
-/** baseURL из getViteApiBaseUrl() — в браузере обычно window.location.origin (см. apiBase.ts), не пустая строка. */
+/** baseURL из getViteApiBaseUrl() — в браузере всегда window.location.origin (тот же хост, что UI). */
 const api: AxiosInstance = axios.create({
     baseURL: getViteApiBaseUrl(),
 })
@@ -52,9 +54,19 @@ const api: AxiosInstance = axios.create({
 // применяется актуальный getViteApiBaseUrl() (HTTPS / Mixed Content, смена origin).
 api.interceptors.request.use((config) => {
     config.baseURL = getViteApiBaseUrl()
-    const token = useAuthStore.getState().token
+    // Резерв: localStorage — при рассинхроне Zustand и storage (HMR, редкие гонки) иначе HTTPBearer → 403 «Not authenticated».
+    const token =
+        useAuthStore.getState().token ??
+        (typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null)
     if (token) {
-        config.headers.Authorization = `Bearer ${token}`
+        const h = config.headers
+        const auth = `Bearer ${token}`
+        if (h && typeof (h as AxiosHeaders).set === 'function') {
+            ;(h as AxiosHeaders).set('Authorization', auth)
+        } else {
+            config.headers = AxiosHeaders.from(h ?? {})
+            config.headers.set('Authorization', auth)
+        }
     }
     return config
 })
@@ -64,9 +76,10 @@ api.interceptors.response.use(
     (response) => response,
     (error) => {
         if (!error.response) {
-            notify.error('Сервер недоступен или CORS блокирует запрос. Проверьте backend и VITE_API_URL.', {
-                title: 'Сетевая ошибка',
-            })
+            notify.error(
+                'Сервер недоступен или запрос не доходит до API. Проверьте backend и прокси (Vite: /api → backend; nginx: тот же origin).',
+                { title: 'Сетевая ошибка' }
+            )
         }
         if (error.response?.status === 401) {
             useAuthStore.getState().logout()
@@ -99,6 +112,21 @@ export const projectsAPI = {
     get: (id: string) => api.get<Project>(`/api/v1/projects/${id}`),
     update: (id: string, data: ProjectUpdate) => api.put<Project>(`/api/v1/projects/${id}`, data),
     delete: (id: string) => api.delete(`/api/v1/projects/${id}`),
+    listCollaborators: (projectId: string) =>
+        api.get<ProjectCollaboratorEntry[]>(`/api/v1/projects/${projectId}/collaborators`),
+    addCollaborator: (projectId: string, userId: string, role: string = 'editor') =>
+        api.post(`/api/v1/projects/${projectId}/collaborators`, { user_id: userId, role }),
+    updateCollaboratorRole: (projectId: string, userId: string, role: string) =>
+        api.patch(`/api/v1/projects/${projectId}/collaborators/${userId}`, { role }),
+    removeCollaborator: (projectId: string, userId: string) =>
+        api.delete(`/api/v1/projects/${projectId}/collaborators/${userId}`),
+}
+
+export const usersAPI = {
+    search: (q: string, projectId: string) =>
+        api.get<UserSearchResult[]>('/api/v1/users/search', {
+            params: { q, project_id: projectId },
+        }),
 }
 
 // Boards API
@@ -890,6 +918,10 @@ export const filtersAPI = {
         api.post<ActiveFiltersResponse>(`/api/v1/dashboards/${dashboardId}/filters/clear`),
     applyDashboardPreset: (dashboardId: string, presetId: string) =>
         api.post<ActiveFiltersResponse>(`/api/v1/dashboards/${dashboardId}/filters/apply-preset/${presetId}`),
+    computeDashboardFiltered: (dashboardId: string, filters: FilterExpression | null) =>
+        api.post<{
+            nodes: Record<string, { tables: any[]; uses_ai: boolean; from_cache: boolean }>
+        }>(`/api/v1/dashboards/${dashboardId}/filters/compute-filtered`, { filters }),
 }
 
 // Filter Presets API (project-scoped)

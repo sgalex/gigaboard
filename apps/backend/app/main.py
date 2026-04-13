@@ -28,6 +28,7 @@ from .services.auth_service import AuthService
 from .routes import (
     auth_router,
     health_router,
+    users_router,
     projects_router,
     boards_router,
     edges_router,
@@ -162,7 +163,7 @@ async def lifespan(app: FastAPI):
                 enable_agents=[
                     "planner", "discovery", "research",
                     "structurizer", "analyst", "transform_codex",
-                    "widget_codex", "context_filter", "reporter", "validator",
+                    "widget_codex", "context_filter", "reporter",
                 ],
                 adaptive_planning=True,
                 db_session_factory=async_session_maker,
@@ -209,7 +210,9 @@ fastapi_app = FastAPI(
     title="GigaBoard API",
     description="AI-Powered Analytics Dashboard",
     version="0.1.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    # Иначе 307 при несовпадении trailing slash: браузер/axios может повторить POST без Authorization → 403 «Not authenticated».
+    redirect_slashes=False,
 )
 
 # CORS middleware (при allow_credentials=True нельзя использовать "*" — указываем явные origins)
@@ -225,6 +228,7 @@ fastapi_app.add_middleware(
 # Include routers
 fastapi_app.include_router(health_router)
 fastapi_app.include_router(auth_router)
+fastapi_app.include_router(users_router)
 fastapi_app.include_router(projects_router)
 fastapi_app.include_router(boards_router)
 fastapi_app.include_router(edges_router)

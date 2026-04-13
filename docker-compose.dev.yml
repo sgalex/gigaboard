@@ -1,5 +1,8 @@
-# Разработка: docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
-# Backend: uvicorn --reload. Frontend: Vite :5173 с прокси на сервис backend.
+# Разработка: объединяется с базовым compose (postgres, redis, сеть, тома).
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Backend: bind-mount ./apps/backend/app, uvicorn --reload.
+# Frontend: Vite :5173, VITE_DEV_PROXY_TARGET → backend:8000 (см. apps/web/vite.config.ts).
+# Инструменты (pgadmin, redis-commander): профиль tools — см. compose profiles.
 
 services:
   backend:

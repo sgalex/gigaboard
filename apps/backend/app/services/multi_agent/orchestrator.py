@@ -6,7 +6,7 @@ Orchestrator V2 — единый координатор Multi-Agent систем
 - Агенты инициализируются внутри Orchestrator (перенесено из Engine)
 - Нулевой маппинг: ``agent_results: list[dict]`` передаётся
   агентам как есть, каждый агент сам берёт нужные секции
-- QualityGateAgent для pipeline-level validation
+- Контроль итога: per-step acceptance (в т.ч. reporter), без отдельного финального Quality Gate
 - Возвращает ``AgentPayload`` (а не raw dict)
 - Поддержка adaptive planning и retry/replan
 
@@ -31,9 +31,19 @@ from app.services.llm_router import LLMRouter, LLMCallParams, LLMMessage
 from app.services.context_execution_service import ContextExecutionService
 from app.services.executors.python_executor import PythonExecutor
 from .config import TimeoutConfig
-from .context_metrics import summarize_context_estimates
+from .context_graph.constants import CONTEXT_GRAPH_COMPRESSION_AGENT_KEY
+from .context_metrics import (
+    summarize_context_efficiency_snapshot,
+    summarize_context_estimates,
+)
+from .context_expand_tools import (
+    run_expand_agent_result,
+    run_expand_context_graph_node,
+    run_expand_research_source_content,
+)
 from .context_selection import select_context_for_step
 from .execution_policy import ExecutionPolicy, resolve_execution_policy
+from .step_acceptance import evaluate_step_acceptance, record_step_acceptance_in_memory
 from .runtime_overrides import (
     load_user_multi_agent_overrides,
     ma_bool,
@@ -42,11 +52,18 @@ from .runtime_overrides import (
     reset_ma_overrides_token,
     set_ma_overrides_token,
 )
+
+_CONTEXT_EXPAND_TOOL_NAMES = frozenset(
+    {
+        "expandResearchSourceContent",
+        "expandAgentResult",
+        "expandContextGraphNode",
+    }
+)
 from .message_bus import AgentMessageBus
 from .message_types import MessageType, AgentMessage
 from .schemas.agent_payload import AgentPayload, Plan, PlanStep, ToolResult
 from .tabular_tool_contract import enrich_task_for_tabular_tools
-from .agents.quality_gate import aggregate_agent_results_for_validation
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +122,16 @@ def _tool_cache_digest_line(canonical_tool_name: str, arguments: Dict[str, Any])
         return (
             f"readTableData: contentNodeId={cid}, table_id={tid}, offset={off}, limit={lim}"
         )
+    if canonical_tool_name == "expandResearchSourceContent":
+        return (
+            f"expandResearchSourceContent: ar_idx={arguments.get('agent_result_index')}"
+            f" src_idx={arguments.get('source_index')}"
+        )
+    if canonical_tool_name == "expandAgentResult":
+        return f"expandAgentResult: ar_idx={arguments.get('agent_result_index')}"
+    if canonical_tool_name == "expandContextGraphNode":
+        nid = str(arguments.get("node_id") or "")[:12]
+        return f"expandContextGraphNode: node_id={nid}…"
     return f"{canonical_tool_name}: (cached)"
 
 
@@ -598,7 +625,7 @@ def _infer_table_id_from_recent_list_tool_results(
             ):
                 continue
             data = r.get("data")
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or data.get("ok") is False:
                 continue
             got = _from_data(data)
             if got:
@@ -685,6 +712,88 @@ def _truncate_trace_tool_payload(obj: Any, max_list_items: int) -> Any:
             return prefix
         return [_truncate_trace_tool_payload(x, max_list_items) for x in obj]
     return obj
+
+
+def _context_pull_tool_metrics(
+    tool_name: str, data: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Метрики размера для pull-тулов контекста (trace + логи)."""
+    if not isinstance(data, dict):
+        return {}
+    if tool_name == "expandResearchSourceContent":
+        c = data.get("content")
+        return {
+            "context_pull_kind": "research_source",
+            "context_pull_content_chars": len(c) if isinstance(c, str) else 0,
+            "context_pull_truncated": bool(data.get("truncated")),
+        }
+    if tool_name == "expandAgentResult":
+        j = data.get("json")
+        return {
+            "context_pull_kind": "agent_result",
+            "context_pull_json_chars": len(j) if isinstance(j, str) else 0,
+            "context_pull_truncated": bool(data.get("truncated")),
+        }
+    if tool_name == "expandContextGraphNode":
+        b = data.get("body")
+        return {
+            "context_pull_kind": "context_graph_node",
+            "context_pull_body_chars": len(b) if isinstance(b, str) else 0,
+        }
+    return {}
+
+
+def _tool_data_indicates_failure(data: Any) -> bool:
+    """Ошибка, отданная в data при ToolResult.success=True (для LLM в промпте)."""
+    return isinstance(data, dict) and data.get("ok") is False
+
+
+def _read_table_list_llm_error(
+    message: str,
+    *,
+    hint: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Структурированная ошибка readTableListFromContentNodes для промпта LLM (не через ToolResult.error)."""
+    return {
+        "ok": False,
+        "tool": "readTableListFromContentNodes",
+        "message": message,
+        "hint": hint
+        or (
+            "Передай arguments.nodeIds: непустой список UUID ContentNode "
+            "(из контекста доски, discovery или полей content_node_id / selected_node_ids в пайплайне)."
+        ),
+        "content_node_id": "",
+        "content_node_ids": [],
+        "nodes": [],
+        "tables": [],
+        "tables_count": 0,
+    }
+
+
+def _read_table_data_llm_error(
+    message: str,
+    *,
+    hint: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Структурированная ошибка readTableData для промпта LLM."""
+    out: Dict[str, Any] = {
+        "ok": False,
+        "tool": "readTableData",
+        "message": message,
+        "content_node_id": "",
+        "table_id": "",
+        "table_name": "",
+        "row_count": 0,
+        "offset": 0,
+        "limit": 0,
+        "returned_rows": 0,
+        "columns": [],
+        "rows": [],
+    }
+    if hint:
+        out["hint"] = hint
+    return out
 
 
 def _tool_result_trace_details(result_dump: Dict[str, Any]) -> Dict[str, Any]:
@@ -838,7 +947,7 @@ class Orchestrator:
         self.gigachat_api_key = gigachat_api_key
         self.enable_agents = enable_agents or [
             "planner", "discovery", "research", "structurizer",
-            "analyst", "transform_codex", "widget_codex", "context_filter", "reporter", "validator",
+            "analyst", "transform_codex", "widget_codex", "context_filter", "reporter",
         ]
         self.adaptive_planning = adaptive_planning
         self._db_session_factory = db_session_factory
@@ -977,17 +1086,6 @@ class Orchestrator:
         except ImportError:
             self._logger.debug("ReporterAgent not available")
 
-        try:
-            from .agents.quality_gate import QualityGateAgent
-            agent_registry["validator"] = lambda: QualityGateAgent(
-                message_bus=self.message_bus,
-                gigachat_service=self.gigachat,
-                executor=self.executor,
-                llm_router=self.llm_router,
-            )
-        except ImportError:
-            self._logger.debug("QualityGateAgent not available")
-
         # Создаём только запрошенные агенты
         self._logger.info(f"  📋 Registry keys: {list(agent_registry.keys())}")
         self._logger.info(f"  📋 Enable agents: {self.enable_agents}")
@@ -1036,9 +1134,8 @@ class Orchestrator:
 
         Цикл выполнения::
 
-            PlannerAgent → [execute steps] → ValidatorAgent
-                                             ├── valid   → return
-                                             └── invalid → replan (до MAX)
+            PlannerAgent → [execute steps] → возврат (финальный Quality Gate отключён;
+            контроль артефактов — ``step_acceptance`` на каждом шаге, в т.ч. reporter).
 
         Нулевой маппинг: ``agent_results`` передаётся агентам как есть.
         Каждый агент сам берёт нужные секции из ``AgentPayload``.
@@ -1049,7 +1146,7 @@ class Orchestrator:
             user_id: ID пользователя
             session_id: ID сессии (если None — создаётся)
             context: Дополнительный контекст (selected_node_ids, content_nodes_data, etc.)
-            skip_validation: Пропустить ValidatorAgent
+            skip_validation: Устарело; финальная валидация не выполняется, параметр игнорируется.
 
         Returns:
             Dict с результатом:
@@ -1240,6 +1337,7 @@ class Orchestrator:
             original_chat_count = len(agent_context.get("chat_history", [])) if isinstance(agent_context.get("chat_history"), list) else 0
             effective_chat_count = len(effective_context.get("chat_history", [])) if isinstance(effective_context.get("chat_history"), list) else 0
             context_estimates = summarize_context_estimates(effective_context)
+            context_efficiency = summarize_context_efficiency_snapshot(effective_context)
             if context_estimates["context_total_chars"] >= ma_int(
                 "MULTI_AGENT_CONTEXT_WARN_CHARS", 250000
             ):
@@ -1252,6 +1350,23 @@ class Orchestrator:
                     context_estimates["agent_results_count"],
                     context_estimates["chat_history_count"],
                 )
+            if ma_bool("MULTI_AGENT_CONTEXT_EFFICIENCY_LOG", False):
+                self._logger.info(
+                    "[context_efficiency] session=%s phase=%s agent=%s task=%s "
+                    "ctx_total_chars=%s ar_in_prompt=%s graph_slice_chars=%s "
+                    "graph_primary=%s budget_items=%s budget_chars_est=%s graph_nodes=%s",
+                    session_id,
+                    phase,
+                    agent_name,
+                    task_type,
+                    context_estimates.get("context_total_chars"),
+                    context_estimates.get("agent_results_count"),
+                    context_efficiency.get("graph_slice_text_len"),
+                    context_efficiency.get("graph_primary"),
+                    context_efficiency.get("selected_budget_items"),
+                    context_efficiency.get("selected_budget_chars_est"),
+                    context_efficiency.get("graph_nodes_total"),
+                )
             _log_trace(
                 event="agent_call_start",
                 phase=phase,
@@ -1261,6 +1376,7 @@ class Orchestrator:
                 details={
                     "task_type": task_type,
                     "context_estimates": context_estimates,
+                    "context_efficiency": context_efficiency,
                     "context_selection": {
                         "applied_for": effective_context.get("_context_selection_applied_for"),
                         "selection_task_type": effective_context.get("_context_selection_task_type"),
@@ -1446,22 +1562,47 @@ class Orchestrator:
                     tool_results.append(result)
                     result_dump = result.model_dump()
                     tr_detail = _tool_result_trace_details(result_dump)
+                    pull_m = _context_pull_tool_metrics(
+                        str(result.tool_name or ""),
+                        result.data if isinstance(result.data, dict) else None,
+                    )
+                    if pull_m and ma_bool("MULTI_AGENT_CONTEXT_EFFICIENCY_LOG", False):
+                        self._logger.info(
+                            "[context_pull_tool] session=%s agent=%s tool=%s %s",
+                            session_id,
+                            agent_name,
+                            result.tool_name,
+                            pull_m,
+                        )
+                    sem_ok = bool(
+                        result.success
+                        and not _tool_data_indicates_failure(result.data)
+                    )
                     _log_trace(
                         event="tool_result",
                         phase=phase,
                         agent=agent_name,
                         step_id=step_id,
                         step_index=step_index,
-                        status="success" if result.success else "error",
-                        error=result.error,
+                        status="success" if sem_ok else "error",
+                        error=(
+                            result.error
+                            if not result.success
+                            else (
+                                (result.data or {}).get("message")
+                                if _tool_data_indicates_failure(result.data)
+                                else None
+                            )
+                        ),
                         details={
                             "round": rounds,
                             "request_id": result.request_id,
                             "tool_name": result.tool_name,
-                            "success": bool(result.success),
+                            "success": sem_ok,
                             "data_keys": sorted(list((result_dump.get("data") or {}).keys()))
                             if isinstance(result_dump.get("data"), dict)
                             else [],
+                            **pull_m,
                             **tr_detail,
                         },
                     )
@@ -1480,7 +1621,14 @@ class Orchestrator:
                     details={
                         "round": rounds,
                         "results_count": len(tool_results_dump),
-                        "success_count": len([r for r in tool_results_dump if r.get("success")]),
+                        "success_count": len(
+                            [
+                                r
+                                for r in tool_results_dump
+                                if r.get("success")
+                                and not _tool_data_indicates_failure(r.get("data"))
+                            ]
+                        ),
                     },
                 )
                 payload = await _run_agent_traced(
@@ -1538,6 +1686,7 @@ class Orchestrator:
                 "agent_results": [],  # append-only, последний ключ (Изменение #2)
             }
             self._init_pipeline_memory(pipeline_context)
+            self._init_context_graph(pipeline_context)
             tools_enabled = ma_bool("MULTI_AGENT_ENABLE_TOOLS", False)
             tools_agents_raw = ma_str(
                 "MULTI_AGENT_TOOL_ENABLED_AGENTS",
@@ -1588,6 +1737,10 @@ class Orchestrator:
                     self._logger.warning("Failed to load agent runtime options: %s", e)
                     agent_runtime_options_map = {}
             pipeline_context["_agent_runtime_options_map"] = agent_runtime_options_map
+            if isinstance(agent_runtime_options_map, dict):
+                pipeline_context["_context_graph_compression_runtime_options"] = (
+                    agent_runtime_options_map.get(CONTEXT_GRAPH_COMPRESSION_AGENT_KEY)
+                )
 
             _ctrl = (context or {}).get("controller") or ""
             suggestions_fast = _ctrl in (
@@ -1686,8 +1839,10 @@ class Orchestrator:
                     agent_context=pipeline_context,
                     phase="planning",
                 )
-                pipeline_context["agent_results"].append(
-                    plan_payload.model_dump() if isinstance(plan_payload, AgentPayload) else plan_payload
+                await self._append_agent_result(
+                    pipeline_context,
+                    plan_payload.model_dump() if isinstance(plan_payload, AgentPayload) else plan_payload,
+                    phase="planning",
                 )
                 if isinstance(plan_payload, AgentPayload):
                     self._update_pipeline_memory(
@@ -1729,12 +1884,10 @@ class Orchestrator:
             )
 
             # ============================================================
-            # STEP 2 & 3: Execution + Validation Loop
-            # Master loop для поддержки replanning после валидации
+            # STEP 2: Execution (+ внутренний master loop для legacy replan после ошибок шага)
             # ============================================================
             raw_results: Dict[str, Any] = {"plan": plan}
             replan_count = 0
-            validation_recovery_count = 0
 
             # Индекс начала результатов текущего плана в agent_results.
             current_plan_results_start = len(pipeline_context.get("agent_results", []))
@@ -1756,6 +1909,61 @@ class Orchestrator:
             validator_timeout_count = 0
             validator_parse_fallback_count = 0
             validator_missing_validation_field_count = 0
+            step_acceptance_fail_count = 0
+            step_acceptance_warn_count = 0
+
+            def _emit_step_acceptance(
+                *,
+                agent_nm: str,
+                step_id_val: Optional[str],
+                step_idx: int,
+                task_d: Any,
+                result_d: Dict[str, Any],
+            ) -> None:
+                nonlocal step_acceptance_fail_count, step_acceptance_warn_count
+                if not ma_bool("MULTI_AGENT_STEP_ACCEPTANCE_ENABLED", True):
+                    return
+                st = str(result_d.get("status") or "")
+                if st not in ("success", "partial"):
+                    return
+                acc = evaluate_step_acceptance(
+                    agent_name=agent_nm,
+                    task=task_d if isinstance(task_d, dict) else {},
+                    result=result_d,
+                )
+                _log_trace(
+                    event="step_acceptance",
+                    phase="execution",
+                    agent=agent_nm,
+                    step_id=step_id_val,
+                    step_index=step_idx,
+                    status=acc.level,
+                    details=acc.to_trace_dict(),
+                )
+                record_step_acceptance_in_memory(
+                    pipeline_context,
+                    agent_name=agent_nm,
+                    step_id=str(step_id_val) if step_id_val is not None else None,
+                    acceptance=acc,
+                )
+                if acc.level == "fail":
+                    step_acceptance_fail_count += 1
+                    self._logger.warning(
+                        "⚠️ [%s] step_acceptance fail %s step=%s: %s",
+                        session_id,
+                        agent_nm,
+                        step_id_val,
+                        acc.messages,
+                    )
+                elif acc.level == "warn":
+                    step_acceptance_warn_count += 1
+                    self._logger.info(
+                        "ℹ️ [%s] step_acceptance warn %s step=%s: %s",
+                        session_id,
+                        agent_nm,
+                        step_id_val,
+                        acc.messages,
+                    )
 
             while True:
                 pending_idxs = [i for i, s in enumerate(steps) if s.get("_status") == "pending"]
@@ -1811,7 +2019,32 @@ class Orchestrator:
                     or _skip_expand_transform_codex
                     or _skip_expand_analyst_in_codex_pipeline
                 )
-                if not disable_heavy_decomposition and not _skip_expand:
+                if disable_heavy_decomposition:
+                    _log_trace(
+                        event="expand_step_skipped",
+                        phase="expand_step",
+                        step_id=step_id,
+                        step_index=i,
+                        details={
+                            "target_step_agent": _agent_expand,
+                            "reason": "disable_heavy_decomposition",
+                        },
+                    )
+                elif _skip_expand:
+                    self._logger.debug(
+                        f"[{session_id}] skip expand_step for {_agent_expand} (codex pipeline)"
+                    )
+                    _log_trace(
+                        event="expand_step_skipped",
+                        phase="expand_step",
+                        step_id=step_id,
+                        step_index=i,
+                        details={
+                            "target_step_agent": _agent_expand,
+                            "reason": "widget_or_transform_codex_pipeline",
+                        },
+                    )
+                else:
                     expand_payload = await _run_agent_traced(
                         agent_name="planner",
                         task={"type": "expand_step", "step": step_for_planner},
@@ -1820,14 +2053,39 @@ class Orchestrator:
                         step_id=step_id,
                         step_index=i,
                     )
-                    if expand_payload.status == "success" and getattr(expand_payload, "metadata", None):
+                    edetails: Dict[str, Any] = {
+                        "target_step_agent": _agent_expand,
+                        "expand_call_status": expand_payload.status,
+                        "atomic": None,
+                        "sub_steps_count": 0,
+                    }
+                    if expand_payload.status == "success" and getattr(
+                        expand_payload, "metadata", None
+                    ):
                         exp_result = expand_payload.metadata.get("expand_step_result", {})
                         atomic = exp_result.get("atomic", True)
                         sub_steps = exp_result.get("sub_steps") or []
-                elif _skip_expand:
-                    self._logger.debug(
-                        f"[{session_id}] skip expand_step for {_agent_expand} (codex pipeline)"
+                        edetails["atomic"] = atomic
+                        edetails["sub_steps_count"] = len(sub_steps)
+                    _log_trace(
+                        event="expand_step_evaluated",
+                        phase="expand_step",
+                        agent="planner",
+                        step_id=step_id,
+                        step_index=i,
+                        status=expand_payload.status,
+                        details=edetails,
                     )
+                    if ma_bool("MULTI_AGENT_CONTEXT_EXPAND_COMPACT_LOG", False):
+                        self._logger.info(
+                            "[context_expand] session=%s step_id=%s target=%s status=%s atomic=%s sub_steps=%s",
+                            session_id,
+                            step_id,
+                            _agent_expand,
+                            expand_payload.status,
+                            edetails.get("atomic"),
+                            edetails.get("sub_steps_count"),
+                        )
                 if not atomic and sub_steps and expand_count.get(step_id, 0) < MAX_EXPAND_PER_STEP:
                     _log_trace(
                         event="step_expanded",
@@ -1861,11 +2119,9 @@ class Orchestrator:
                 else:
                     task_data = {}
                 if agent_name == "validator":
-                    # Валидатор выполняется отдельной финальной фазой ниже.
-                    # Не запускаем его как обычный execute_step, чтобы не дублировать
-                    # проверку и не загрязнять agent_results промежуточной валидацией.
+                    # Шаги ``validator`` в плане (legacy) пропускаются: финальный Quality Gate в оркестраторе отключён.
                     self._logger.info(
-                        f"⏭️ [{session_id}] Skipping validator step in plan; final validation phase will run"
+                        f"⏭️ [{session_id}] Skipping validator step in plan (final quality gate disabled)"
                     )
                     _log_trace(
                         event="step_skipped",
@@ -1874,7 +2130,7 @@ class Orchestrator:
                         step_id=step_id,
                         step_index=i,
                         status="skipped",
-                        details={"reason": "validator_runs_in_final_phase"},
+                        details={"reason": "quality_gate_disabled"},
                     )
                     S["_status"] = "done"
                     steps_executed += 1
@@ -1910,11 +2166,23 @@ class Orchestrator:
                         ),
                     )
                     result_dict = step_payload.model_dump()
-                    pipeline_context["agent_results"].append(result_dict)
+                    await self._append_agent_result(
+                        pipeline_context,
+                        result_dict,
+                        step_id=step_id,
+                        phase="execute_step",
+                    )
                     self._update_pipeline_memory(
                         pipeline_context,
                         agent_name=agent_name,
                         payload=step_payload,
+                    )
+                    _emit_step_acceptance(
+                        agent_nm=agent_name,
+                        step_id_val=step_id,
+                        step_idx=i,
+                        task_d=task_data,
+                        result_d=result_dict,
                     )
                     if agent_name in raw_results:
                         run_num = 2
@@ -1976,13 +2244,25 @@ class Orchestrator:
                 )
 
                 result_dict = step_payload.model_dump() if isinstance(step_payload, AgentPayload) else step_payload
-                pipeline_context["agent_results"].append(result_dict)
+                await self._append_agent_result(
+                    pipeline_context,
+                    result_dict,
+                    step_id=step_id,
+                    phase="execute_step",
+                )
                 if isinstance(step_payload, AgentPayload):
                     self._update_pipeline_memory(
                         pipeline_context,
                         agent_name=agent_name,
                         payload=step_payload,
                     )
+                _emit_step_acceptance(
+                    agent_nm=agent_name,
+                    step_id_val=step_id,
+                    step_idx=i,
+                    task_d=task_data,
+                    result_d=result_dict,
+                )
                 if agent_name in raw_results:
                     run_num = 2
                     while f"{agent_name}_{run_num}" in raw_results:
@@ -2278,8 +2558,13 @@ class Orchestrator:
                             if isinstance(step_payload, AgentPayload)
                             else step_payload
                         )
-                        pipeline_context["agent_results"].append(error_result_dict)
-                        
+                        await self._append_agent_result(
+                            pipeline_context,
+                            error_result_dict,
+                            step_id=str(step_id) if step_id is not None else None,
+                            phase=phase,
+                        )
+
                         # FIX: Инжектируем ошибку в pipeline_context,
                         # чтобы codex мог прочитать previous_error напрямую из context.
                         pipeline_context["previous_error"] = step_payload.error
@@ -2346,7 +2631,12 @@ class Orchestrator:
 
                     # Изменение #2: append в agent_results (chronological list)
                     result_dict = step_payload.model_dump() if isinstance(step_payload, AgentPayload) else step_payload
-                    pipeline_context["agent_results"].append(result_dict)
+                    await self._append_agent_result(
+                        pipeline_context,
+                        result_dict,
+                        step_id=str(step_id) if step_id is not None else None,
+                        phase=phase,
+                    )
                     if isinstance(step_payload, AgentPayload):
                         self._update_pipeline_memory(
                             pipeline_context,
@@ -2380,15 +2670,9 @@ class Orchestrator:
                     self._logger.info(f"✅ [{session_id}] {agent_name} done (status={step_payload.status})")
 
                     # Adaptive planning: проверяем необходимость replan
-                    # Adaptive replanning: intelligently decide when to replan
-                    # ВАЖНО: Делаем replan ТОЛЬКО в критических случаях:
-                    # - Есть suggested_steps от ValidatorAgent (ошибки валидации)
-                    # - Discovery нашёл дополнительные источники данных
-                    # - Structurizer извлёк неожиданную структуру
-                    # НЕ делаем replan для simple успешных шагов (analyst → reporter в discussion mode)
+                    # ВАЖНО: replan только при сигналах в pipeline_context или после discovery/structurizer.
                     should_check_replan = False
-                    
-                    # Проверяем есть ли suggested_steps от валидатора (ошибки validation/execution)
+
                     if pipeline_context.get("suggested_steps") or pipeline_context.get("validation_issues"):
                         should_check_replan = True
                     
@@ -2440,234 +2724,9 @@ class Orchestrator:
 
                     step_index += 1
 
-                # ============================================================
-                # STEP 3: ValidatorAgent — валидация результатов
-                # ============================================================
-                if not skip_validation and "validator" in self.agents:
-                    # Валидатор должен работать как gate над финальным отчётом.
-                    # Если reporter ещё не выполнялся (или выполнение оборвалось по лимитам),
-                    # валидация только запутает пользователя, поэтому пропускаем её.
-                    reporter_executed = any(
-                        isinstance(r, dict) and r.get("agent") == "reporter"
-                        for r in pipeline_context.get("agent_results", [])
-                    )
-                    if not reporter_executed:
-                        if ended_due_to_limits:
-                            self._logger.warning(
-                                f"⚠️ [{session_id}] Skipping validation: reporter not executed and step limits reached"
-                            )
-                        else:
-                            self._logger.info(
-                                f"ℹ️ [{session_id}] Skipping validation: reporter not executed yet"
-                            )
-                        break
-
-                    self._logger.info(f"🔍 [{session_id}] Validating results...")
-                    await _emit_progress(
-                        agent_name="validator",
-                        task={"type": "run_quality_gate", "description": "Проверяю качество итогового ответа"},
-                        phase="validation",
-                    )
-                    # Изменение #6: QualityGate получает execution_context (полные DataFrame)
-                    _log_trace(
-                        event="agent_call_start",
-                        phase="validation",
-                        agent="validator",
-                        details={"task_type": "validate"},
-                    )
-                    _val_t0 = time.perf_counter()
-                    validation_payload = await self._validate_results(
-                        user_request,
-                        pipeline_context,
-                        execution_context,
-                        current_plan_results_start=current_plan_results_start,
-                    )
-                    _log_trace(
-                        event="agent_call_end",
-                        phase="validation",
-                        agent="validator",
-                        duration_ms=int((time.perf_counter() - _val_t0) * 1000),
-                        status=validation_payload.status,
-                        error=validation_payload.error if validation_payload.status == "error" else None,
-                        details=_build_agent_call_end_details(
-                            validation_payload,
-                            agent_context={
-                                "task_type": pipeline_context.get("task_type"),
-                            },
-                        ),
-                    )
-                    # Записываем результат валидации в хронологию
-                    val_result_dict = (
-                        validation_payload.model_dump()
-                        if isinstance(validation_payload, AgentPayload)
-                        else validation_payload
-                    )
-                    pipeline_context["agent_results"].append(val_result_dict)
-                    raw_results["validator"] = val_result_dict
-                    self._update_pipeline_memory(
-                        pipeline_context,
-                        agent_name="validator",
-                        note=f"Validator status: {validation_payload.status}",
-                    )
-
-                    # Fail-closed: ошибка ValidatorAgent не должна трактоваться как pass.
-                    if validation_payload.status == "error":
-                        validator_error_message = (
-                            validation_payload.error
-                            or "Validator returned status=error without details"
-                        )
-                        validator_error_count += 1
-                        if "timeout" in validator_error_message.lower():
-                            validator_timeout_count += 1
-
-                        self._logger.warning(
-                            f"⚠️ [{session_id}] Validator execution error: {validator_error_message}. "
-                            "Finishing with current results."
-                        )
-                        quality_gate_failed = True
-                        quality_gate_message = f"Validator execution error: {validator_error_message}"
-                        quality_gate_issues_count = 0
-                        _log_trace(
-                            event="validation_failed",
-                            phase="validation",
-                            agent="validator",
-                            status="failed",
-                            details={
-                                "message": quality_gate_message,
-                                "issues_count": 0,
-                                "reason": "validator_error",
-                                "validator_status": validation_payload.status,
-                            },
-                        )
-                        break
-                    
-                    # Проверяем результат валидации
-                    if validation_payload.validation:
-                        val_result = validation_payload.validation
-                        if (
-                            isinstance(val_result.message, str)
-                            and "Parse error" in val_result.message
-                        ):
-                            validator_parse_fallback_count += 1
-                        
-                        if not val_result.valid:
-                            # Targeted recovery: if validator provided a replan and attempts remain,
-                            # do not finish immediately — run planner.replan with validator hints.
-                            if (
-                                val_result.suggested_replan
-                                and validation_recovery_count
-                                < ma_int("MULTI_AGENT_MAX_VALIDATION_RECOVERY", 2)
-                                and replan_count < MAX_REPLAN_ATTEMPTS
-                            ):
-                                sr = val_result.suggested_replan
-                                suggested_steps = []
-                                for step in sr.additional_steps or []:
-                                    suggested_steps.append(
-                                        {
-                                            "agent": step.agent,
-                                            "description": step.task.get("description", ""),
-                                        }
-                                    )
-                                validation_issues = [
-                                    {
-                                        "severity": issue.severity,
-                                        "message": issue.text,
-                                    }
-                                    for issue in (val_result.issues or [])
-                                ]
-                                validation_recovery_count += 1
-                                replan_count += 1
-                                self._logger.info(
-                                    f"🔄 [{session_id}] Replanning after validation failure "
-                                    f"({replan_count}/{MAX_REPLAN_ATTEMPTS}, "
-                                    f"validation_recovery {validation_recovery_count}/"
-                                    f"{ma_int('MULTI_AGENT_MAX_VALIDATION_RECOVERY', 2)}): {sr.reason}"
-                                )
-                                new_plan = await self._replan(
-                                    plan,
-                                    pipeline_context,
-                                    {
-                                        "last_error": val_result.message or "Validation failed",
-                                        "failed_agent": "validator",
-                                        "suggested_steps": suggested_steps,
-                                        "validation_issues": validation_issues,
-                                    },
-                                )
-                                if new_plan and new_plan.get("steps"):
-                                    plan = new_plan
-                                    steps = plan["steps"]
-                                    await _emit_plan_update(
-                                        plan_steps=steps,
-                                        completed_count=0,
-                                        source="validation_replan",
-                                    )
-                                    raw_results["plan"] = plan
-                                    raw_results[f"replan_{replan_count}"] = {
-                                        "after_step": step_index + 1,
-                                        "reason": val_result.message or "Validation failed",
-                                        "type": "validation_recovery",
-                                    }
-                                    current_plan_results_start = len(
-                                        pipeline_context.get("agent_results", [])
-                                    )
-                                    pipeline_context["current_plan_results_start"] = (
-                                        current_plan_results_start
-                                    )
-                                    step_index = 0
-                                    continue
-                            self._logger.warning(
-                                f"⚠️ [{session_id}] Validation failed: {val_result.message}. Finishing with current results."
-                            )
-                            quality_gate_failed = True
-                            quality_gate_message = val_result.message
-                            quality_gate_issues_count = len(val_result.issues or [])
-                            _log_trace(
-                                event="validation_failed",
-                                phase="validation",
-                                agent="validator",
-                                status="failed",
-                                details={
-                                    "message": val_result.message,
-                                    "issues_count": len(val_result.issues or []),
-                                    "reason": "validation_invalid",
-                                },
-                            )
-                            break
-                        else:
-                            self._logger.info(f"✅ [{session_id}] Validation passed")
-                            _log_trace(
-                                event="validation_passed",
-                                phase="validation",
-                                agent="validator",
-                                status="success",
-                            )
-                            # Валидация прошла → завершаем успешно
-                            break
-                    else:
-                        # Fail-closed: payload без поля validation — это ошибка контракта.
-                        validator_missing_validation_field_count += 1
-                        self._logger.warning(
-                            f"⚠️ [{session_id}] Validator returned payload without validation field. "
-                            "Finishing with failed_quality_gate."
-                        )
-                        quality_gate_failed = True
-                        quality_gate_message = "Validator payload missing validation field"
-                        quality_gate_issues_count = 0
-                        _log_trace(
-                            event="validation_failed",
-                            phase="validation",
-                            agent="validator",
-                            status="failed",
-                            details={
-                                "message": quality_gate_message,
-                                "issues_count": 0,
-                                "reason": "missing_validation_field",
-                            },
-                        )
-                        break
-                else:
-                    # Валидация не запускалась → завершаем
-                    break
+                # Финальный Quality Gate (QualityGateAgent / validator) отключён: достаточно
+                # per-step acceptance (в т.ч. reporter) и ошибок шагов.
+                break
 
             # ============================================================
             # Cleanup & Return (после выхода из master loop)
@@ -2683,6 +2742,18 @@ class Orchestrator:
                 plan["agent_results_at_replan"] = len(
                     pipeline_context.get("agent_results", [])
                 )
+
+            # Синхронизация UI (Socket.IO ai:stream:progress): все исполненные шаги — completed.
+            _done_steps = sum(
+                1
+                for s in steps
+                if isinstance(s, dict) and s.get("_status") == "done"
+            )
+            await _emit_plan_update(
+                plan_steps=steps,
+                completed_count=_done_steps,
+                source="pipeline_complete",
+            )
 
             # Очищаем Redis session
             if self.message_bus:
@@ -2720,6 +2791,8 @@ class Orchestrator:
                     "validator_timeout_count": validator_timeout_count,
                     "validator_parse_fallback_count": validator_parse_fallback_count,
                     "validator_missing_validation_field_count": validator_missing_validation_field_count,
+                    "step_acceptance_fail_count": step_acceptance_fail_count,
+                    "step_acceptance_warn_count": step_acceptance_warn_count,
                 },
             )
 
@@ -2740,6 +2813,8 @@ class Orchestrator:
                 "validator_timeout_count": validator_timeout_count,
                 "validator_parse_fallback_count": validator_parse_fallback_count,
                 "validator_missing_validation_field_count": validator_missing_validation_field_count,
+                "step_acceptance_fail_count": step_acceptance_fail_count,
+                "step_acceptance_warn_count": step_acceptance_warn_count,
             }
             return process_return
 
@@ -2870,6 +2945,63 @@ class Orchestrator:
                 "open_questions": [],
                 "evidence": [],
             }
+
+    @staticmethod
+    def _init_context_graph(context: Dict[str, Any]) -> None:
+        """Пустой context_graph (узлы L0 заполняются при append в agent_results при включённом флаге)."""
+        from .context_graph.store import init_context_graph
+
+        init_context_graph(context)
+
+    async def _append_agent_result(
+        self,
+        pipeline_context: Dict[str, Any],
+        result_dict: Any,
+        *,
+        step_id: Optional[str] = None,
+        phase: Optional[str] = None,
+    ) -> None:
+        """
+        Append-only в agent_results + ingest узла L0 в context_graph (см. context_graph.ingest).
+        При наличии LLMRouter — опционально LLM-сжатие L1/L2 (context_graph_compression).
+        """
+        ar = pipeline_context.setdefault("agent_results", [])
+        ar.append(result_dict)
+        if not isinstance(result_dict, dict):
+            return
+        idx = len(ar) - 1
+        from .context_graph.ingest import ingest_agent_result_dict
+
+        node_id = ingest_agent_result_dict(
+            pipeline_context,
+            result_dict,
+            agent_result_index=idx,
+            step_id=step_id,
+            phase=phase,
+        )
+        if node_id and self.llm_router:
+            try:
+                from .context_graph.compression import maybe_compress_l0_node_with_llm
+
+                uid_raw = pipeline_context.get("user_id")
+                user_uuid: Optional[UUID] = None
+                if uid_raw is not None:
+                    try:
+                        user_uuid = UUID(str(uid_raw)) if not isinstance(uid_raw, UUID) else uid_raw
+                    except (ValueError, TypeError):
+                        user_uuid = None
+                await maybe_compress_l0_node_with_llm(
+                    self.llm_router,
+                    user_id=user_uuid,
+                    pipeline_context=pipeline_context,
+                    l0_node_id=node_id,
+                )
+            except Exception as e:
+                self._logger.warning(
+                    "context_graph LLM compression skipped: %s",
+                    e,
+                    exc_info=logger.isEnabledFor(logging.DEBUG),
+                )
 
     @staticmethod
     def _append_memory_items(target: List[str], value: Any, *, limit: int = 8) -> None:
@@ -3805,6 +3937,34 @@ class Orchestrator:
                         except Exception:
                             pass
                     return ToolResult.model_validate(entry)
+            elif tool_name in _CONTEXT_EXPAND_TOOL_NAMES and ma_bool(
+                "MULTI_AGENT_CONTEXT_EXPAND_TOOLS", True
+            ):
+                canonical_for_cache = tool_name
+                cache_key = _tool_request_cache_key(canonical_for_cache, arguments)
+                cache = pipeline_context.get("_tool_result_cache")
+                if isinstance(cache, dict) and cache_key in cache:
+                    entry = copy.deepcopy(cache[cache_key])
+                    entry["request_id"] = request_id
+                    self._logger.info(
+                        "Tool result cache hit: %s (key=%s…)",
+                        canonical_for_cache,
+                        cache_key[:16],
+                    )
+                    tr_fn = pipeline_context.get("_trace_event")
+                    if callable(tr_fn):
+                        try:
+                            tr_fn(
+                                event="tool_cache_hit",
+                                phase="execute_step",
+                                details={
+                                    "tool_name": canonical_for_cache,
+                                    "cache_key_prefix": cache_key[:16],
+                                },
+                            )
+                        except Exception:
+                            pass
+                    return ToolResult.model_validate(entry)
 
             if tool_name in {"readTableListFromContentNodes", "readTableListFromContentNode"}:
                 data = await self._tool_read_table_list_from_content_node(
@@ -3817,7 +3977,11 @@ class Orchestrator:
                     success=True,
                     data=data,
                 )
-                if cache_key and canonical_for_cache:
+                if (
+                    cache_key
+                    and canonical_for_cache
+                    and not _tool_data_indicates_failure(data)
+                ):
                     _store_tool_result_in_pipeline_cache(
                         pipeline_context,
                         cache_key=cache_key,
@@ -3837,7 +4001,11 @@ class Orchestrator:
                     success=True,
                     data=data,
                 )
-                if cache_key and canonical_for_cache:
+                if (
+                    cache_key
+                    and canonical_for_cache
+                    and not _tool_data_indicates_failure(data)
+                ):
                     _store_tool_result_in_pipeline_cache(
                         pipeline_context,
                         cache_key=cache_key,
@@ -3845,6 +4013,82 @@ class Orchestrator:
                         arguments=arguments,
                         result_dump=res.model_dump(),
                     )
+                return res
+            if tool_name == "expandResearchSourceContent":
+                data, err = run_expand_research_source_content(
+                    pipeline_context, arguments
+                )
+                if err:
+                    return ToolResult(
+                        request_id=request_id,
+                        tool_name=tool_name,
+                        success=False,
+                        error=err,
+                    )
+                res = ToolResult(
+                    request_id=request_id,
+                    tool_name=tool_name,
+                    success=True,
+                    data=data,
+                )
+                ck = _tool_request_cache_key(tool_name, arguments)
+                _store_tool_result_in_pipeline_cache(
+                    pipeline_context,
+                    cache_key=ck,
+                    canonical_tool_name=tool_name,
+                    arguments=arguments,
+                    result_dump=res.model_dump(),
+                )
+                return res
+            if tool_name == "expandAgentResult":
+                data, err = run_expand_agent_result(pipeline_context, arguments)
+                if err:
+                    return ToolResult(
+                        request_id=request_id,
+                        tool_name=tool_name,
+                        success=False,
+                        error=err,
+                    )
+                res = ToolResult(
+                    request_id=request_id,
+                    tool_name=tool_name,
+                    success=True,
+                    data=data,
+                )
+                ck = _tool_request_cache_key(tool_name, arguments)
+                _store_tool_result_in_pipeline_cache(
+                    pipeline_context,
+                    cache_key=ck,
+                    canonical_tool_name=tool_name,
+                    arguments=arguments,
+                    result_dump=res.model_dump(),
+                )
+                return res
+            if tool_name == "expandContextGraphNode":
+                data, err = run_expand_context_graph_node(
+                    pipeline_context, arguments
+                )
+                if err:
+                    return ToolResult(
+                        request_id=request_id,
+                        tool_name=tool_name,
+                        success=False,
+                        error=err,
+                    )
+                res = ToolResult(
+                    request_id=request_id,
+                    tool_name=tool_name,
+                    success=True,
+                    data=data,
+                )
+                ck = _tool_request_cache_key(tool_name, arguments)
+                _store_tool_result_in_pipeline_cache(
+                    pipeline_context,
+                    cache_key=ck,
+                    canonical_tool_name=tool_name,
+                    arguments=arguments,
+                    result_dump=res.model_dump(),
+                )
                 return res
             return ToolResult(
                 request_id=request_id,
@@ -3854,6 +4098,23 @@ class Orchestrator:
             )
         except Exception as e:
             self._logger.warning("Tool '%s' failed: %s", tool_name, e)
+            if tool_name in {
+                "readTableListFromContentNodes",
+                "readTableListFromContentNode",
+            }:
+                return ToolResult(
+                    request_id=request_id,
+                    tool_name="readTableListFromContentNodes",
+                    success=True,
+                    data=_read_table_list_llm_error(str(e)),
+                )
+            if tool_name == "readTableData":
+                return ToolResult(
+                    request_id=request_id,
+                    tool_name=tool_name,
+                    success=True,
+                    data=_read_table_data_llm_error(str(e)),
+                )
             return ToolResult(
                 request_id=request_id,
                 tool_name=tool_name or "unknown",
@@ -3959,76 +4220,69 @@ class Orchestrator:
         arguments: Dict[str, Any],
         pipeline_context: Dict[str, Any],
     ) -> Dict[str, Any]:
-        node_ids_raw = (
-            arguments.get("nodeIds")
-            or arguments.get("contentNodeIds")
-            or []
-        )
-        if not isinstance(node_ids_raw, list):
-            node_ids_raw = []
-        normalized_node_ids: List[str] = []
-        for item in node_ids_raw:
-            text = str(item or "").strip()
-            if text and text not in normalized_node_ids:
-                normalized_node_ids.append(text)
-        legacy_single = str(
-            arguments.get("contentNodeId")
-            or arguments.get("content_node_id")
-            or arguments.get("nodeId")
-            or ""
-        ).strip()
-        if legacy_single and legacy_single not in normalized_node_ids:
-            normalized_node_ids.append(legacy_single)
-        if not normalized_node_ids:
-            raise ValueError("nodeIds is required")
-
-        out_tables: List[Dict[str, Any]] = []
-        nodes_payload: List[Dict[str, Any]] = []
-        for node_id in normalized_node_ids:
-            cn_name, cn_desc = await self._resolve_content_node_display_info(
-                content_node_id=str(node_id),
-                pipeline_context=pipeline_context,
+        try:
+            node_ids_raw = (
+                arguments.get("nodeIds")
+                or arguments.get("contentNodeIds")
+                or []
             )
-            tables = await self._load_content_node_tables(
-                content_node_id=str(node_id),
-                pipeline_context=pipeline_context,
-            )
-            node_tables: List[Dict[str, Any]] = []
-            for idx, table in enumerate(tables):
-                if not isinstance(table, dict):
-                    continue
-                table_name = str(table.get("name", f"table_{idx + 1}"))
-                table_id = str(table.get("id") or table_name)
-                columns_raw = table.get("columns", []) or []
-                columns: List[Dict[str, Any]] = []
-                for col in columns_raw:
-                    if isinstance(col, dict):
-                        columns.append(
-                            {
-                                "name": str(col.get("name", "")),
-                                "type": str(col.get("type", "string")),
-                            }
-                        )
-                    else:
-                        columns.append({"name": str(col), "type": "string"})
-                row_count = int(
-                    table.get(
-                        "row_count",
-                        len(table.get("rows", []) or table.get("sample_rows", []) or []),
-                    )
+            if not isinstance(node_ids_raw, list):
+                node_ids_raw = []
+            normalized_node_ids: List[str] = []
+            for item in node_ids_raw:
+                text = str(item or "").strip()
+                if text and text not in normalized_node_ids:
+                    normalized_node_ids.append(text)
+            legacy_single = str(
+                arguments.get("contentNodeId")
+                or arguments.get("content_node_id")
+                or arguments.get("nodeId")
+                or ""
+            ).strip()
+            if legacy_single and legacy_single not in normalized_node_ids:
+                normalized_node_ids.append(legacy_single)
+            if not normalized_node_ids:
+                return _read_table_list_llm_error(
+                    "nodeIds is required: передай непустой список UUID ContentNode.",
                 )
-                table_item = {
-                    "content_node_id": str(node_id),
-                    "content_node_name": cn_name,
-                    "content_node_description": cn_desc,
-                    "table_id": table_id,
-                    "table_name": table_name,
-                    "columns": columns,
-                    "row_count": row_count,
-                }
-                out_tables.append(table_item)
-                node_tables.append(
-                    {
+
+            out_tables: List[Dict[str, Any]] = []
+            nodes_payload: List[Dict[str, Any]] = []
+            for node_id in normalized_node_ids:
+                cn_name, cn_desc = await self._resolve_content_node_display_info(
+                    content_node_id=str(node_id),
+                    pipeline_context=pipeline_context,
+                )
+                tables = await self._load_content_node_tables(
+                    content_node_id=str(node_id),
+                    pipeline_context=pipeline_context,
+                )
+                node_tables: List[Dict[str, Any]] = []
+                for idx, table in enumerate(tables):
+                    if not isinstance(table, dict):
+                        continue
+                    table_name = str(table.get("name", f"table_{idx + 1}"))
+                    table_id = str(table.get("id") or table_name)
+                    columns_raw = table.get("columns", []) or []
+                    columns: List[Dict[str, Any]] = []
+                    for col in columns_raw:
+                        if isinstance(col, dict):
+                            columns.append(
+                                {
+                                    "name": str(col.get("name", "")),
+                                    "type": str(col.get("type", "string")),
+                                }
+                            )
+                        else:
+                            columns.append({"name": str(col), "type": "string"})
+                    row_count = int(
+                        table.get(
+                            "row_count",
+                            len(table.get("rows", []) or table.get("sample_rows", []) or []),
+                        )
+                    )
+                    table_item = {
+                        "content_node_id": str(node_id),
                         "content_node_name": cn_name,
                         "content_node_description": cn_desc,
                         "table_id": table_id,
@@ -4036,23 +4290,42 @@ class Orchestrator:
                         "columns": columns,
                         "row_count": row_count,
                     }
+                    out_tables.append(table_item)
+                    node_tables.append(
+                        {
+                            "content_node_name": cn_name,
+                            "content_node_description": cn_desc,
+                            "table_id": table_id,
+                            "table_name": table_name,
+                            "columns": columns,
+                            "row_count": row_count,
+                        }
+                    )
+                nodes_payload.append(
+                    {
+                        "content_node_id": str(node_id),
+                        "content_node_name": cn_name,
+                        "content_node_description": cn_desc,
+                        "tables": node_tables,
+                        "tables_count": len(node_tables),
+                    }
                 )
-            nodes_payload.append(
-                {
-                    "content_node_id": str(node_id),
-                    "content_node_name": cn_name,
-                    "content_node_description": cn_desc,
-                    "tables": node_tables,
-                    "tables_count": len(node_tables),
-                }
+            return {
+                "ok": True,
+                "content_node_id": normalized_node_ids[0],
+                "content_node_ids": normalized_node_ids,
+                "nodes": nodes_payload,
+                "tables": out_tables,
+                "tables_count": len(out_tables),
+            }
+        except Exception as e:
+            self._logger.warning(
+                "readTableListFromContentNodes failed: %s", e, exc_info=True
             )
-        return {
-            "content_node_id": normalized_node_ids[0],
-            "content_node_ids": normalized_node_ids,
-            "nodes": nodes_payload,
-            "tables": out_tables,
-            "tables_count": len(out_tables),
-        }
+            return _read_table_list_llm_error(
+                str(e),
+                hint="Проверь nodeIds и доступ к ContentNode на доске.",
+            )
 
     async def _tool_read_table_data(
         self,
@@ -4060,101 +4333,115 @@ class Orchestrator:
         arguments: Dict[str, Any],
         pipeline_context: Dict[str, Any],
     ) -> Dict[str, Any]:
-        json_decl = arguments.get("jsonDecl", arguments)
-        if isinstance(json_decl, str):
-            try:
-                json_decl = json.loads(json_decl)
-            except Exception:
-                raise ValueError("jsonDecl must be valid JSON object")
-        if not isinstance(json_decl, dict):
-            raise ValueError("jsonDecl must be object")
+        try:
+            json_decl = arguments.get("jsonDecl", arguments)
+            if isinstance(json_decl, str):
+                try:
+                    json_decl = json.loads(json_decl)
+                except Exception:
+                    return _read_table_data_llm_error(
+                        "jsonDecl must be valid JSON object",
+                    )
+            if not isinstance(json_decl, dict):
+                return _read_table_data_llm_error("jsonDecl must be object")
 
-        content_node_id = (
-            json_decl.get("contentNodeId")
-            or json_decl.get("content_node_id")
-            or json_decl.get("nodeId")
-        )
-        table_id = json_decl.get("table_id") or json_decl.get("tableId")
-        if not content_node_id:
-            raise ValueError("jsonDecl.contentNodeId is required")
-        if not table_id:
-            raise ValueError(
-                "jsonDecl.table_id is required (legacy alias: tableId)"
+            content_node_id = (
+                json_decl.get("contentNodeId")
+                or json_decl.get("content_node_id")
+                or json_decl.get("nodeId")
             )
+            table_id = json_decl.get("table_id") or json_decl.get("tableId")
+            if not content_node_id:
+                return _read_table_data_llm_error(
+                    "jsonDecl.contentNodeId is required",
+                )
+            if not table_id:
+                return _read_table_data_llm_error(
+                    "jsonDecl.table_id is required (legacy alias: tableId)",
+                )
 
-        offset = max(0, int(json_decl.get("offset", 0) or 0))
-        requested_limit = int(json_decl.get("limit", 50) or 50)
-        max_limit = max(1, ma_int("MULTI_AGENT_TOOL_READ_TABLE_DATA_MAX_LIMIT", 200))
-        limit = min(max(1, requested_limit), max_limit)
+            offset = max(0, int(json_decl.get("offset", 0) or 0))
+            requested_limit = int(json_decl.get("limit", 50) or 50)
+            max_limit = max(1, ma_int("MULTI_AGENT_TOOL_READ_TABLE_DATA_MAX_LIMIT", 200))
+            limit = min(max(1, requested_limit), max_limit)
 
-        tables = await self._load_content_node_tables(
-            content_node_id=str(content_node_id),
-            pipeline_context=pipeline_context,
-        )
-        target: Optional[Dict[str, Any]] = None
-        for table in tables:
-            if not isinstance(table, dict):
-                continue
-            t_name = str(table.get("name", ""))
-            t_id = str(table.get("id") or t_name)
-            if str(table_id) in (t_id, t_name):
-                target = table
-                break
-        if not target:
-            raise ValueError(
-                f"Table '{table_id}' not found in content node {content_node_id}"
-            )
-
-        rows = target.get("rows", [])
-        if not isinstance(rows, list):
-            rows = []
-        row_count_meta = int(
-            target.get("row_count", len(rows) if rows else 0)
-        )
-        # Снимок отфильтрованного пайплайна часто даёт row_count/columns без materialized rows —
-        # тогда readTableData возвращал 0 строк при ненулевом row_count (см. трейсы: «таблицы пусты»).
-        if not rows and row_count_meta > 0:
-            hydrated = await self._hydrate_table_rows_from_content_db(
+            tables = await self._load_content_node_tables(
                 content_node_id=str(content_node_id),
-                table_id=str(table_id),
                 pipeline_context=pipeline_context,
             )
-            if isinstance(hydrated, list) and hydrated:
-                rows = hydrated
-                self._logger.info(
-                    "readTableData: hydrated %d row(s) for node=%s table=%s "
-                    "(snapshot had metadata only; filtered pipeline or content fallback)",
-                    len(rows),
-                    content_node_id,
-                    table_id,
+            target: Optional[Dict[str, Any]] = None
+            for table in tables:
+                if not isinstance(table, dict):
+                    continue
+                t_name = str(table.get("name", ""))
+                t_id = str(table.get("id") or t_name)
+                if str(table_id) in (t_id, t_name):
+                    target = table
+                    break
+            if not target:
+                return _read_table_data_llm_error(
+                    f"Table '{table_id}' not found in content node {content_node_id}",
+                    hint="Сначала readTableListFromContentNodes для этого contentNodeId, "
+                    "затем используй table_id из ответа.",
                 )
-        row_count = int(target.get("row_count", len(rows)))
-        if rows:
-            row_count = max(row_count, len(rows))
-        sliced_rows = rows[offset : offset + limit]
-        columns_raw = target.get("columns", []) or []
-        columns: List[Dict[str, Any]] = []
-        for col in columns_raw:
-            if isinstance(col, dict):
-                columns.append(
-                    {
-                        "name": str(col.get("name", "")),
-                        "type": str(col.get("type", "string")),
-                    }
+
+            rows = target.get("rows", [])
+            if not isinstance(rows, list):
+                rows = []
+            row_count_meta = int(
+                target.get("row_count", len(rows) if rows else 0)
+            )
+            # Снимок отфильтрованного пайплайна часто даёт row_count/columns без materialized rows —
+            # тогда readTableData возвращал 0 строк при ненулевом row_count (см. трейсы: «таблицы пусты»).
+            if not rows and row_count_meta > 0:
+                hydrated = await self._hydrate_table_rows_from_content_db(
+                    content_node_id=str(content_node_id),
+                    table_id=str(table_id),
+                    pipeline_context=pipeline_context,
                 )
-            else:
-                columns.append({"name": str(col), "type": "string"})
-        return {
-            "content_node_id": str(content_node_id),
-            "table_id": str(target.get("id") or target.get("name") or table_id),
-            "table_name": str(target.get("name") or table_id),
-            "row_count": row_count,
-            "offset": offset,
-            "limit": limit,
-            "returned_rows": len(sliced_rows),
-            "columns": columns,
-            "rows": sliced_rows,
-        }
+                if isinstance(hydrated, list) and hydrated:
+                    rows = hydrated
+                    self._logger.info(
+                        "readTableData: hydrated %d row(s) for node=%s table=%s "
+                        "(snapshot had metadata only; filtered pipeline or content fallback)",
+                        len(rows),
+                        content_node_id,
+                        table_id,
+                    )
+            row_count = int(target.get("row_count", len(rows)))
+            if rows:
+                row_count = max(row_count, len(rows))
+            sliced_rows = rows[offset : offset + limit]
+            columns_raw = target.get("columns", []) or []
+            columns: List[Dict[str, Any]] = []
+            for col in columns_raw:
+                if isinstance(col, dict):
+                    columns.append(
+                        {
+                            "name": str(col.get("name", "")),
+                            "type": str(col.get("type", "string")),
+                        }
+                    )
+                else:
+                    columns.append({"name": str(col), "type": "string"})
+            return {
+                "ok": True,
+                "content_node_id": str(content_node_id),
+                "table_id": str(target.get("id") or target.get("name") or table_id),
+                "table_name": str(target.get("name") or table_id),
+                "row_count": row_count,
+                "offset": offset,
+                "limit": limit,
+                "returned_rows": len(sliced_rows),
+                "columns": columns,
+                "rows": sliced_rows,
+            }
+        except Exception as e:
+            self._logger.warning("readTableData failed: %s", e, exc_info=True)
+            return _read_table_data_llm_error(
+                str(e),
+                hint="Проверь jsonDecl (contentNodeId, table_id) и что таблица существует в ноде.",
+            )
 
     async def _hydrate_table_rows_from_content_db(
         self,
@@ -4768,92 +5055,6 @@ class Orchestrator:
         except Exception as e:
             self._logger.warning(f"⚠️ Replanning failed: {e}")
             return None
-
-    # ------------------------------------------------------------------
-    # Internal: validation
-    # ------------------------------------------------------------------
-
-    async def _validate_results(
-        self,
-        user_request: str,
-        pipeline_context: Dict[str, Any],
-        execution_context: Optional[Dict[str, Any]] = None,
-        current_plan_results_start: int = 0,
-    ) -> AgentPayload:
-        """Вызывает ValidatorAgent для валидации результатов.
-        
-        Args:
-            current_plan_results_start: индекс в agent_results,
-                с которого начинаются результаты текущего плана.
-                Используется чтобы не агрегировать старые сломанные
-                code_blocks из предыдущих replan-циклов.
-        """
-        # Агрегируем только результаты текущего плана
-        all_results = pipeline_context.get("agent_results", [])
-        current_results = all_results[current_plan_results_start:]
-        current_results_copy = copy.deepcopy(current_results)
-
-        # Валидатор ожидает результаты по агентам (discovery, research, reporter, ...),
-        # чтобы _summarize включал narrative каждого агента. merge_from не копирует narrative,
-        # поэтому один merged payload приводит к тому, что LLM не видит текст ответа.
-        # Не используем «последний ключ agent побеждает»: при нескольких analyst в срезе
-        # берём запись с max len(findings). См. aggregate_agent_results_for_validation.
-        aggregated_result = aggregate_agent_results_for_validation(current_results)
-
-        if execution_context:
-            validation_ctx = {**pipeline_context, **execution_context}
-        else:
-            validation_ctx = pipeline_context
-        runtime_options_map = pipeline_context.get("_agent_runtime_options_map")
-        validator_runtime_options = (
-            runtime_options_map.get("validator")
-            if isinstance(runtime_options_map, dict)
-            else None
-        )
-        validation_ctx = select_context_for_step(
-            "validator",
-            validation_ctx,
-            task_type="validate",
-            compaction_level="full",
-            runtime_options=validator_runtime_options,
-        )
-
-        # IMPORTANT:
-        # For assistant flows user_request may be enriched with board context
-        # ("... N widgets ..."), which can bias expected-outcome detection.
-        # Prefer original raw user prompt for Validator intent classification.
-        validation_user_request = (
-            pipeline_context.get("original_user_request")
-            if isinstance(pipeline_context.get("original_user_request"), str)
-            else user_request
-        )
-
-        validator_policy = resolve_execution_policy(
-            "validator",
-            "validate",
-            runtime_options=validator_runtime_options,
-        )
-        validation_task = {
-            "type": "validate",
-            "user_request": validation_user_request,
-            "aggregated_result": aggregated_result,
-            "validation_agent_results_slice": current_results_copy,
-        }
-        return await self._execute_with_retry(
-            "validator",
-            task=validation_task,
-            context=validation_ctx,
-            max_retries=validator_policy.max_retries,
-            timeout_override=validator_policy.timeout_sec,
-            context_ladder=validator_policy.context_ladder,
-            context_factory=lambda lvl: select_context_for_step(
-                "validator",
-                validation_ctx,
-                task_type="validate",
-                compaction_level=lvl,
-                runtime_options=validator_runtime_options,
-            ),
-        )
 
     # ------------------------------------------------------------------
     # Helpers

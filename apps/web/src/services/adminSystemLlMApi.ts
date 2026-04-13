@@ -394,4 +394,8 @@ export const AGENT_KEYS = [
     { key: 'widget_codex', label: 'Код виджетов' },
     { key: 'reporter', label: 'Реporter' },
     { key: 'validator', label: 'Валидатор' },
+    {
+        key: 'context_graph_compression',
+        label: 'Сжатие контекста (граф L1/L2)',
+    },
 ] as const

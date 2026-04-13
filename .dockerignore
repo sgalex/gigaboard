@@ -17,6 +17,7 @@ htmlcov
 # Node (копируем lockfile и ставим в образе заново)
 **/node_modules
 **/dist
+**/*.tsbuildinfo
 
 # Логи и данные
 **/logs

@@ -34,6 +34,7 @@ import {
     RefreshCw,
     Trash2,
     Filter,
+    Copy,
 } from 'lucide-react'
 import { ContentNode } from '@/types'
 import { cn } from '@/lib/utils'
@@ -64,10 +65,13 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
     const [isEditingName, setIsEditingName] = useState(false)
     const [tempName, setTempName] = useState('')
     const [isRefreshing, setIsRefreshing] = useState(false)
+    const [isDuplicating, setIsDuplicating] = useState(false)
 
     const transformContent = useBoardStore((state) => state.transformContent)
     const visualizeContent = useBoardStore((state) => state.visualizeContent)
     const updateContentNode = useBoardStore((state) => state.updateContentNode)
+    const duplicateContentNode = useBoardStore((state) => state.duplicateContentNode)
+    const deleteContentNode = useBoardStore((state) => state.deleteContentNode)
     const fetchWidgetNodes = useBoardStore((state) => state.fetchWidgetNodes)
     const fetchEdges = useBoardStore((state) => state.fetchEdges)
     const edges = useBoardStore((state) => state.edges)
@@ -352,6 +356,16 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
         }
     }
 
+    const handleDuplicate = async () => {
+        if (isDuplicating) return
+        setIsDuplicating(true)
+        try {
+            await duplicateContentNode(contentNode)
+        } finally {
+            setIsDuplicating(false)
+        }
+    }
+
     // Handle export to Excel
     const handleExportToExcel = async () => {
         try {
@@ -587,6 +601,11 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
                                             Экспорт в Excel
                                         </DropdownMenuItem>
                                     )}
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem onClick={handleDuplicate} disabled={isDuplicating}>
+                                        <Copy className="mr-2 h-4 w-4" />
+                                        Создать копию
+                                    </DropdownMenuItem>
                                     <DropdownMenuSeparator />
                                     <DropdownMenuItem onClick={handleDelete} className="text-destructive">
                                         <Trash2 className="mr-2 h-4 w-4" />

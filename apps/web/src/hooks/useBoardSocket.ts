@@ -1,15 +1,18 @@
 /**
  * WebSocket hook for real-time board collaboration
  */
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 import { useBoardStore } from '@/store/boardStore'
 import { useLibraryStore } from '@/store/libraryStore'
 import type { WidgetNode, CommentNode, Edge } from '@/types'
-import { getSocketIoUrl } from '@/config/apiBase'
+import { getSocketIoUrl, SOCKET_IO_CLIENT_OPTIONS, logSocketIoConnectError } from '@/config/apiBase'
 
 export function useBoardSocket(boardId: string | undefined) {
     const socketRef = useRef<Socket | null>(null)
+    /** Без useState дочерние компоненты не узнают о сокете после mount (ref не триггерит ререндер). */
+    const [socket, setSocket] = useState<Socket | null>(null)
+    const [isConnected, setIsConnected] = useState(false)
     const {
         widgetNodes,
         commentNodes,
@@ -20,21 +23,20 @@ export function useBoardSocket(boardId: string | undefined) {
     useEffect(() => {
         if (!boardId) return
 
-        console.log('🔗 Connecting to Socket.IO server...')
-        const socket = io(getSocketIoUrl(), {
-            path: '/socket.io',
-            transports: ['polling', 'websocket'],
-            reconnection: true,
-            reconnectionDelay: 1000,
-            reconnectionAttempts: 5,
-            autoConnect: true,
-        })
+        const socketUrl = getSocketIoUrl()
+        if (import.meta.env.DEV) {
+            console.log('🔗 Connecting to Socket.IO server...', socketUrl)
+        } else {
+            console.log('🔗 Connecting to Socket.IO server...')
+        }
+        const ioSocket = io(socketUrl, { ...SOCKET_IO_CLIENT_OPTIONS })
 
-        socketRef.current = socket
+        socketRef.current = ioSocket
+        setSocket(ioSocket)
 
-        // Setup event handlers that will be registered when connected
+        // Регистрируем обработчики один раз на экземпляр (не на каждый reconnect).
         const setupEventHandlers = () => {
-            console.log('🎯 Setting up event handlers on connected socket:', socket.id)
+            console.log('🎯 Setting up event handlers on socket:', ioSocket.id)
 
             // WidgetNode events
             const handleWidgetNodeCreated = (node: WidgetNode) => {
@@ -221,45 +223,48 @@ export function useBoardSocket(boardId: string | undefined) {
             }
 
             // Register all event handlers
-            socket.on('widget_node_created', handleWidgetNodeCreated)
-            socket.on('widget_node_updated', handleWidgetNodeUpdated)
-            socket.on('widget_node_deleted', handleWidgetNodeDeleted)
+            ioSocket.on('widget_node_created', handleWidgetNodeCreated)
+            ioSocket.on('widget_node_updated', handleWidgetNodeUpdated)
+            ioSocket.on('widget_node_deleted', handleWidgetNodeDeleted)
 
-            socket.on('comment_node_created', handleCommentNodeCreated)
-            socket.on('comment_node_updated', handleCommentNodeUpdated)
-            socket.on('comment_node_deleted', handleCommentNodeDeleted)
+            ioSocket.on('comment_node_created', handleCommentNodeCreated)
+            ioSocket.on('comment_node_updated', handleCommentNodeUpdated)
+            ioSocket.on('comment_node_deleted', handleCommentNodeDeleted)
 
-            socket.on('edge_created', handleEdgeCreated)
-            socket.on('edge_updated', handleEdgeUpdated)
-            socket.on('edge_deleted', handleEdgeDeleted)
+            ioSocket.on('edge_created', handleEdgeCreated)
+            ioSocket.on('edge_updated', handleEdgeUpdated)
+            ioSocket.on('edge_deleted', handleEdgeDeleted)
         }
 
-        socket.on('connect', () => {
-            console.log('✅ Connected to Socket.IO server:', socket.id)
-            // Join board room
-            socket.emit('join_board', { board_id: boardId })
-            // Setup event handlers after connection
-            setupEventHandlers()
+        setupEventHandlers()
+
+        ioSocket.on('connect', () => {
+            console.log('✅ Connected to Socket.IO server:', ioSocket.id)
+            setIsConnected(true)
+            ioSocket.emit('join_board', { board_id: boardId })
         })
 
-        socket.on('joined_board', (data: { board_id: string }) => {
+        ioSocket.on('joined_board', (data: { board_id: string }) => {
             console.log('📌 Joined board:', data.board_id)
         })
 
-        socket.on('disconnect', () => {
+        ioSocket.on('disconnect', () => {
             console.log('🔌 Disconnected from Socket.IO server')
+            setIsConnected(false)
         })
 
-        socket.on('connect_error', (error) => {
-            console.error('❌ Socket.IO connection error:', error)
+        ioSocket.on('connect_error', (error) => {
+            logSocketIoConnectError('❌ Socket.IO connection error:', error)
         })
 
         // Cleanup
         return () => {
+            setIsConnected(false)
+            setSocket(null)
             if (boardId) {
-                socket.emit('leave_board', { board_id: boardId })
+                ioSocket.emit('leave_board', { board_id: boardId })
             }
-            socket.disconnect()
+            ioSocket.disconnect()
             socketRef.current = null
         }
     }, [boardId])
@@ -273,8 +278,8 @@ export function useBoardSocket(boardId: string | undefined) {
     }, [])
 
     return {
-        socket: socketRef.current,
+        socket,
         emitEvent,
-        isConnected: socketRef.current?.connected || false,
+        isConnected,
     }
 }

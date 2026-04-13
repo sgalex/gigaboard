@@ -1,10 +1,16 @@
 import asyncio
+import sys
+from pathlib import Path
 
-from apps.backend.app.services.multi_agent.orchestrator import (
+_BACKEND_ROOT = Path(__file__).resolve().parents[2] / "apps" / "backend"
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+
+from app.services.multi_agent.orchestrator import (  # noqa: E402
     MultiAgentTraceLogger,
     Orchestrator,
 )
-from apps.backend.app.services.multi_agent.schemas.agent_payload import AgentPayload
+from app.services.multi_agent.schemas.agent_payload import AgentPayload  # noqa: E402
 
 
 class _FailingPlannerAgent:
@@ -18,11 +24,15 @@ class _FailingPlannerAgent:
 def test_trace_never_stays_unknown_when_planner_fails(monkeypatch):
     captured = []
 
-    async def _fake_write_trace(cls, trace_data):
+    async def _fake_write_trace(cls, trace_data, **kwargs):
         captured.append(trace_data)
         return None
 
-    monkeypatch.setattr(MultiAgentTraceLogger, "_enabled", True)
+    monkeypatch.setattr(
+        MultiAgentTraceLogger,
+        "is_enabled",
+        classmethod(lambda cls: True),
+    )
     monkeypatch.setattr(
         MultiAgentTraceLogger,
         "write_trace",

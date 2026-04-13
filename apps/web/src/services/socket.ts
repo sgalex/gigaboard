@@ -2,7 +2,7 @@
  * Socket.IO Service - singleton для работы с Socket.IO вне React компонентов
  */
 import { io, Socket } from 'socket.io-client'
-import { getSocketIoUrl } from '@/config/apiBase'
+import { getSocketIoUrl, SOCKET_IO_CLIENT_OPTIONS, logSocketIoConnectError } from '@/config/apiBase'
 
 class SocketService {
     private socket: Socket | null = null
@@ -24,13 +24,8 @@ class SocketService {
         console.log('🔗 SocketService: Connecting...')
 
         this.socket = io(getSocketIoUrl(), {
-            path: '/socket.io',
-            transports: ['polling', 'websocket'],
+            ...SOCKET_IO_CLIENT_OPTIONS,
             auth: token ? { token } : undefined,
-            autoConnect: true,
-            reconnection: true,
-            reconnectionDelay: 1000,
-            reconnectionAttempts: 5,
         })
 
         this.socket.on('connect', () => {
@@ -44,7 +39,7 @@ class SocketService {
         })
 
         this.socket.on('connect_error', (error) => {
-            console.error('❌ SocketService: Connection error', error)
+            logSocketIoConnectError('❌ SocketService: Connection error', error)
             this.connected = false
         })
 

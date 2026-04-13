@@ -756,6 +756,10 @@ class StructurizerAgent(BaseAgent):
                     rendered.append(f"- {tname}: ERROR={item.get('error', 'unknown')}")
             if rendered:
                 prompt += "\n\nTOOL RESULTS (latest):\n" + "\n".join(rendered) + "\n"
+                prompt += (
+                    'Если в data указано "ok": false — прочитай message и hint, исправь arguments '
+                    "перед повторным вызовом.\n"
+                )
         if tools_enabled:
             prompt += (
                 "\nTOOL MODE ENABLED.\n"

@@ -1,7 +1,16 @@
-# Полный стек: UI на FRONTEND_PORT (nginx) → /api и /socket.io проксируются в backend.
-# Код фронта и бэка в образах: после git pull выполните
-#   docker compose build --no-cache
-# или точечно frontend/backend, затем up -d — иначе контейнеры останутся на старых слоях.
+# Полный стек (production): UI на FRONTEND_PORT → nginx в образе frontend → /api и /socket.io → backend.
+#
+# Обновление образов после git pull:
+#   docker compose build
+#   docker compose up -d
+# При подозрении на кэш: docker compose build --no-cache
+#
+# ВАЖНО — стриминг NDJSON (мультиагент, прогресс в UI):
+# - В образе frontend apps/web/nginx.conf уже: proxy_buffering off для /api/.
+# - Если перед Docker стоит ещё nginx на хосте/ВМ — там тоже нужен proxy_buffering off на прокси к FRONTEND_PORT,
+#   иначе ответ буферизуется целиком. См. res/nginx-vm-gigaboard.conf и docs/DOCKER_VM_DEPLOYMENT.md.
+#
+# VITE_API_URL: оставьте пустым в .env для одного origin (HTTPS); не задавайте http:// при HTTPS-странице.
 #
 services:
   postgres:
@@ -90,6 +99,7 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
       args:
+        # Пусто = бандл с window.location.origin / относительные /api (см. apps/web/src/config/apiBase.ts)
         VITE_API_URL: ${VITE_API_URL:-}
     container_name: gigaboard-frontend
     ports:

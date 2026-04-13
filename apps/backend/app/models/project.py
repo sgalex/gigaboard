@@ -11,6 +11,7 @@ from app.core import Base
 if TYPE_CHECKING:
     from app.models.user import User
     from app.models.board import Board
+    from app.models.project_collaborator import ProjectCollaborator
     from app.models.dashboard import Dashboard
     from app.models.project_widget import ProjectWidget
     from app.models.project_table import ProjectTable
@@ -60,6 +61,9 @@ class Project(Base):
     filter_presets: Mapped[list["FilterPreset"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
-    
+    collaborators: Mapped[list["ProjectCollaborator"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+
     def __repr__(self) -> str:
         return f"<Project {self.name}>"

@@ -21,6 +21,7 @@ from ..core.redis import get_redis
 from ..middleware.auth import get_current_user
 from ..models import User
 from ..services.ai_service import AIService
+from ..services.board_service import BoardService
 from ..services.controllers import AIAssistantController
 from ..schemas.ai_chat import (
     AIChatRequest,
@@ -231,6 +232,7 @@ async def chat_with_ai(
     from ..models.chat_message import ChatMessage, MessageRole
 
     try:
+        await BoardService.get_board_for_edit(db, board_id, current_user.id)
         ai_service = AIService(db)
         session_id = request.session_id or uuid4()
 
@@ -581,6 +583,7 @@ async def get_my_chat_history(
         ChatHistoryResponse со списком сообщений
     """
     try:
+        await BoardService.get_board(db, board_id, current_user.id)
         from ..models.chat_message import ChatMessage
         from sqlalchemy import select, and_, desc
         
@@ -684,6 +687,7 @@ async def get_chat_history(
         ChatHistoryResponse со списком сообщений
     """
     try:
+        await BoardService.get_board(db, board_id, current_user.id)
         ai_service = AIService(db)
         
         messages = await ai_service.get_chat_history(
@@ -770,6 +774,7 @@ async def delete_chat_session(
         Количество удаленных сообщений
     """
     try:
+        await BoardService.get_board_for_edit(db, board_id, current_user.id)
         ai_service = AIService(db)
         
         deleted_count = await ai_service.delete_chat_session(

@@ -159,6 +159,39 @@ def test_select_context_for_step_compaction_level_minimal_reduces_budget_and_cha
     assert len(selected["agent_results"]) <= selected["_context_selection_budget_items"]
 
 
+def test_select_context_for_step_compaction_trace_event_when_not_full():
+    trace_calls: list[dict] = []
+
+    def _trace(**kwargs):
+        trace_calls.append(kwargs)
+
+    ctx = {
+        "agent_results": [_make_result(i, content_len=32) for i in range(20)],
+        "_trace_event": _trace,
+    }
+    select_context_for_step(
+        "analyst",
+        ctx,
+        task_type="analysis",
+        compaction_level="compact",
+    )
+    compact_events = [c for c in trace_calls if c.get("event") == "context_compaction_budget"]
+    assert len(compact_events) == 1
+    det = compact_events[0]["details"]
+    assert det["compaction_level"] == "compact"
+    assert det["budget_items_effective"] <= det["budget_items_raw"]
+    assert det["budget_chars_effective"] <= det["budget_chars_raw"]
+    assert "graph_slice_text_len" in det
+
+    trace_calls.clear()
+    ctx_full = {
+        "agent_results": [_make_result(i, content_len=8) for i in range(5)],
+        "_trace_event": _trace,
+    }
+    select_context_for_step("analyst", ctx_full, task_type="analysis", compaction_level="full")
+    assert not [c for c in trace_calls if c.get("event") == "context_compaction_budget"]
+
+
 def test_select_context_for_step_unknown_agent_returns_context_without_selection_marker():
     ctx = {"agent_results": [_make_result(1)], "chat_history": [{"role": "user", "content": "hello"}]}
     selected = select_context_for_step("some_unknown_agent", ctx, task_type="search")

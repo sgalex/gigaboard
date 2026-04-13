@@ -93,14 +93,14 @@
 
 ### FR-7: Multi-Agent System
 **Описание**: За AI Assistant Panel находится мультиагентная система (Orchestrator), где специализированные AI агенты решают сложные задачи анализа данных через Redis Message Bus.
-**Агенты** (9 core):
+**Агенты** (ядро, исполняемые оркестратором по умолчанию — 8 агентов; см. `docs/MULTI_AGENT.md`):
 - Planner: Разбивает запросы на подзадачи, маршрутизирует, адаптивный replan
 - ResearchAgent (core): загрузка текста по URL из результатов Discovery; не путать с типом источника **research** на доске
 - Analyst: Анализирует структурированные данные → insights; при ошибке парсинга JSON-ответа LLM — повтор с требованием валидного JSON и резервное извлечение findings из сырого текста (см. `docs/MULTI_AGENT.md`)
 - Reporter: итоговый narrative / ответ пользователю (markdown); не путать с генерацией кода виджета
 - WidgetCodex: генерация HTML/CSS/JS для WidgetNode (см. satellite **Widget**)
 - Validator (`validator.py`): валидация сгенерированного Python-кода трансформаций (безопасность, синтаксис)
-- Quality Gate (`quality_gate.py`, ключ плана `validator`): валидация результатов пайплайна на соответствие запросу; итог `valid` от confidence (порог 0,8) и severity issues; не более одного replan по эвристике «analyst без findings», затем завершение без повторного `suggested_replan` (см. `docs/MULTI_AGENT.md`)
+- **Per-step acceptance** (`step_acceptance.py`): после каждого успешного шага плана — детерминированные эвристики минимального артефакта роли (в т.ч. reporter); трейс `step_acceptance`, заметки в `pipeline_memory`, счётчики в `run_finish`; финальный вызов **QualityGateAgent** в оркестраторе **отключён** (класс `quality_gate.py` остаётся в кодовой базе для возможного переиспользования, см. `docs/MULTI_AGENT.md`)
 - Discovery: Поиск и обнаружение данных
 - Resolver: Batch AI resolution (пол по имени, sentiment, категоризация)
 - Structurizer: Извлечение структуры из текста → таблицы, сущности

@@ -1,20 +1,24 @@
 """Project service."""
+from collections import defaultdict
 from uuid import UUID
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
-from sqlalchemy import func
+
 from fastapi import HTTPException, status
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
-    Project,
     Board,
     Dashboard,
-    ProjectWidget,
-    ProjectTable,
     Dimension,
     FilterPreset,
+    Project,
+    ProjectCollaborator,
+    ProjectTable,
+    ProjectWidget,
+    User,
 )
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse, ProjectWithBoardsResponse
+from app.services.project_access_service import ProjectAccessService
 
 
 class ProjectService:
@@ -45,22 +49,8 @@ class ProjectService:
         project_id: UUID,
         user_id: UUID
     ) -> Project:
-        """Get project by ID (user must be owner)."""
-        result = await db.execute(
-            select(Project).where(
-                Project.id == project_id,
-                Project.user_id == user_id
-            )
-        )
-        project = result.scalar_one_or_none()
-        
-        if not project:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found"
-            )
-        
-        return project
+        """Get project by ID (owner or collaborator)."""
+        return await ProjectAccessService.require_project_access(db, project_id, user_id)
     
     @staticmethod
     async def list_projects(
@@ -83,13 +73,21 @@ class ProjectService:
         user_id: UUID
     ) -> list[dict]:
         """List all projects with boards, dashboards, sources, widgets, tables counts."""
+        accessible = or_(
+            Project.user_id == user_id,
+            Project.id.in_(
+                select(ProjectCollaborator.project_id).where(
+                    ProjectCollaborator.user_id == user_id
+                )
+            ),
+        )
         result = await db.execute(
             select(
                 Project,
                 func.count(Board.id).label('boards_count')
             )
             .outerjoin(Board, Board.project_id == Project.id)
-            .where(Project.user_id == user_id)
+            .where(accessible)
             .group_by(Project.id)
             .order_by(Project.updated_at.desc())
         )
@@ -97,6 +95,9 @@ class ProjectService:
         project_ids = []
         for project, boards_count in result:
             project_dict = ProjectWithBoardsResponse.model_validate(project).model_dump()
+            is_own = project.user_id == user_id
+            project_dict['is_owner'] = is_own
+            project_dict['my_access'] = 'owner' if is_own else 'editor'
             project_dict['boards_count'] = boards_count
             project_dict['dashboards_count'] = 0
             project_dict['sources_count'] = 0
@@ -110,6 +111,16 @@ class ProjectService:
 
         if not project_ids:
             return projects_with_counts
+
+        acc_rows = await db.execute(
+            select(ProjectCollaborator.project_id, ProjectCollaborator.role)
+            .where(ProjectCollaborator.user_id == user_id)
+            .where(ProjectCollaborator.project_id.in_(project_ids))
+        )
+        collab_access = {row[0]: row[1] for row in acc_rows}
+        for p in projects_with_counts:
+            if not p['is_owner']:
+                p['my_access'] = collab_access.get(p['id'], 'editor')
 
         # Dashboards count per project
         dash_result = await db.execute(
@@ -199,6 +210,56 @@ class ProjectService:
             p['dimensions_count'] = dim_map.get(pid, 0)
             p['filters_count'] = filt_map.get(pid, 0)
 
+        # Участники доступа: число и превью для плашки (владелец + соавторы), до 10 строк в popover
+        _PREVIEW_CAP = 10
+        cc_rows = await db.execute(
+            select(ProjectCollaborator.project_id, func.count().label("c"))
+            .where(ProjectCollaborator.project_id.in_(project_ids))
+            .group_by(ProjectCollaborator.project_id)
+        )
+        collab_n = {row[0]: int(row[1]) for row in cc_rows}
+
+        own_rows = await db.execute(
+            select(Project.id, User.id, User.username)
+            .join(User, User.id == Project.user_id)
+            .where(Project.id.in_(project_ids))
+        )
+        owner_by_pid = {row[0]: (row[1], row[2]) for row in own_rows}
+
+        cd_rows = await db.execute(
+            select(
+                ProjectCollaborator.project_id,
+                User.id,
+                User.username,
+                ProjectCollaborator.role,
+                ProjectCollaborator.created_at,
+            )
+            .join(User, User.id == ProjectCollaborator.user_id)
+            .where(ProjectCollaborator.project_id.in_(project_ids))
+            .order_by(ProjectCollaborator.project_id, ProjectCollaborator.created_at)
+        )
+        collabs_by_pid: dict = defaultdict(list)
+        for row in cd_rows:
+            collabs_by_pid[row[0]].append(
+                {"user_id": row[1], "username": row[2], "role": row[3]}
+            )
+
+        for p in projects_with_counts:
+            pid = p['id']
+            n_collab = collab_n.get(pid, 0)
+            p["access_user_count"] = 1 + n_collab
+            uid_un = owner_by_pid.get(pid)
+            preview: list[dict] = []
+            if uid_un:
+                preview.append(
+                    {"user_id": uid_un[0], "username": uid_un[1], "role": "owner"}
+                )
+            for c in collabs_by_pid.get(pid, []):
+                if len(preview) >= _PREVIEW_CAP:
+                    break
+                preview.append(c)
+            p["access_members_preview"] = preview
+
         return projects_with_counts
     
     @staticmethod
@@ -208,8 +269,8 @@ class ProjectService:
         user_id: UUID,
         project_data: ProjectUpdate
     ) -> Project:
-        """Update project."""
-        project = await ProjectService.get_project(db, project_id, user_id)
+        """Update project (owner only)."""
+        project = await ProjectAccessService.require_project_owner(db, project_id, user_id)
         
         # Update only provided fields
         if project_data.name is not None:
@@ -228,8 +289,8 @@ class ProjectService:
         project_id: UUID,
         user_id: UUID
     ) -> None:
-        """Delete project (cascades to boards and widgets)."""
-        project = await ProjectService.get_project(db, project_id, user_id)
+        """Delete project (cascades to boards and widgets); owner only."""
+        project = await ProjectAccessService.require_project_owner(db, project_id, user_id)
         
         await db.delete(project)
         await db.commit()

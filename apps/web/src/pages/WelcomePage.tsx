@@ -1,6 +1,27 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, FolderKanban, Calendar, Clock, Sparkles, ArrowRight, LayoutDashboard, Workflow, Database, BarChart3, Table2, Boxes, Ruler, Filter, Pencil, Trash2, Settings } from 'lucide-react'
+import {
+    Plus,
+    FolderKanban,
+    Calendar,
+    Clock,
+    Sparkles,
+    ArrowRight,
+    LayoutDashboard,
+    Workflow,
+    Database,
+    BarChart3,
+    Table2,
+    Boxes,
+    Ruler,
+    Filter,
+    Pencil,
+    Trash2,
+    Settings,
+    MoreHorizontal,
+    Share2,
+    Users,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
@@ -14,12 +35,86 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { ShareProjectDialog } from '@/components/projects/ShareProjectDialog'
 import { useProjectStore } from '@/store/projectStore'
 import { useUIStore } from '@/store/uiStore'
 import { useAuthStore } from '@/store/authStore'
-import type { ProjectWithBoards } from '@/types'
+import type { ProjectMyAccess, ProjectWithBoards } from '@/types'
 import { formatDistance } from 'date-fns'
 import { ru } from 'date-fns/locale'
+
+const ACCESS_ROLE_RU: Record<string, string> = {
+    owner: 'Владелец',
+    viewer: 'Просмотр',
+    editor: 'Изменение',
+    admin: 'Полный доступ',
+}
+
+function resolveMyAccess(project: ProjectWithBoards): ProjectMyAccess {
+    if (project.my_access) return project.my_access
+    return project.is_owner !== false ? 'owner' : 'editor'
+}
+
+const ACCESS_POPOVER_MAX = 10
+
+function ProjectAccessPopHint({ project }: { project: ProjectWithBoards }) {
+    const [open, setOpen] = useState(false)
+    const count = project.access_user_count ?? 1
+    const preview = project.access_members_preview ?? []
+    const shown = preview.slice(0, ACCESS_POPOVER_MAX)
+    const more = Math.max(0, count - ACCESS_POPOVER_MAX)
+
+    return (
+        <Popover open={open} onOpenChange={setOpen} modal={false}>
+            <div
+                className="inline-flex"
+                onMouseEnter={() => setOpen(true)}
+                onMouseLeave={() => setOpen(false)}
+                onClick={(e) => e.stopPropagation()}
+            >
+                <PopoverTrigger asChild>
+                    <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+                        title="Кому доступен проект"
+                    >
+                        <Users className="h-3.5 w-3.5 text-primary/70" />
+                        <span>{count}</span>
+                    </button>
+                </PopoverTrigger>
+            </div>
+            <PopoverContent
+                side="top"
+                align="start"
+                className="w-72 p-3 text-sm"
+                onMouseEnter={() => setOpen(true)}
+                onMouseLeave={() => setOpen(false)}
+                onClick={(e) => e.stopPropagation()}
+            >
+                <ul className="max-h-52 space-y-1.5 overflow-y-auto">
+                    {shown.map((m) => (
+                        <li key={m.user_id} className="flex justify-between gap-2 text-xs">
+                            <span className="truncate font-medium text-foreground">{m.username}</span>
+                            <span className="shrink-0 text-muted-foreground">
+                                {ACCESS_ROLE_RU[m.role] ?? m.role}
+                            </span>
+                        </li>
+                    ))}
+                </ul>
+                {more > 0 && (
+                    <p className="mt-2 text-xs text-muted-foreground">… и ещё {more}</p>
+                )}
+            </PopoverContent>
+        </Popover>
+    )
+}
 
 export function WelcomePage() {
     const navigate = useNavigate()
@@ -28,6 +123,7 @@ export function WelcomePage() {
     const { openCreateProjectDialog } = useUIStore()
     const [projectToDelete, setProjectToDelete] = useState<ProjectWithBoards | null>(null)
     const [projectToEdit, setProjectToEdit] = useState<ProjectWithBoards | null>(null)
+    const [projectToShare, setProjectToShare] = useState<ProjectWithBoards | null>(null)
     const [editName, setEditName] = useState('')
     const [editDescription, setEditDescription] = useState('')
     const [isDeleting, setIsDeleting] = useState(false)
@@ -67,7 +163,7 @@ export function WelcomePage() {
         try {
             await updateProject(projectToEdit.id, {
                 name,
-                description: editDescription.trim() || null,
+                description: editDescription.trim() || undefined,
             })
             setProjectToEdit(null)
         } finally {
@@ -209,7 +305,11 @@ export function WelcomePage() {
                         </Card>
                     ) : (
                         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                            {projects.map((project: ProjectWithBoards, index) => (
+                            {projects.map((project: ProjectWithBoards, index) => {
+                                const access = resolveMyAccess(project)
+                                const canShareProject = access === 'owner' || access === 'admin'
+                                const isOwner = access === 'owner'
+                                return (
                                 <Card
                                     key={project.id}
                                     className="group relative overflow-hidden border bg-card/80 shadow-sm transition-all duration-300 hover:shadow-md hover:shadow-primary/5 hover:border-primary/20 cursor-pointer animate-scale-in"
@@ -238,6 +338,7 @@ export function WelcomePage() {
                                                 <Clock className="h-4 w-4 shrink-0" />
                                                 <span>{formatDate(project.updated_at)}</span>
                                             </div>
+                                            <ProjectAccessPopHint project={project} />
                                         </div>
                                         <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted-foreground">
                                             <span className="inline-flex items-center gap-1" title="Доски">
@@ -275,36 +376,65 @@ export function WelcomePage() {
                                         </div>
                                     </CardContent>
                                     <CardFooter className="flex items-center justify-between gap-2 border-t pt-3 text-xs opacity-0 transition-opacity group-hover:opacity-100">
-                                        <div className="flex items-center gap-2">
-                                            <Button
-                                                variant="ghost"
-                                                size="sm"
-                                                className="h-7 px-2 text-muted-foreground hover:text-foreground"
-                                                onClick={(e) => {
-                                                    e.stopPropagation()
-                                                    setProjectToEdit(project)
-                                                }}
-                                            >
-                                                <Pencil className="h-3.5 w-3.5 mr-1" />
-                                                Изменить
-                                            </Button>
-                                            <Button
-                                                variant="ghost"
-                                                size="sm"
-                                                className="h-7 px-2 text-muted-foreground hover:text-destructive"
-                                                onClick={(e) => {
-                                                    e.stopPropagation()
-                                                    setProjectToDelete(project)
-                                                }}
-                                            >
-                                                <Trash2 className="h-3.5 w-3.5 mr-1" />
-                                                Удалить
-                                            </Button>
+                                        <div className="flex min-h-7 items-center">
+                                            {canShareProject ? (
+                                                <DropdownMenu>
+                                                    <DropdownMenuTrigger asChild>
+                                                        <Button
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            className="h-7 px-2 text-muted-foreground hover:text-foreground"
+                                                            onClick={(e) => e.stopPropagation()}
+                                                            title="Действия с проектом"
+                                                        >
+                                                            <MoreHorizontal className="h-4 w-4" />
+                                                            <span className="ml-1 hidden sm:inline">Меню</span>
+                                                        </Button>
+                                                    </DropdownMenuTrigger>
+                                                    <DropdownMenuContent
+                                                        align="start"
+                                                        onClick={(e) => e.stopPropagation()}
+                                                    >
+                                                        {isOwner ? (
+                                                            <>
+                                                                <DropdownMenuItem
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation()
+                                                                        setProjectToEdit(project)
+                                                                    }}
+                                                                >
+                                                                    <Pencil className="mr-2 h-3.5 w-3.5" />
+                                                                    Изменить
+                                                                </DropdownMenuItem>
+                                                                <DropdownMenuItem
+                                                                    className="text-destructive focus:text-destructive"
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation()
+                                                                        setProjectToDelete(project)
+                                                                    }}
+                                                                >
+                                                                    <Trash2 className="mr-2 h-3.5 w-3.5" />
+                                                                    Удалить
+                                                                </DropdownMenuItem>
+                                                            </>
+                                                        ) : null}
+                                                        <DropdownMenuItem
+                                                            onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                setProjectToShare(project)
+                                                            }}
+                                                        >
+                                                            <Share2 className="mr-2 h-3.5 w-3.5" />
+                                                            Поделиться
+                                                        </DropdownMenuItem>
+                                                    </DropdownMenuContent>
+                                                </DropdownMenu>
+                                            ) : null}
                                         </div>
                                         <Button
                                             variant="ghost"
                                             size="sm"
-                                            className="h-7 px-2 text-primary gap-1"
+                                            className="h-7 px-2 gap-1 text-primary"
                                             onClick={(e) => {
                                                 e.stopPropagation()
                                                 handleProjectClick(project.id)
@@ -315,7 +445,7 @@ export function WelcomePage() {
                                         </Button>
                                     </CardFooter>
                                 </Card>
-                            ))}
+                            )})}
                         </div>
                     )}
                 </section>
@@ -373,6 +503,18 @@ export function WelcomePage() {
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
+
+            <ShareProjectDialog
+                open={!!projectToShare}
+                onOpenChange={(open) => !open && setProjectToShare(null)}
+                projectId={projectToShare?.id ?? ''}
+                projectName={projectToShare?.name ?? ''}
+                canManage={
+                    !!projectToShare &&
+                    (resolveMyAccess(projectToShare) === 'owner' ||
+                        resolveMyAccess(projectToShare) === 'admin')
+                }
+            />
         </div>
     )
 }

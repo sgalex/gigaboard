@@ -1,5 +1,15 @@
 from .auth import UserCreate, UserLogin, UserResponse, TokenResponse, ErrorResponse
-from .project import ProjectCreate, ProjectUpdate, ProjectResponse, ProjectWithBoardsResponse
+from .project import (
+    ProjectCreate,
+    ProjectUpdate,
+    ProjectResponse,
+    ProjectWithBoardsResponse,
+    ProjectAccessMemberPreview,
+    UserSearchResult,
+    ProjectCollaboratorEntry,
+    ProjectCollaboratorAdd,
+    ProjectCollaboratorRoleUpdate,
+)
 from .board import BoardCreate, BoardUpdate, BoardResponse, BoardWithNodesResponse
 from .edge import EdgeCreate, EdgeUpdate, EdgeResponse, EdgeListResponse
 
@@ -55,7 +65,15 @@ from .cross_filter import (
 
 __all__ = [
     "UserCreate", "UserLogin", "UserResponse", "TokenResponse", "ErrorResponse",
-    "ProjectCreate", "ProjectUpdate", "ProjectResponse", "ProjectWithBoardsResponse",
+    "ProjectCreate",
+    "ProjectUpdate",
+    "ProjectResponse",
+    "ProjectWithBoardsResponse",
+    "ProjectAccessMemberPreview",
+    "UserSearchResult",
+    "ProjectCollaboratorEntry",
+    "ProjectCollaboratorAdd",
+    "ProjectCollaboratorRoleUpdate",
     "BoardCreate", "BoardUpdate", "BoardResponse", "BoardWithNodesResponse",
     "EdgeCreate", "EdgeUpdate", "EdgeResponse", "EdgeListResponse",
     "BaseNodeSchema", "BaseNodeResponse",

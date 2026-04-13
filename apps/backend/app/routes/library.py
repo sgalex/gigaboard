@@ -10,10 +10,24 @@ from app.schemas.library import (
     ProjectWidgetCreate, ProjectWidgetUpdate, ProjectWidgetResponse,
     ProjectTableCreate, ProjectTableUpdate, ProjectTableResponse,
 )
-from app.services.library_service import LibraryService
 from app.middleware import get_current_user
+from app.services.library_service import LibraryService
+from app.services.project_access_service import ProjectAccessService
 
-router = APIRouter(prefix="/api/v1/projects/{project_id}/library", tags=["library"])
+
+async def _require_project_access_library(
+    project_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    await ProjectAccessService.require_project_view_access(db, project_id, current_user.id)
+
+
+router = APIRouter(
+    prefix="/api/v1/projects/{project_id}/library",
+    tags=["library"],
+    dependencies=[Depends(_require_project_access_library)],
+)
 
 
 # ── Widgets ──────────────────────────────────────────

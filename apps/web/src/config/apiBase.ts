@@ -1,12 +1,14 @@
 /**
  * Базовый URL API и Socket.IO.
  *
- * **Важно (Mixed Content):** пустой `baseURL` в axios + относительный путь `/api/...` в XHR разрешается
- * относительно document base URL. Если на странице есть `<base href="http://...">` (прокси, CMS, старый шаблон),
- * браузер соберёт **http://** даже при открытой **https://** вкладке → блокировка Mixed Content.
- * Поэтому при работе в браузере без явного внешнего API используем **абсолютный** `window.location.origin`.
+ * **Браузер:** всегда `window.location.origin` — запросы идут туда же, где открыт UI
+ * (Vite проксирует `/api`, `/socket.io`, … на backend; nginx в prod — то же).
+ * Явный `VITE_API_URL` на другой хост в `.env` для локальной разработки больше не переопределяет origin в браузере,
+ * чтобы не было CORS/редиректов и потери `Authorization`.
  *
- * Явный `VITE_API_URL` (другой хост / только HTTP backend) — после проверок ниже.
+ * **Вне браузера** (редкие скрипты): `VITE_API_URL` или пустая строка / fallback.
+ *
+ * См. также `vite.config.ts` — `VITE_DEV_PROXY_TARGET` куда проксировать в dev.
  */
 function stripEnvQuotes(s: string): string {
     const t = s.trim()
@@ -16,73 +18,64 @@ function stripEnvQuotes(s: string): string {
     return t
 }
 
-function sameHostHttpAsHttpsPage(apiUrl: URL, win: Window & typeof globalThis): boolean {
-    return (
-        win.location.protocol === 'https:' &&
-        apiUrl.protocol === 'http:' &&
-        apiUrl.hostname.toLowerCase() === win.location.hostname.toLowerCase()
-    )
-}
-
-export function getViteApiBaseUrl(): string {
-    const win = typeof window !== 'undefined' ? window : undefined
+/** База API только из env (без `window`) — для небраузерных сценариев. */
+function getApiBaseUrlFromEnv(): string {
     const raw = import.meta.env.VITE_API_URL
-    const trimmedFromEnv =
-        raw === undefined || raw === null ? '' : stripEnvQuotes(String(raw))
-
-    // Нет явного API в env — тот же origin, что и SPA (nginx / Vite). Только абсолютный origin.
-    if (trimmedFromEnv === '') {
-        return win ? win.location.origin : ''
-    }
-
-    let trimmed = trimmedFromEnv
-
-    if (win) {
-        try {
-            const u = new URL(trimmed)
-            if (sameHostHttpAsHttpsPage(u, win)) {
-                return win.location.origin
-            }
-        } catch {
-            /* ignore malformed URL */
-        }
-    }
-
-    if (win && import.meta.env.PROD) {
-        try {
-            const u = new URL(trimmed)
-            const pageOrigin = win.location.origin
-            if (
-                u.origin !== pageOrigin &&
-                (u.hostname === 'localhost' || u.hostname === '127.0.0.1')
-            ) {
-                // Образ с localhost:8000, UI на nginx :3000 / https на домене — ходим на origin страницы
-                return win.location.origin
-            }
-        } catch {
-            /* ignore malformed URL */
-        }
-    }
-
-    if (win && win.location.protocol === 'https:' && trimmed.startsWith('http://')) {
-        try {
-            const u = new URL(trimmed)
-            if (u.hostname.toLowerCase() === win.location.hostname.toLowerCase()) {
-                return win.location.origin
-            }
-        } catch {
-            /* ignore */
-        }
-    }
-
+    const trimmed = raw === undefined || raw === null ? '' : stripEnvQuotes(String(raw))
     return trimmed
 }
 
-/** Origin для socket.io-client — тот же базис, что и REST (см. getViteApiBaseUrl). */
+/**
+ * Базовый URL для axios и абсолютных URL.
+ * В SPA в браузере — всегда origin страницы (тот же, что UI).
+ */
+export function getViteApiBaseUrl(): string {
+    const win = typeof window !== 'undefined' ? window : undefined
+    if (win) {
+        return win.location.origin
+    }
+    const fromEnv = getApiBaseUrlFromEnv()
+    if (fromEnv !== '') {
+        return fromEnv
+    }
+    return ''
+}
+
+/** Origin для socket.io-client — совпадает с REST в браузере. */
 export function getSocketIoUrl(): string {
+    const win = typeof window !== 'undefined' ? window : undefined
+    if (win) {
+        return win.location.origin
+    }
     const base = getViteApiBaseUrl()
     if (base) {
         return base
     }
     return 'http://localhost:8000'
+}
+
+/**
+ * Общие опции socket.io-client (path совпадает с CombinedASGI в backend и location в nginx).
+ * `timeout` — полный handshake; по умолчанию в клиенте 20s, при медленном прокси/Docker часто мало.
+ */
+export const SOCKET_IO_CLIENT_OPTIONS = {
+    path: '/socket.io',
+    transports: ['polling', 'websocket'],
+    reconnection: true,
+    reconnectionDelay: 1000,
+    reconnectionAttempts: 10,
+    timeout: 45_000,
+    autoConnect: true,
+}
+
+/** Подсказка при connect_error в dev (нет прокси /socket.io, backend не слушает). */
+export function logSocketIoConnectError(scope: string, error: unknown): void {
+    console.error(scope, error)
+    if (import.meta.env.DEV) {
+        console.warn(
+            `[Socket.IO] URL: ${getSocketIoUrl()} — ` +
+                'убедитесь, что Vite проксирует /socket.io (vite.config.ts, VITE_DEV_PROXY_TARGET), ' +
+                'или что nginx отдаёт UI и API с одного origin.'
+        )
+    }
 }

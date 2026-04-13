@@ -62,13 +62,13 @@ CORS_ORIGINS=http://localhost,http://127.0.0.1,http://localhost:3000,http://127.
 
 ```bash
 # Сборка всех образов
-docker-compose build
+docker compose build
 
 # Запуск всех сервисов
-docker-compose up -d
+docker compose up -d
 
 # Просмотр логов
-docker-compose logs -f
+docker compose logs -f
 ```
 
 **Первый запуск займет 5-10 минут** (загрузка базовых образов, установка зависимостей).
@@ -87,7 +87,7 @@ docker-compose logs -f
 Проверьте статус контейнеров:
 
 ```bash
-docker-compose ps
+docker compose ps
 ```
 
 Все контейнеры должны быть в статусе `Up (healthy)`.
@@ -100,61 +100,61 @@ docker-compose ps
 
 ```bash
 # Запуск сервисов
-docker-compose up -d
+docker compose up -d
 
 # Остановка сервисов
-docker-compose down
+docker compose down
 
 # Перезапуск конкретного сервиса
-docker-compose restart backend
-docker-compose restart frontend
+docker compose restart backend
+docker compose restart frontend
 
 # Просмотр логов
-docker-compose logs -f                    # Все сервисы
-docker-compose logs -f backend            # Только backend
-docker-compose logs -f frontend           # Только frontend
+docker compose logs -f                    # Все сервисы
+docker compose logs -f backend            # Только backend
+docker compose logs -f frontend           # Только frontend
 
 # Остановка с удалением volumes (ОЧИСТКА ДАННЫХ!)
-docker-compose down -v
+docker compose down -v
 ```
 
 ### Пересборка после изменений кода
 
 ```bash
 # Пересборка конкретного сервиса
-docker-compose build backend
-docker-compose up -d backend
+docker compose build backend
+docker compose up -d backend
 
 # Пересборка всех сервисов
-docker-compose build
-docker-compose up -d
+docker compose build
+docker compose up -d
 
 # Пересборка без кэша (полная пересборка)
-docker-compose build --no-cache
-docker-compose up -d
+docker compose build --no-cache
+docker compose up -d
 ```
 
 ### Выполнение команд внутри контейнеров
 
 ```bash
 # Backend: запуск миграций
-docker-compose exec backend alembic upgrade head
+docker compose exec backend alembic upgrade head
 
 # Backend: создание новой миграции
-docker-compose exec backend alembic revision --autogenerate -m "описание"
+docker compose exec backend alembic revision --autogenerate -m "описание"
 
 # Backend: Python shell
-docker-compose exec backend python
+docker compose exec backend python
 
 # PostgreSQL: psql
-docker-compose exec postgres psql -U gigaboard -d gigaboard
+docker compose exec postgres psql -U gigaboard -d gigaboard
 
 # Redis: CLI
-docker-compose exec redis redis-cli
+docker compose exec redis redis-cli
 
 # Bash в контейнере
-docker-compose exec backend bash
-docker-compose exec frontend sh
+docker compose exec backend bash
+docker compose exec frontend sh
 ```
 
 ---
@@ -197,14 +197,14 @@ docker-compose exec frontend sh
 
 ```bash
 # Посмотрите логи
-docker-compose logs backend
+docker compose logs backend
 
 # Частые причины:
 # 1. PostgreSQL не успел запуститься
 # Подождите 30 секунд и проверьте снова
 
 # 2. Ошибка миграции БД
-docker-compose exec backend alembic upgrade head
+docker compose exec backend alembic upgrade head
 
 # 3. Ошибки LLM — настройте пресеты в приложении (профиль / админ), не .env
 ```
@@ -215,18 +215,18 @@ docker-compose exec backend alembic upgrade head
 
 ```bash
 # 1. Проверьте, что backend запущен
-docker-compose ps backend
+docker compose ps backend
 
 # 2. Проверьте health check
 curl http://localhost:3000/api/v1/health
 
 # 3. Проверьте nginx конфигурацию
-docker-compose exec frontend cat /etc/nginx/conf.d/default.conf
+docker compose exec frontend cat /etc/nginx/conf.d/default.conf
 ```
 
 ### Проблема: "Port is already allocated"
 
-**Симптомы**: Ошибка при запуске `docker-compose up`
+**Симптомы**: Ошибка при запуске `docker compose up`
 
 **Решение**:
 
@@ -268,7 +268,7 @@ BACKEND_PORT=8001
 
 ```bash
 # Запуск в dev режиме
-docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 # Теперь:
 # - Backend перезагружается при изменении кода

@@ -11,10 +11,11 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_db
-from app.models import User
+from app.models import ContentNode, ProjectWidget, User
 from app.middleware import get_current_user
 from app.schemas.cross_filter import (
     ActiveFiltersUpdate,
@@ -26,9 +27,20 @@ from app.schemas.cross_filter import (
     FilterStatsResponse,
     TableFilterStats,
 )
+from app.services.board_service import BoardService
+from app.services.dashboard_service import DashboardService
 from app.services.filter_preset_service import FilterPresetService
+from app.services.project_access_service import ProjectAccessService
 
 logger = logging.getLogger(__name__)
+
+
+async def _require_project_view_preset(
+    project_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    await ProjectAccessService.require_project_view_access(db, project_id, current_user.id)
 
 # In-memory store for active filters (Redis replacement for MVP).
 # In production, replace with Redis: `board:{board_id}:user:{user_id}:filters`
@@ -56,6 +68,7 @@ async def get_board_filters(
     current_user: User = Depends(get_current_user),
 ):
     """Get current active filters for a board."""
+    await BoardService.get_board(db, board_id, current_user.id)
     key = _filter_key("board", str(board_id), str(current_user.id))
     data = _active_filters_store.get(key, {})
     return ActiveFiltersResponse(
@@ -75,6 +88,7 @@ async def set_board_filters(
     """Set (replace) active filters for a board."""
     from datetime import datetime
 
+    await BoardService.get_board(db, board_id, current_user.id)
     key = _filter_key("board", str(board_id), str(current_user.id))
     filters_dict = None
     if body.filters is not None:
@@ -94,6 +108,7 @@ async def clear_board_filters(
     current_user: User = Depends(get_current_user),
 ):
     """Clear all active filters for a board."""
+    await BoardService.get_board(db, board_id, current_user.id)
     key = _filter_key("board", str(board_id), str(current_user.id))
     _active_filters_store.pop(key, None)
     return ActiveFiltersResponse(filters=None, preset_id=None, updated_at=None)
@@ -109,6 +124,7 @@ async def apply_board_preset(
     """Apply a saved filter preset to this board."""
     from datetime import datetime
 
+    await BoardService.get_board(db, board_id, current_user.id)
     preset = await FilterPresetService.get_preset(db, preset_id)
     if not preset:
         raise HTTPException(status_code=404, detail="Preset not found")
@@ -302,6 +318,38 @@ async def _compute_filtered_pipeline(
     return result
 
 
+async def _board_ids_for_dashboard_widgets(
+    db: AsyncSession,
+    dashboard,
+) -> list[UUID]:
+    """Идентификаторы досок, из пайплайнов которых берутся данные виджетов на дашборде."""
+    widget_source_ids = [
+        i.source_id
+        for i in (dashboard.items or [])
+        if getattr(i, "item_type", None) == "widget" and i.source_id
+    ]
+    if not widget_source_ids:
+        return []
+
+    result = await db.execute(select(ProjectWidget).where(ProjectWidget.id.in_(widget_source_ids)))
+    project_widgets = list(result.scalars().all())
+
+    board_ids: set[UUID] = set()
+    content_ids: list[UUID] = []
+    for pw in project_widgets:
+        if pw.source_board_id:
+            board_ids.add(pw.source_board_id)
+        elif pw.source_content_node_id:
+            content_ids.append(pw.source_content_node_id)
+
+    if content_ids:
+        cn_result = await db.execute(select(ContentNode).where(ContentNode.id.in_(content_ids)))
+        for cn in cn_result.scalars().all():
+            board_ids.add(cn.board_id)
+
+    return list(board_ids)
+
+
 @board_filter_router.post("/compute-filtered")
 async def compute_filtered_board(
     board_id: UUID,
@@ -361,6 +409,7 @@ async def get_dashboard_filters(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    await DashboardService.get_dashboard(db, dashboard_id, current_user.id)
     key = _filter_key("dashboard", str(dashboard_id), str(current_user.id))
     data = _active_filters_store.get(key, {})
     return ActiveFiltersResponse(
@@ -379,6 +428,7 @@ async def set_dashboard_filters(
 ):
     from datetime import datetime
 
+    await DashboardService.get_dashboard(db, dashboard_id, current_user.id)
     key = _filter_key("dashboard", str(dashboard_id), str(current_user.id))
     filters_dict = None
     if body.filters is not None:
@@ -397,6 +447,7 @@ async def clear_dashboard_filters(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    await DashboardService.get_dashboard(db, dashboard_id, current_user.id)
     key = _filter_key("dashboard", str(dashboard_id), str(current_user.id))
     _active_filters_store.pop(key, None)
     return ActiveFiltersResponse(filters=None, preset_id=None, updated_at=None)
@@ -411,6 +462,7 @@ async def apply_dashboard_preset(
 ):
     from datetime import datetime
 
+    await DashboardService.get_dashboard(db, dashboard_id, current_user.id)
     preset = await FilterPresetService.get_preset(db, preset_id)
     if not preset:
         raise HTTPException(status_code=404, detail="Preset not found")
@@ -423,6 +475,55 @@ async def apply_dashboard_preset(
     return ActiveFiltersResponse(**_active_filters_store[key])
 
 
+@dashboard_filter_router.post("/compute-filtered")
+async def compute_filtered_dashboard(
+    dashboard_id: UUID,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Пересчитать pandas-цепочки для ContentNode, связанных с виджетами дашборда.
+
+    Для каждой уникальной «исходной» доски (source_board_id у ProjectWidget или
+    board_id у ContentNode) вызывается тот же пайплайн, что и для compute-filtered доски.
+    Ответ: nodes — словарь node_id → tables / uses_ai / from_cache (объединение по доскам).
+    """
+    raw_filters = body.get("filters")
+    dashboard = await DashboardService.get_dashboard(db, dashboard_id, current_user.id)
+    board_ids = await _board_ids_for_dashboard_widgets(db, dashboard)
+    logger.info(
+        "compute-filtered dashboard=%s boards=%d raw_filters=%s",
+        dashboard_id,
+        len(board_ids),
+        type(raw_filters).__name__ if raw_filters else None,
+    )
+    if not board_ids:
+        return {"nodes": {}}
+
+    merged: dict[str, dict[str, Any]] = {}
+    try:
+        for bid in board_ids:
+            part = await _compute_filtered_pipeline(
+                db=db,
+                board_id=bid,
+                filters=raw_filters,
+                user_id=str(current_user.id),
+            )
+            merged.update(part)
+        logger.info(
+            "compute-filtered dashboard=%s result_nodes=%d",
+            dashboard_id,
+            len(merged),
+        )
+        return {"nodes": merged}
+    except Exception as e:
+        logger.error("compute-filtered failed for dashboard %s: %s", dashboard_id, e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Filter recompute failed: {str(e)}",
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Filter Presets CRUD (project-scoped)
 # ═══════════════════════════════════════════════════════════════════════
@@ -430,6 +531,7 @@ async def apply_dashboard_preset(
 preset_router = APIRouter(
     prefix="/api/v1/projects/{project_id}/filter-presets",
     tags=["filter-presets"],
+    dependencies=[Depends(_require_project_view_preset)],
 )
 
 
@@ -451,6 +553,7 @@ async def create_preset(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    await ProjectAccessService.require_project_edit_access(db, project_id, current_user.id)
     preset = await FilterPresetService.create_preset(db, project_id, current_user.id, data)  # type: ignore[arg-type]
     await db.commit()
     await db.refresh(preset)
@@ -478,6 +581,7 @@ async def update_preset(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    await ProjectAccessService.require_project_edit_access(db, project_id, current_user.id)
     preset = await FilterPresetService.update_preset(db, preset_id, data)
     if not preset or preset.project_id != project_id:
         raise HTTPException(status_code=404, detail="Preset not found")
@@ -493,6 +597,7 @@ async def delete_preset(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    await ProjectAccessService.require_project_edit_access(db, project_id, current_user.id)
     deleted = await FilterPresetService.delete_preset(db, preset_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Preset not found")

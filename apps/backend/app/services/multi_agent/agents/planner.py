@@ -752,6 +752,13 @@ PIPELINE MEMORY (prioritize over long raw history):
     "evidence": (pm.get("evidence") or [])[:6],
 }, ensure_ascii=False, indent=2)}
 """
+            if context:
+                cg = str(context.get("_context_graph_slice") or "").strip()
+                if cg:
+                    replan_prompt += f"""
+CONTEXT GRAPH (compact step overview; expand tools for detail):
+{cg}
+"""
 
             # FIX: передаём INPUT DATA SCHEMA в replan-промпт, чтобы LLM знал
             # какие таблицы уже доступны как структурированные DataFrame.
@@ -983,6 +990,13 @@ PIPELINE MEMORY (high-priority context):
     "open_questions": (pm.get("open_questions") or [])[:6],
     "evidence": (pm.get("evidence") or [])[:6],
 }, ensure_ascii=False, indent=2)}
+"""
+            if context:
+                cg = str(context.get("_context_graph_slice") or "").strip()
+                if cg:
+                    prompt += f"""
+CONTEXT GRAPH (compact step overview; expand tools for detail):
+{cg}
 """
             if last_error or failed_agent:
                 prompt += f"""
@@ -1272,7 +1286,14 @@ PIPELINE MEMORY (high-priority context):
             prompt_parts.append("PIPELINE MEMORY:")
             prompt_parts.append(json.dumps(compact_pm, ensure_ascii=False, default=str))
             prompt_parts.append("")
-        
+
+        if context:
+            cg = str(context.get("_context_graph_slice") or "").strip()
+            if cg:
+                prompt_parts.append("CONTEXT GRAPH (compact step overview; use expand tools for detail):")
+                prompt_parts.append(cg)
+                prompt_parts.append("")
+
         if board_id:
             prompt_parts.append(f"BOARD ID: {board_id}")
         

@@ -870,7 +870,11 @@ class AnalystAgent(BaseAgent):
 
             # Формируем prompt
             task_for_prompt = {**task, "input_data": input_data_for_prompt} if input_data_for_prompt else task
-            task_prompt = self._build_universal_prompt(task_for_prompt, agent_results)
+            task_prompt = self._build_universal_prompt(
+                task_for_prompt,
+                agent_results,
+                context=context,
+            )
             tools_enabled = bool((context or {}).get("tools_enabled"))
             force_tool_data_access = bool(
                 (context or {}).get("force_tool_data_access")
@@ -960,6 +964,8 @@ class AnalystAgent(BaseAgent):
                         "оркестратор отдаёт кэш, а лимит раундов исчерпывается.\n"
                         "- Если нужна ещё одна таблица — не более ОДНОГО нового readTableData в tool_requests "
                         "за ответ; не дублируй параллельно три одинаковых сценария.\n"
+                        "- Если в data тула есть \"ok\": false — прочитай message и hint, исправь arguments "
+                        "(nodeIds, jsonDecl) и не повторяй идентичный ошибочный вызов.\n"
                     )
             if tools_enabled:
                 task_prompt += (
@@ -1413,7 +1419,9 @@ class AnalystAgent(BaseAgent):
     def _build_universal_prompt(
         self,
         task: Dict[str, Any],
-        agent_results: List[Dict[str, Any]]
+        agent_results: List[Dict[str, Any]],
+        *,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Формирует универсальный prompt для любой задачи.
@@ -1542,10 +1550,25 @@ class AnalystAgent(BaseAgent):
             prompt_parts.append(json.dumps(task_params, indent=2, ensure_ascii=False))
             prompt_parts.append("")
         
+        # Срез context_graph (L1/L2/L0 по политике среза) — после select_context_for_step
+        if context:
+            cg = str(context.get("_context_graph_slice") or "").strip()
+            if cg:
+                prompt_parts.append(
+                    "**PIPELINE CONTEXT GRAPH** (компактный обзор шагов; детали — expand*-тулы):"
+                )
+                prompt_parts.append(cg)
+                prompt_parts.append("")
+
         # Добавляем результаты предыдущих шагов если есть
         # Изменение #2: agent_results — list
         if agent_results:
-            prompt_parts.append("**PREVIOUS RESULTS** (from other agents):")
+            if (context or {}).get("_context_graph_primary"):
+                prompt_parts.append(
+                    "**PREVIOUS RESULTS** (tail only — full step history is in PIPELINE CONTEXT GRAPH above):"
+                )
+            else:
+                prompt_parts.append("**PREVIOUS RESULTS** (from other agents):")
             for result in agent_results:
                 if not isinstance(result, dict):
                     continue

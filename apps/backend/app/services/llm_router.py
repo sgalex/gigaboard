@@ -88,6 +88,11 @@ class LLMRouter:
     """
     Маршрутизатор LLM-запросов. Выбор модели: по привязке агента (agent_key)
     или модель по умолчанию. См. docs/LLM_CONFIGURATION_CONCEPT.md.
+
+    Зарезервированные ключи кроме имён агентов (planner, analyst, …):
+    ``context_graph_compression`` — сжатие уровней контекстного графа (L1/L2);
+    настраивается в тех же привязках ``agent_llm_override``, что и агенты.
+    См. ``multi_agent.context_graph.constants.CONTEXT_GRAPH_COMPRESSION_AGENT_KEY``.
     """
 
     def __init__(
@@ -138,7 +143,10 @@ class LLMRouter:
         agent_key: Optional[str] = None,
     ) -> Optional[LLMConfig]:
         """
-        Определить модель: привязка агента или модель по умолчанию.
+        Определить пресет LLM: привязка по agent_key или system_llm_settings.default_llm_config_id.
+
+        Одинаково для имён агентов (planner, …) и служебных ключей (context_graph_compression):
+        если записи в agent_llm_override нет — используется модель по умолчанию.
         """
         sys_result = await db.execute(select(SystemLLMSettings).limit(1))
         sys_row = sys_result.scalar_one_or_none()

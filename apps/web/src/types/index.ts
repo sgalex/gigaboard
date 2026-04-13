@@ -23,6 +23,14 @@ export interface Project {
     updated_at: string;
 }
 
+export type ProjectMyAccess = 'owner' | 'viewer' | 'editor' | 'admin'
+
+export interface ProjectAccessMemberPreview {
+    user_id: string;
+    username: string;
+    role: string;
+}
+
 export interface ProjectWithBoards extends Project {
     boards_count: number;
     dashboards_count?: number;
@@ -32,6 +40,27 @@ export interface ProjectWithBoards extends Project {
     tables_count?: number;
     dimensions_count?: number;
     filters_count?: number;
+    /** false если проект открыт как приглашённый соавтор */
+    is_owner?: boolean;
+    /** Роль текущего пользователя в проекте */
+    my_access?: ProjectMyAccess;
+    /** Владелец + соавторы */
+    access_user_count?: number;
+    access_members_preview?: ProjectAccessMemberPreview[];
+}
+
+export interface UserSearchResult {
+    id: string;
+    username: string;
+    email: string;
+}
+
+export interface ProjectCollaboratorEntry {
+    user_id: string;
+    username: string;
+    email: string;
+    role: string;
+    created_at: string;
 }
 
 export interface ProjectCreate {

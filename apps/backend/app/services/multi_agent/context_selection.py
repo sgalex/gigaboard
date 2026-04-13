@@ -9,11 +9,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from .context_graph.slice import build_context_graph_slice
 from .context_metrics import estimate_serialized_size
-from .runtime_overrides import ma_int
+from .runtime_overrides import ma_bool, ma_int
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_BUDGETS: Dict[str, Tuple[int, int]] = {
     # Planner использует накопленный контекст для revise/replan, но в ограниченном объёме.
@@ -505,6 +508,16 @@ def select_agent_results_for_prompt(
     return list(reversed(selected_reversed))
 
 
+def _graph_has_nodes(pipeline_context: Optional[Dict[str, Any]]) -> bool:
+    if not pipeline_context:
+        return False
+    g = pipeline_context.get("context_graph")
+    if not isinstance(g, dict):
+        return False
+    nodes = g.get("nodes")
+    return isinstance(nodes, dict) and len(nodes) > 0
+
+
 def _apply_compaction(
     level: str,
     *,
@@ -549,7 +562,7 @@ def select_context_for_step(
         max_items=limit_items,
         max_chars=limit_chars,
     )
-    base_ctx["agent_results"] = select_agent_results_for_prompt(
+    selected_full = select_agent_results_for_prompt(
         agent_name=agent_name,
         agent_results=base_ctx.get("agent_results", []),
         task_type=task_type,
@@ -557,6 +570,25 @@ def select_context_for_step(
         max_total_chars=effective_chars,
         runtime_options=runtime_options,
     )
+    base_ctx["_agent_results_selected_budget"] = list(selected_full)
+
+    graph_primary = (
+        ma_bool("MULTI_AGENT_CONTEXT_GRAPH_PRIMARY", True) and _graph_has_nodes(base_ctx)
+    )
+    if graph_primary:
+        tail_items = ma_int("MULTI_AGENT_CONTEXT_GRAPH_PRIMARY_TAIL_ITEMS", 2)
+        if tail_items <= 0:
+            base_ctx["agent_results"] = []
+        else:
+            base_ctx["agent_results"] = (
+                selected_full[-tail_items:]
+                if len(selected_full) > tail_items
+                else list(selected_full)
+            )
+        base_ctx["_context_graph_primary"] = True
+    else:
+        base_ctx["agent_results"] = selected_full
+        base_ctx["_context_graph_primary"] = False
     # Дополнительно нормализуем «сырой» контекстные поля,
     # которые напрямую участвуют в prompt-сборке core-агентов.
     if "chat_history" in base_ctx:
@@ -591,4 +623,47 @@ def select_context_for_step(
     base_ctx["_context_selection_budget_items"] = effective_items
     base_ctx["_context_selection_budget_chars"] = effective_chars
     base_ctx["_context_selection_compaction_level"] = compaction_level
+
+    slice_text, slice_meta = build_context_graph_slice(
+        consumer_agent=agent_name,
+        pipeline_context=base_ctx,
+        compaction_level=compaction_level,
+    )
+    base_ctx["_context_graph_slice"] = slice_text
+    base_ctx["_context_graph_slice_meta"] = slice_meta
+
+    trace_fn = base_ctx.get("_trace_event")
+    _lvl = (compaction_level or "full").lower()
+    if callable(trace_fn) and _lvl != "full":
+        trace_fn(
+            event="context_compaction_budget",
+            phase="context_selection",
+            agent=agent_name,
+            details={
+                "compaction_level": compaction_level,
+                "task_type": task_type,
+                "budget_items_raw": limit_items,
+                "budget_items_effective": effective_items,
+                "budget_chars_raw": limit_chars,
+                "budget_chars_effective": effective_chars,
+                "max_chat_messages": max_chat_messages,
+                "max_chat_message_chars": max_chat_chars,
+                "graph_slice_text_len": len(slice_text or ""),
+                "graph_primary": bool(base_ctx.get("_context_graph_primary")),
+            },
+        )
+    if ma_bool("MULTI_AGENT_CONTEXT_EXPAND_COMPACT_LOG", False) and _lvl != "full":
+        logger.info(
+            "[context_compaction] agent=%s task=%s level=%s items %s->%s chars %s->%s slice_len=%s primary=%s",
+            agent_name,
+            task_type,
+            compaction_level,
+            limit_items,
+            effective_items,
+            limit_chars,
+            effective_chars,
+            len(slice_text or ""),
+            base_ctx.get("_context_graph_primary"),
+        )
+
     return base_ctx

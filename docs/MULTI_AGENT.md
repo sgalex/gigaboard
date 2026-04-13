@@ -2,7 +2,7 @@
 
 **Дата создания**: 7 февраля 2026  
 **Статус**: Реализована (Февраль 2026)  
-**Актуализировано**: 22 марта 2026 — таблица ядра: `context_filter`, роли **QualityGate** vs **ValidatorAgent**; ранее 20 марта — тулы `readTableData` / `readTableListFromContentNodes` и **`_compute_filtered_pipeline`** (ленивый кэш `_raw_filtered_pipeline_result`, гидратация строк при метаданных без `rows`, пересчёт при известном `board_id` даже без активного фильтра). Ранее 18 марта — устойчивость парсинга **AnalystAgent**, анти-петля **QualityGateAgent**, HTTP **ResearchAgent**.
+**Актуализировано**: 4 апреля 2026 — принцип 7: целевая **pull-модель** контекста и результаты поиска (см. `CONTEXT_ENGINEERING.md` §3.1). Ранее 22 марта 2026 — таблица ядра: `context_filter`, роли **QualityGate** vs **ValidatorAgent**; ранее 20 марта — тулы `readTableData` / `readTableListFromContentNodes` и **`_compute_filtered_pipeline`** (ленивый кэш `_raw_filtered_pipeline_result`, гидратация строк при метаданных без `rows`, пересчёт при известном `board_id` даже без активного фильтра). Ранее 18 марта — устойчивость парсинга **AnalystAgent**, анти-петля **QualityGateAgent**, HTTP **ResearchAgent**.
 
 ---
 
@@ -20,7 +20,7 @@
 
 **Лимит tool loop:** на один шаг агента с включёнными тулами действует `MULTI_AGENT_TOOL_MAX_ROUNDS_PER_STEP` (дефолт и **минимум в коде — 15** раундов: старые значения вроде `3` в env или профиле поднимаются до 15; больше 15 можно задать явно). Реализация: цикл с `tool_loop_*` в `Orchestrator.process_user_request`.
 
-**Кэш результатов тулов:** на время одного запроса к оркестратору успешные ответы `readTableListFromContentNodes` и `readTableData` кладутся в `pipeline_context["_tool_result_cache"]` по стабильному ключу от нормализованных аргументов; повторный идентичный запрос возвращает кэш (событие трейса `tool_cache_hit`). В `pipeline_context["tool_request_cache_digest_lines"]` накапливаются короткие строки-напоминания; **Analyst**, **TransformCodex** (в т.ч. итеративный режим), **Structurizer** и **WidgetCodex** подмешивают их в промпт перед блоком результатов тулов, чтобы модель не дублировала те же `tool_requests`.
+**Кэш результатов тулов:** на время одного запроса к оркестратору успешные ответы `readTableListFromContentNodes`, `readTableData` и pull-тулов контекста (`expandResearchSourceContent`, `expandAgentResult`, `expandContextGraphNode`, см. `CONTEXT_ENGINEERING.md` §3.1) кладутся в `pipeline_context["_tool_result_cache"]` по стабильному ключу от нормализованных аргументов; повторный идентичный запрос возвращает кэш (событие трейса `tool_cache_hit`). В `pipeline_context["tool_request_cache_digest_lines"]` накапливаются короткие строки-напоминания; **Analyst**, **TransformCodex** (в т.ч. итеративный режим), **Structurizer** и **WidgetCodex** подмешивают их в промпт перед блоком результатов тулов, чтобы модель не дублировала те же `tool_requests`.
 
 **Analyst и tool loop:** в промпте после блока `TOOL RESULTS` добавлены правила «анти-петля» (не повторять те же `readTableData`, при достаточных данных — сразу `findings`). Оркестратор дедуплицирует одинаковые `tool_requests` в одном раунде и ограничивает их число (`MULTI_AGENT_ANALYST_MAX_TOOL_REQUESTS_PER_ROUND`, по умолчанию 2), чтобы не исчерпывать лимит раундов параллельными повторами.
 
@@ -28,7 +28,7 @@
 
 **Вызов `readTableData`:** оркестратор нормализует `jsonDecl`: алиасы `table_name` / `tableName` / `name` / `table` → `table_id`; при отсутствии `table_id` подставляет его из последнего успешного `readTableListFromContentNodes` для того же `contentNodeId` (чтобы агенты не падали на пустом `table_id`). Если в снимке пайплайна у таблицы есть положительный `row_count`, но массив `rows` пуст (метаданные без тела строк), оркестратор **сначала** пересчитывает полную pandas-цепочку на бэке через `_compute_filtered_pipeline` (тот же эффективный фильтр, что у тулов: board/dashboard + чат; при отсутствии фильтра — цепочка без кросс-фильтра) и обновляет `_raw_filtered_pipeline_result`; затем при необходимости — fallback на `ContentNode.content` в БД (`_hydrate_table_rows_from_content_db` в `orchestrator.py`), чтобы аналитик не получал «пустые» таблицы при реальных данных и не видел несогласованных с доской данных из сырого `content` без пересчёта.
 
-- **Core (Ядро)** — 9 специализированных агентов, решающих универсальные задачи анализа, генерации кода и формирования ответов. Взаимодействуют через единый **Orchestrator** (MessageBus/Redis). Обмениваются данными в универсальном формате **AgentPayload**. Дополнительно **QualityGateAgent** используется для валидации данных (execution_context) в pipeline.
+- **Core (Ядро)** — специализированные агенты анализа, генерации кода и формирования ответа. Взаимодействуют через единый **Orchestrator** (MessageBus/Redis), формат **AgentPayload**. Финальный **QualityGateAgent** в оркестраторе **не вызывается**; минимальные критерии шагов — **per-step acceptance** (`step_acceptance.py`).
 - **Satellite Controllers (Спутники)** — контекстные контроллеры, привязанные к UI-сценариям (трансформации, виджеты, AI Assistant, подсказки, **Поиск с ИИ** и др.). Формируют запросы к ядру, исполняют результаты, валидируют в контексте задачи. Не входят в состав ядра.
 - **Utility Services** — вспомогательные сервисы (ResolverService), доступные агентам как утилиты.
 
@@ -36,7 +36,7 @@
 
 ## Статус реализации
 
-> **2026** — система реализована: 9 core-агентов + satellite-контроллеры (включая `ResearchController` для источника «Поиск с ИИ»).
+> **2026** — система реализована: ядро агентов (оркестратор по умолчанию без финального Quality Gate) + satellite-контроллеры (включая `ResearchController` для источника «Поиск с ИИ»).
 
 ### Core Agents (Слой 1)
 
@@ -51,8 +51,8 @@
 | `agents/widget_codex.py`    | WidgetCodexAgent          | ✅ Реализован |
 | `agents/reporter.py`        | ReporterAgent             | ✅ Реализован |
 | `agents/context_filter.py`  | ContextFilterAgent        | ✅ Реализован |
-| `agents/quality_gate.py`    | QualityGateAgent          | ✅ Реализован; в оркестраторе ключ плана **`validator`** |
-| `agents/validator.py`       | ValidatorAgent            | ✅ Реализован; проверка Python-кода трансформаций (не подменяет Quality Gate в `Orchestrator`) |
+| `agents/quality_gate.py`    | QualityGateAgent          | ✅ Реализован; **финальный вызов из Orchestrator отключён** (ключ плана **`validator`** пропускается) |
+| `agents/validator.py`       | ValidatorAgent            | ✅ Реализован; проверка Python-кода трансформаций (отдельно от `quality_gate.py`) |
 | `agents/resolver.py`        | ResolverService (утилита) | ✅ Реализован |
 | `agents/base.py`            | BaseAgent                 | ✅ Реализован |
 
@@ -94,7 +94,7 @@ flowchart TB
         direction TB
         ORCH["Orchestrator\n(MessageBus / Redis Pub-Sub)"]
         
-        subgraph AGENTS["9 Core Agents"]
+        subgraph AGENTS["Core Agents"]
             PA["PlannerAgent"]
             DA["DiscoveryAgent"]
             RA["ResearchAgent"]
@@ -103,7 +103,6 @@ flowchart TB
             CXA["TransformCodexAgent\n+ syntax check"]
             WCXA["WidgetCodexAgent\n+ syntax check"]
             REP["ReporterAgent"]
-            VA["ValidatorAgent"]
         end
 
         ORCH --> PA
@@ -114,7 +113,6 @@ flowchart TB
         ORCH --> CXA
         ORCH --> WCXA
         ORCH --> REP
-        ORCH --> VA
     end
 
     subgraph UTILS["Utility Services"]
@@ -140,7 +138,7 @@ flowchart TB
 4. **ContentTable везде** — структурированные данные на всех уровнях (вход/выход агентов, передача от satellite к ядру) используют формат ContentTable.
 5. **Satellite = контекст** — вся контекстно-зависимая логика (исполнение кода, рендеринг, board operations) живёт в satellite-контроллерах, не в ядре.
 6. **Frontend передаёт полную историю** — состояние сессии хранится на клиенте, каждый запрос включает полный `chat_history`.
-7. **Context engineering** — объём и состав данных в промпте LLM на каждом шаге управляются осознанно (бюджеты, селекция фрагментов `agent_results`, усечение тяжёлых полей). Подробный план развития: [`CONTEXT_ENGINEERING.md`](./CONTEXT_ENGINEERING.md).
+7. **Context engineering** — объём и состав данных в промпте LLM на каждом шаге управляются осознанно (бюджеты, селекция фрагментов `agent_results`, усечение тяжёлых полей, контекстный граф). **Целевое направление:** pull-модель — в промпт по умолчанию компактный слой, полнота (в т.ч. тексты страниц после discovery/research) — по запросу через оркестраторские тулы в tool loop, по аналогии с `readTableData`. См. [`CONTEXT_ENGINEERING.md`](./CONTEXT_ENGINEERING.md) §3.1.
 8. **Policy-driven execution** — таймауты, retry и уровни деградации контекста (`full`/`compact`/`minimal`) задаются task-aware политиками, а не ad-hoc условиями в шагах.
 9. **Structured working memory** — в `pipeline_context.pipeline_memory` хранятся цель, ограничения и ключевые решения для стабильного `replan/revise_remaining` в длинных сессиях.
 
@@ -160,7 +158,7 @@ flowchart TB
 | 6   | **TransformCodexAgent** | `codex`        | Генерация Python/pandas кода для трансформаций данных, базовый syntax check                                        | `code_blocks`, `narrative`    |
 | 6b  | **WidgetCodexAgent**    | `widget_codex` | Генерация HTML/CSS/JS виджетов, базовый syntax check                                                               | `code_blocks`, `narrative`    |
 | 7   | **ReporterAgent**       | `reporter`     | Формирование финального ответа пользователю (текст или код) из результатов всех агентов                            | `narrative`, `code_blocks`    |
-| 8   | **QualityGateAgent** (в плане/логах: `validator`) | `validator` | Валидация результатов пайплайна на соответствие запросу; `suggested_replan` для Orchestrator; эвристика + LLM; анти-петля при пустых findings у analyst | `validation` |
+| 8   | **QualityGateAgent** (ключ `validator`) | `validator` | Реализован в `quality_gate.py`; **оркестратор после reporter больше не вызывает** финальный gate (контроль — **per-step acceptance**). Шаги `validator` в плане пропускаются. Код пригоден для переиспользования / тестов | `validation` |
 
 ### Детальное описание агентов
 
@@ -274,56 +272,65 @@ AnalystAgent может **читать** неструктурированный 
 
 **Контекст — что есть, то и используется**: Reporter не обрабатывает отдельно отсутствие элементов на доске или виджетов на дашборде. В контекст передаётся то, что есть (user_request, описание задачи, при наличии — данные доски, findings); чего нет — не подставляется. LLM получает единый запрос и формирует ответ по имеющемуся контексту.
 
-#### 8. ValidatorAgent / QualityGateAgent (пайплайн)
+#### 8. QualityGateAgent (`validator`) — не финальный шаг оркестратора
 
-**Реализация**: модуль `agents/quality_gate.py`; в логах и Message Bus агент именуется **`validator`** (совместимость с текущей архитектурой).
+**Реализация**: `agents/quality_gate.py`; имя агента в payload — **`validator`**.
 
-**Ответственность**: gate-keeper после выполнения шагов плана. Проверяет согласованность агрегированных результатов (в т.ч. Reporter) с запросом пользователя и при необходимости предлагает **replan** через `suggested_replan`.
+**Статус в Orchestrator (актуально)**: финальная фаза «после reporter» **отключена**. Итог пайплайна не блокируется и не перепланируется через этот агент; шаги с `agent: "validator"` в плане **пропускаются** (трейс `step_skipped`, причина `quality_gate_disabled`). Контроль минимального артефакта на шагах — **`step_acceptance.py`** (в т.ч. reporter).
 
-**Логика**:
-1. Получает `original_request` + агрегированные результаты агентов. Предпочтительно поле **`validation_agent_results_slice`** (срез `agent_results` текущего плана из оркестратора): функция **`aggregate_agent_results_for_validation`** строит словарь по `agent`; для нескольких записей с `agent="analyst"` выбирается та, у которой **больше** `findings` (иначе «последний ключ перезаписал» бы успешный анализ пустым partial). Fallback: `aggregated_result` / `aggregated_payload` / полный список `agent_results` из контекста (без цепочки `a or b`, чтобы не терять пустой `{}`).
-2. Определяет ожидаемый тип результата (code_generation, visualization, research, transformation, data_extraction и т.д.).
-3. **Быстрая эвристика**: при `confidence` эвристики ≥ **0,9** результат валидации принимается **без** дополнительного вызова LLM.
-4. Иначе — углублённая проверка через LLM (при ошибке парсинга ответа — откат к эвристике).
-5. **Итоговое поле `valid`**: выводится из интегрального **`confidence`** (порог прохода **0,8**) с **жёстким провалом**, если среди `issues` есть severity **`critical`** или **`high`** (независимо от confidence).
+**Поведение класса** (для справки и юнит-тестов): при ручном вызове `process_task` агент по-прежнему может агрегировать `agent_results` (в т.ч. через **`aggregate_agent_results_for_validation`**), оценивать соответствие запросу (эвристика + LLM), возвращать **`validation`** с **`suggested_replan`**. Ранее оркестратор использовал это для replan после `valid=false` (лимиты **MULTI_AGENT_MAX_VALIDATION_RECOVERY**, **MAX_REPLAN_ATTEMPTS**); эта ветка **снята**.
 
-**Цикл**: после шагов плана — валидация → при `valid=false` и наличии `suggested_replan` Orchestrator вызывает **PlannerAgent.replan** (лимит попыток replan на стороне оркестратора: **3**).
+**Пошаговое планирование**: по-прежнему действуют `expand_step`, `revise_remaining` и адаптивный replan по сигналам контекста (см. **docs/PLANNING_DECOMPOSITION_STRATEGY.md**).
 
-**Анти-петля при пустом анализе**: эвристика трактует отсутствие `findings` у **analyst** (или findings с пустым `text`) как сигнал к повторному анализу. Чтобы не повторять один и тот же сценарий **три раза подряд**, **`suggested_replan`** на эту причину выдаётся только на **первой** итерации валидации (`iteration` ≤ 1 в задаче валидатора); на следующих итерациях возвращается **`valid=false` без `suggested_replan`**, и Orchestrator завершает работу с текущими результатами (см. константу лимита в `quality_gate.py`).
+**Per-step acceptance**: после успешного выполнения шага плана (`execute_step`, в т.ч. `context_filter`) оркестратор вызывает **`step_acceptance.py`**. Уровни: **ok** / **warn** / **fail**; трейс **`step_acceptance`**; заметки в **`pipeline_memory.open_questions`**; лог **`pipeline_context["_step_acceptance_log"]`**; в **`run_finish`** — **`step_acceptance_fail_count`** / **`step_acceptance_warn_count`**. Выключение: env **`MULTI_AGENT_STEP_ACCEPTANCE_ENABLED=false`**. Пропуск шага: **`"acceptance": {"skip": true}`**. Для **`partial`** уровни **fail** → **warn**. Имя **`codex`** в acceptance нормализуется к **`transform_codex`**.
 
-**Пошаговое планирование**: Orchestrator всегда работает в режиме пошаговой декомпозиции и пересмотра остатка плана после каждого шага (см. **docs/PLANNING_DECOMPOSITION_STRATEGY.md**). Planner поддерживает задачи `expand_step` (проверка атомарности шага) и `revise_remaining` (пересмотр оставшейся части плана с учётом контекста и инсайтов).
+**Критерии по агентам** (пороги см. константы в `step_acceptance.py`):
 
-**Выход**: `AgentPayload.validation` (valid, confidence, issues, recommendations, suggested_replan)
+| Агент (ключ шага) | fail | warn |
+| ----------------- | ---- | ---- |
+| **reporter** | нет ни `narrative.text`, ни непустого `tables` | только `tables` без narrative; или очень короткий narrative без таблиц |
+| **transform_codex** / **widget_codex** | нет ни одного `code_blocks[].code` непустого | `syntax_valid=false` у блока; несоответствие `language` роли (python vs html/js); непустой, но очень короткий narrative |
+| **structurizer** | — | нет таблиц и пустой narrative; есть `tables`, но без колонок/строк/`row_count`; часть таблиц «пустые» |
+| **analyst** | — | нет findings с непустым `text` и narrative короче порога; мало findings и narrative короче порога |
+| **discovery** | непустой `sources`, но ни у одной записи нет `url` | нет источников/ресурсов и пустой narrative; короткий narrative при наличии ссылок |
+| **research** | — | нет сигналов (URL/fetched в sources, narrative); есть URL, но ни одного `fetched` и очень короткий narrative |
+| **context_filter** | — | `filter_expression=null` и слишком короткий `metadata.reason` |
+| **validator** | — | per-step для `validator` не используется в типовом прогоне (финальный gate отключён) |
+| прочие (в т.ч. **planner** как шаг) | — | per-step проверки не заданы |
 
-> **Примечание**: файл `agents/validator.py` — отдельный **ValidatorAgent** для проверки сгенерированного Python-кода (синтаксис, безопасность, `df_result` и т.д.). **Валидация мультиагентного пайплайна** после Reporter в Orchestrator выполняется через **QualityGateAgent** (`quality_gate.py`, ключ `validator`), как в этом разделе.
+**Примечание**: для `status=error` проверка **не выполняется** (`skipped_error_status`).
+
+**Выход QualityGateAgent** (при прямом вызове): `AgentPayload.validation` (valid, confidence, issues, recommendations, suggested_replan).
+
+> **Примечание**: файл `agents/validator.py` — отдельный **ValidatorAgent** для проверки сгенерированного Python-кода трансформаций (синтаксис, безопасность, `df_result` и т.д.); к **QualityGateAgent** не относится.
 
 ### Типичные pipelines
 
 ```mermaid
 flowchart LR
     subgraph RESEARCH["Research Pipeline"]
-        P1[Planner] --> D1[Discovery] --> R1[Research] --> S1[Structurizer] --> A1[Analyst] --> REP1[Reporter] --> V1[Validator]
+        P1[Planner] --> D1[Discovery] --> R1[Research] --> S1[Structurizer] --> A1[Analyst] --> REP1[Reporter]
     end
 ```
 
 ```mermaid
 flowchart LR
     subgraph TRANSFORM["Transform Pipeline"]
-        P2[Planner] --> A2[Analyst] --> C2[Codex\nPython] --> REP2[Reporter] --> VAL[Validator]
+        P2[Planner] --> A2[Analyst] --> C2[Codex\nPython] --> REP2[Reporter]
     end
 ```
 
 ```mermaid
 flowchart LR
     subgraph WIDGET["Widget Pipeline"]
-        P3[Planner] --> A3[Analyst] --> C3[Codex\nHTML] --> REP3[Reporter] --> V3[Validator]
+        P3[Planner] --> A3[Analyst] --> C3[Codex\nHTML] --> REP3[Reporter]
     end
 ```
 
 ```mermaid
 flowchart LR
     subgraph DISCUSSION["Discussion Pipeline"]
-        P4[Planner] --> A4[Analyst] --> REP4[Reporter] --> V4[Validator]
+        P4[Planner] --> A4[Analyst] --> REP4[Reporter]
     end
 ```
 

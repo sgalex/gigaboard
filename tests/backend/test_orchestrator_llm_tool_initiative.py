@@ -89,7 +89,7 @@ def test_llm_initiated_tool_request_executes_without_force(env_llm_tool_no_force
     """
     captured: list = []
 
-    async def _fake_write_trace(cls, trace_data):
+    async def _fake_write_trace(cls, trace_data, *, force=False):
         captured.append(trace_data)
         return None
 
@@ -146,6 +146,7 @@ def test_llm_initiated_tool_request_executes_without_force(env_llm_tool_no_force
             tool_name="readTableListFromContentNodes",
             success=True,
             data={
+                "ok": True,
                 "content_node_id": "11111111-1111-1111-1111-111111111111",
                 "content_node_ids": ["11111111-1111-1111-1111-111111111111"],
                 "nodes": [],

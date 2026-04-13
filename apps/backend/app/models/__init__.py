@@ -1,5 +1,6 @@
 from .user import User, UserSession
 from .project import Project
+from .project_collaborator import ProjectCollaborator
 from .board import Board
 from .edge import Edge, EdgeType
 
@@ -42,6 +43,7 @@ __all__ = [
     "User",
     "UserSession",
     "Project",
+    "ProjectCollaborator",
     "Board",
     "Edge",
     "EdgeType",

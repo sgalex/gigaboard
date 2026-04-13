@@ -502,13 +502,15 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
 
     computeFiltered: async () => {
         const { context, activeFilters, isComputingFiltered } = get()
-        // Пересчёт только для досок (не для дашбордов)
-        if (!context || context.type !== 'board') return
-        if (isComputingFiltered) return  // уже считаем
+        if (!context || (context.type !== 'board' && context.type !== 'dashboard')) return
+        if (isComputingFiltered) return
 
         set({ isComputingFiltered: true })
         try {
-            const res = await filtersAPI.computeFiltered(context.id, activeFilters)
+            const res =
+                context.type === 'board'
+                    ? await filtersAPI.computeFiltered(context.id, activeFilters)
+                    : await filtersAPI.computeDashboardFiltered(context.id, activeFilters)
             const nodes = res.data.nodes as Record<string, FilteredNodeEntry>
             set({ filteredNodeData: nodes })
             const ids = get().initiatorContentNodeIds
@@ -521,7 +523,6 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
             }
         } catch (e) {
             console.error('Failed to compute filtered pipeline', e)
-            // При ошибке сбрасываем — карточки покажут исходные данные
             set({ filteredNodeData: null, initiatorFullNodeData: {} })
         } finally {
             set({ isComputingFiltered: false })

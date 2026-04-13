@@ -32,6 +32,7 @@ from ..models import (
     ProjectWidget,
 )
 from ..models.chat_message import ChatMessage, MessageRole
+from .project_access_service import ProjectAccessService
 
 logger = logging.getLogger(__name__)
 
@@ -251,13 +252,16 @@ class AIService:
         """
         dashboard_query = (
             select(Dashboard)
-            .join(Project, Project.id == Dashboard.project_id)
-            .where(Dashboard.id == dashboard_id, Project.user_id == user_id)
+            .where(Dashboard.id == dashboard_id)
             .options(selectinload(Dashboard.items))
         )
         dashboard_result = await self.db.execute(dashboard_query)
         dashboard = dashboard_result.scalar_one_or_none()
         if not dashboard:
+            return {"error": "Dashboard not found"}
+        if not await ProjectAccessService.get_project_if_accessible(
+            self.db, dashboard.project_id, user_id
+        ):
             return {"error": "Dashboard not found"}
 
         item_list = list(getattr(dashboard, "items", []) or [])

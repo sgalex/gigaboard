@@ -11,8 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_db
-from app.models import User
+from app.models import User, SourceNode
 from app.middleware import get_current_user
+from app.services.board_service import BoardService
 from app.services.source_node_service import SourceNodeService
 from app.schemas.source_node import (
     SourceNodeCreate,
@@ -25,6 +26,17 @@ from app.sources import SourceRegistry
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/source-nodes", tags=["source-nodes"])
+
+
+async def _require_source_edit(
+    db: AsyncSession, source_id: UUID, user_id: UUID
+) -> SourceNode:
+    """Просмотр id узла недостаточен — нужны права на изменение доски."""
+    src = await SourceNodeService.get_source_node(db, source_id)
+    if not src:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SourceNode not found")
+    await BoardService.get_board_for_edit(db, src.board_id, user_id)
+    return src
 
 
 # ============================================
@@ -42,7 +54,15 @@ async def get_source_vitrina():
     return SourceVitrinaResponse(items=items)
 
 
-@router.post("/", response_model=SourceNodeResponse, status_code=status.HTTP_201_CREATED)
+# Два path: при `redirect_slashes=False` только `""` совпадает с axios `/api/v1/source-nodes`;
+# отдельный `"/"` — для клиентов со слэшем (и для явности в OpenAPI).
+@router.post("", response_model=SourceNodeResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    response_model=SourceNodeResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
 async def create_source_node(
     source_data: SourceNodeCreate,
     db: AsyncSession = Depends(get_db),
@@ -53,6 +73,7 @@ async def create_source_node(
     Creates a data source point (file, database, API, prompt, stream, or manual).
     """
     try:
+        await BoardService.get_board_for_edit(db, source_data.board_id, current_user.id)
         logger.info(f"📥 create_source_node route - source_data.metadata: {source_data.metadata}")
         logger.info(f"📥 create_source_node route - source_data.metadata.name: '{source_data.metadata.get('name', '<NOT SET>>') if source_data.metadata else '<NONE>>'}'")
         source_node = await SourceNodeService.create_source_node(db, source_data)
@@ -76,6 +97,7 @@ async def get_source_node(
     source_node = await SourceNodeService.get_source_node(db, source_id)
     if not source_node:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SourceNode not found")
+    await BoardService.get_board(db, source_node.board_id, current_user.id)
     return source_node
 
 
@@ -86,6 +108,7 @@ async def get_board_sources(
     current_user: User = Depends(get_current_user)
 ):
     """Get all SourceNodes for a board."""
+    await BoardService.get_board(db, board_id, current_user.id)
     sources = await SourceNodeService.get_board_sources(db, board_id)
     return sources
 
@@ -98,6 +121,7 @@ async def update_source_node(
     current_user: User = Depends(get_current_user)
 ):
     """Update SourceNode configuration or metadata."""
+    await _require_source_edit(db, source_id, current_user.id)
     source_node = await SourceNodeService.update_source_node(db, source_id, update_data)
     if not source_node:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SourceNode not found")
@@ -111,6 +135,7 @@ async def delete_source_node(
     current_user: User = Depends(get_current_user)
 ):
     """Delete SourceNode."""
+    await _require_source_edit(db, source_id, current_user.id)
     deleted = await SourceNodeService.delete_source_node(db, source_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SourceNode not found")
@@ -136,6 +161,7 @@ async def refresh_source_node(
     and updates the SourceNode's content field.
     """
     try:
+        await _require_source_edit(db, source_id, current_user.id)
         source_node = await SourceNodeService.refresh_source_data(db, source_id)
         if not source_node:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SourceNode not found")
@@ -157,5 +183,6 @@ async def validate_source(
     
     Returns validation result with any configuration errors.
     """
+    await _require_source_edit(db, source_id, current_user.id)
     validation_result = await SourceNodeService.validate_source(db, source_id)
     return validation_result

@@ -1,11 +1,13 @@
 """WidgetNode service - business logic for widget nodes."""
 from uuid import UUID
-from sqlalchemy import select, delete, or_
+
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import WidgetNode, Board
+from app.models import WidgetNode
 from app.models.edge import Edge
 from app.schemas import WidgetNodeCreate, WidgetNodeUpdate
+from app.services.board_service import BoardService
 
 
 class WidgetNodeService:
@@ -19,13 +21,7 @@ class WidgetNodeService:
         data: WidgetNodeCreate
     ) -> WidgetNode:
         """Create a new WidgetNode."""
-        # Verify board exists and user has access
-        result = await db.execute(
-            select(Board).where(Board.id == board_id, Board.user_id == user_id)
-        )
-        board = result.scalar_one_or_none()
-        if not board:
-            raise ValueError("Board not found or access denied")
+        await BoardService.get_board_for_edit(db, board_id, user_id)
         
         # Create WidgetNode
         widget_node = WidgetNode(
@@ -44,14 +40,11 @@ class WidgetNodeService:
         user_id: UUID
     ) -> WidgetNode:
         """Get WidgetNode by ID."""
-        result = await db.execute(
-            select(WidgetNode)
-            .join(Board)
-            .where(WidgetNode.id == widget_node_id, Board.user_id == user_id)
-        )
+        result = await db.execute(select(WidgetNode).where(WidgetNode.id == widget_node_id))
         widget_node = result.scalar_one_or_none()
         if not widget_node:
             raise ValueError("WidgetNode not found or access denied")
+        await BoardService.get_board(db, widget_node.board_id, user_id)
         return widget_node
     
     @staticmethod
@@ -61,10 +54,10 @@ class WidgetNodeService:
         user_id: UUID
     ) -> list[WidgetNode]:
         """List all WidgetNodes for a board."""
+        await BoardService.get_board(db, board_id, user_id)
         result = await db.execute(
             select(WidgetNode)
-            .join(Board)
-            .where(WidgetNode.board_id == board_id, Board.user_id == user_id)
+            .where(WidgetNode.board_id == board_id)
             .order_by(WidgetNode.created_at)
         )
         return list(result.scalars().all())
@@ -78,7 +71,8 @@ class WidgetNodeService:
     ) -> WidgetNode:
         """Update WidgetNode."""
         widget_node = await WidgetNodeService.get_widget_node(db, widget_node_id, user_id)
-        
+        await BoardService.get_board_for_edit(db, widget_node.board_id, user_id)
+
         update_data = data.model_dump(exclude_unset=True)
         for key, value in update_data.items():
             setattr(widget_node, key, value)
@@ -95,6 +89,7 @@ class WidgetNodeService:
     ) -> None:
         """Delete WidgetNode and its referencing edges."""
         widget_node = await WidgetNodeService.get_widget_node(db, widget_node_id, user_id)
+        await BoardService.get_board_for_edit(db, widget_node.board_id, user_id)
         await db.execute(
             delete(Edge).where(
                 or_(

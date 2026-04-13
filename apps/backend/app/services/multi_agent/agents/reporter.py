@@ -304,9 +304,13 @@ class ReporterAgent(BaseAgent):
             response_style=response_style,
         )
         # Изменение #2: agent_results — list (см. docs/CONTEXT_ARCHITECTURE_PROPOSAL.md)
+        # Graph-primary: в context.agent_results — короткий хвост; полный бюджетный срез — _agent_results_selected_budget.
         # FIX: Читаем только результаты текущего плана, чтобы не подтягивать
         # стейл code_blocks из предыдущих replan-циклов.
         all_agent_results = (context or {}).get("agent_results", [])
+        budget_full = (context or {}).get("_agent_results_selected_budget")
+        if isinstance(budget_full, list) and budget_full:
+            all_agent_results = budget_full
         results_start = (context or {}).get("current_plan_results_start", 0)
         agent_results = all_agent_results[results_start:]
 
@@ -390,6 +394,11 @@ class ReporterAgent(BaseAgent):
         # ── LLM synthesis ────────────────────────────────────────────
         if narrative_parts or structured_tables_text or discovered_resources_text:
             parts_body: List[str] = []
+            graph_slice = str((context or {}).get("_context_graph_slice") or "").strip()
+            if graph_slice:
+                parts_body.append(
+                    "Обзор шагов пайплайна (context graph, компактный срез):\n\n" + graph_slice
+                )
             if narrative_parts:
                 parts_body.append(
                     "Текстовые фрагменты от агентов:\n\n" + "\n\n".join(narrative_parts)

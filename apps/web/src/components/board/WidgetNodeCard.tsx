@@ -1,6 +1,6 @@
 import { memo, useRef, useEffect, useState } from 'react'
 import { Handle, Position, NodeProps, NodeResizer } from '@xyflow/react'
-import { BarChart3, Code, Sparkles, RefreshCw, MoreVertical, Timer, TimerOff, Settings, Edit2, Maximize, Table2, Gauge, Type, Component, Filter, X } from 'lucide-react'
+import { BarChart3, Code, Sparkles, RefreshCw, MoreVertical, Timer, TimerOff, Settings, Edit2, Maximize, Table2, Gauge, Type, Component, Filter, X, Copy } from 'lucide-react'
 import { WidgetNode } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -17,12 +17,14 @@ import {
     DropdownMenu,
     DropdownMenuContent,
     DropdownMenuItem,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { widgetNodesAPI, contentNodesAPI } from '@/services/api'
 import { useBoardStore } from '@/store/boardStore'
 import { useFilterStore } from '@/store/filterStore'
 import { WidgetDialog } from './WidgetDialog'
+import { getViteApiBaseUrl } from '@/config/apiBase'
 import { buildWidgetApiScript, injectApiScript, unescapeWidgetHtml } from './widgetApiScript'
 import { operatorLabel, applyFiltersToTables } from '@/types/crossFilter'
 
@@ -47,10 +49,12 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
     const [isEditingName, setIsEditingName] = useState(false)
     const [tempName, setTempName] = useState('')
     const [isFullscreen, setIsFullscreen] = useState(false)
+    const [isDuplicating, setIsDuplicating] = useState(false)
 
     const showToast = useNotificationStore((state) => state.show)
     const fetchWidgetNodes = useBoardStore((state) => state.fetchWidgetNodes)
     const updateWidgetNode = useBoardStore((state) => state.updateWidgetNode)
+    const duplicateWidgetNode = useBoardStore((state) => state.duplicateWidgetNode)
 
     // Cross-filter integration
     const activeFilters = useFilterStore((state) => state.activeFilters)
@@ -184,6 +188,16 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
         }
     }
 
+    const handleDuplicate = async () => {
+        if (isDuplicating) return
+        setIsDuplicating(true)
+        try {
+            await duplicateWidgetNode(node)
+        } finally {
+            setIsDuplicating(false)
+        }
+    }
+
     // Open edit dialog
     const handleEdit = async () => {
         try {
@@ -240,6 +254,7 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
                 : undefined
         const activeFiltersParam = getFiltersQueryParam()
         const apiScript = sourceContentNodeId ? buildWidgetApiScript({
+            appOrigin: getViteApiBaseUrl(),
             contentNodeId: sourceContentNodeId,
             authToken,
             autoRefresh: node.auto_refresh || false,
@@ -310,6 +325,7 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
                 : undefined
         const activeFiltersParamFullscreen = getFiltersQueryParam()
         const apiScript = sourceContentNodeId ? buildWidgetApiScript({
+            appOrigin: getViteApiBaseUrl(),
             contentNodeId: sourceContentNodeId,
             authToken,
             autoRefresh: node.auto_refresh || false,
@@ -490,6 +506,11 @@ export const WidgetNodeCard = memo(({ data, selected, width, height }: NodeProps
                                         Настроить интервал
                                     </DropdownMenuItem>
                                 )}
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem onClick={handleDuplicate} disabled={isDuplicating}>
+                                    <Copy className="h-4 w-4 mr-2" />
+                                    Создать копию
+                                </DropdownMenuItem>
                             </DropdownMenuContent>
                         </DropdownMenu>
                     </div>

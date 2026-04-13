@@ -1,10 +1,12 @@
 """CommentNode service - business logic for comment nodes."""
 from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import CommentNode, Board
+from app.models import CommentNode
 from app.schemas import CommentNodeCreate, CommentNodeUpdate
+from app.services.board_service import BoardService
 
 
 class CommentNodeService:
@@ -18,13 +20,7 @@ class CommentNodeService:
         data: CommentNodeCreate
     ) -> CommentNode:
         """Create a new CommentNode."""
-        # Verify board exists and user has access
-        result = await db.execute(
-            select(Board).where(Board.id == board_id, Board.user_id == user_id)
-        )
-        board = result.scalar_one_or_none()
-        if not board:
-            raise ValueError("Board not found or access denied")
+        await BoardService.get_board_for_edit(db, board_id, user_id)
         
         # Create CommentNode
         comment_node = CommentNode(
@@ -44,14 +40,11 @@ class CommentNodeService:
         user_id: UUID
     ) -> CommentNode:
         """Get CommentNode by ID."""
-        result = await db.execute(
-            select(CommentNode)
-            .join(Board)
-            .where(CommentNode.id == comment_node_id, Board.user_id == user_id)
-        )
+        result = await db.execute(select(CommentNode).where(CommentNode.id == comment_node_id))
         comment_node = result.scalar_one_or_none()
         if not comment_node:
             raise ValueError("CommentNode not found or access denied")
+        await BoardService.get_board(db, comment_node.board_id, user_id)
         return comment_node
     
     @staticmethod
@@ -61,10 +54,10 @@ class CommentNodeService:
         user_id: UUID
     ) -> list[CommentNode]:
         """List all CommentNodes for a board."""
+        await BoardService.get_board(db, board_id, user_id)
         result = await db.execute(
             select(CommentNode)
-            .join(Board)
-            .where(CommentNode.board_id == board_id, Board.user_id == user_id)
+            .where(CommentNode.board_id == board_id)
             .order_by(CommentNode.created_at)
         )
         return list(result.scalars().all())
@@ -78,7 +71,8 @@ class CommentNodeService:
     ) -> CommentNode:
         """Update CommentNode."""
         comment_node = await CommentNodeService.get_comment_node(db, comment_node_id, user_id)
-        
+        await BoardService.get_board_for_edit(db, comment_node.board_id, user_id)
+
         update_data = data.model_dump(exclude_unset=True)
         for key, value in update_data.items():
             setattr(comment_node, key, value)
@@ -95,6 +89,7 @@ class CommentNodeService:
     ) -> None:
         """Delete CommentNode."""
         comment_node = await CommentNodeService.get_comment_node(db, comment_node_id, user_id)
+        await BoardService.get_board_for_edit(db, comment_node.board_id, user_id)
         await db.delete(comment_node)
         await db.commit()
     
@@ -107,7 +102,8 @@ class CommentNodeService:
     ) -> CommentNode:
         """Mark CommentNode as resolved/unresolved."""
         comment_node = await CommentNodeService.get_comment_node(db, comment_node_id, user_id)
-        
+        await BoardService.get_board_for_edit(db, comment_node.board_id, user_id)
+
         comment_node.is_resolved = is_resolved
         if is_resolved:
             from datetime import datetime

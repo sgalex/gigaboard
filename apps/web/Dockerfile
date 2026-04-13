@@ -1,13 +1,17 @@
-# Multi-stage: production build.
-# Контекст сборки — корень репозитория (npm workspaces: package.json + apps/web/package.json;
-# node_modules и lockfile на корне; copy-libs.cjs читает echarts/leaflet из корневого node_modules).
+# Multi-stage: production frontend (nginx + статический Vite build).
 #
-# После изменений в apps/web ОБЯЗАТЕЛЬНО пересоберите образ, иначе в nginx останется старый dist:
+# Контекст — корень репозитория: npm workspaces (корневой package-lock + apps/web/package.json),
+# copy-libs.cjs тянет echarts/leaflet из корневого node_modules.
+#
+# Пересборка после правок apps/web:
 #   docker compose build frontend && docker compose up -d frontend
-# При подозрении на кэш слоёв: docker compose build --no-cache frontend
+#   docker compose build --no-cache frontend   # при «залипании» старых слоёв
 #
-# VITE_API_URL: по умолчанию пусто — в бандле относительные /api (nginx проксирует на backend).
-# Задавайте в .env только если API на другом origin; после смены — пересборка frontend.
+# Runtime nginx (второй stage):
+# - nginx-forwarded-map.conf — X-Forwarded-Proto с внешнего TLS-прокси (не затирать на http между прокси и контейнером)
+# - nginx.conf — /api/ → backend, proxy_buffering off для NDJSON-стриминга, Socket.IO, /health
+#
+# VITE_API_URL в compose build-args: по умолчанию пусто; для прод на HTTPS не задавайте http://
 FROM node:20-alpine AS builder
 
 WORKDIR /workspace

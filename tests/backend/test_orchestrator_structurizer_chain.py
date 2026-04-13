@@ -10,7 +10,6 @@ from apps.backend.app.services.multi_agent.schemas.agent_payload import (
     Plan,
     PlanStep,
     Source,
-    ValidationResult,
 )
 
 
@@ -100,26 +99,14 @@ class _FakeReporterAgent:
         )
 
 
-class _FakeValidatorPassAgent:
-    async def process_task(self, task, context):
-        return AgentPayload.success(
-            agent="validator",
-            validation=ValidationResult(
-                valid=True,
-                confidence=0.9,
-                message="ok",
-            ),
-        )
-
-
-def test_structurizer_empty_tables_triggers_revise_remaining_and_validation(monkeypatch):
+def test_structurizer_empty_tables_triggers_revise_remaining(monkeypatch):
     captured = []
 
-    async def _fake_write_trace(cls, trace_data):
+    async def _fake_write_trace(cls, trace_data, **kwargs):
         captured.append(trace_data)
         return None
 
-    monkeypatch.setattr(MultiAgentTraceLogger, "_enabled", True)
+    monkeypatch.setenv("MULTI_AGENT_TRACE_ENABLED", "true")
     monkeypatch.setattr(
         MultiAgentTraceLogger,
         "write_trace",
@@ -128,7 +115,7 @@ def test_structurizer_empty_tables_triggers_revise_remaining_and_validation(monk
 
     planner = _ScenarioPlannerAgent()
     orchestrator = Orchestrator(
-        enable_agents=["planner", "research", "structurizer", "reporter", "validator"]
+        enable_agents=["planner", "research", "structurizer", "reporter"]
     )
     orchestrator.is_initialized = True
     orchestrator.agents = {
@@ -136,7 +123,6 @@ def test_structurizer_empty_tables_triggers_revise_remaining_and_validation(monk
         "research": _FakeResearchAgent(),
         "structurizer": _FakeStructurizerEmptyAgent(),
         "reporter": _FakeReporterAgent(),
-        "validator": _FakeValidatorPassAgent(),
     }
     orchestrator.message_bus = None
 
@@ -171,7 +157,4 @@ def test_structurizer_empty_tables_triggers_revise_remaining_and_validation(monk
     )
     assert (structurizer_end.get("details") or {}).get("tables") == 0
 
-    validation_passed = next(
-        e for e in events if e.get("event") == "validation_passed"
-    )
-    assert validation_passed.get("status") == "success"
+    assert not any(e.get("event") == "validation_passed" for e in events)

@@ -125,10 +125,39 @@ def _get_orchestrator_or_503():
     return orch
 
 
+async def _require_content_view(
+    db: AsyncSession, content_id: UUID, user_id: UUID
+):
+    """Доступ к узлу только при праве просмотра проекта/доски."""
+    node = await ContentNodeService.get_content_node(db, content_id)
+    if not node:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ContentNode not found",
+        )
+    await BoardService.get_board(db, node.board_id, user_id)
+    return node
+
+
+async def _require_content_edit(
+    db: AsyncSession, content_id: UUID, user_id: UUID
+):
+    """Изменение узла и тяжёлые операции — только не viewer."""
+    node = await ContentNodeService.get_content_node(db, content_id)
+    if not node:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ContentNode not found",
+        )
+    await BoardService.get_board_for_edit(db, node.board_id, user_id)
+    return node
+
+
 async def _collect_content_nodes_data(
     db: AsyncSession,
     primary_content_id: UUID,
-    selected_node_ids: list[str] | None = None,
+    selected_node_ids: list[str] | None,
+    user_id: UUID,
 ) -> tuple[list[dict], dict, str, str]:
     """
     Collect data from ContentNodes for controller processing.
@@ -152,6 +181,7 @@ async def _collect_content_nodes_data(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"ContentNode {primary_content_id} not found"
         )
+    await BoardService.get_board_for_edit(db, primary_node.board_id, user_id)
     board_id = str(primary_node.board_id)
 
     nodes_data: list[dict] = []
@@ -171,7 +201,14 @@ async def _collect_content_nodes_data(
         else:
             node = await ContentNodeService.get_content_node(db, nid)
 
-        if not node or not node.content:
+        if not node:
+            continue
+        if node.board_id != primary_node.board_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Все выбранные узлы должны принадлежать одной доске",
+            )
+        if not node.content:
             continue
 
         if "text" in node.content and node.content["text"]:
@@ -222,7 +259,9 @@ async def _collect_content_nodes_data(
 # ══════════════════════════════════════════════════════════════════════
 
 
-@router.post("/", response_model=ContentNodeResponse, status_code=status.HTTP_201_CREATED)
+# Пустой path — маршрут без завершающего «/», совпадает с axios `/api/v1/content-nodes`.
+# `@router.post("/")` даёт только `/api/v1/content-nodes/`; при redirect_slashes=False POST без слэша → 404.
+@router.post("", response_model=ContentNodeResponse, status_code=status.HTTP_201_CREATED)
 async def create_content_node(
     content_data: ContentNodeCreate,
     db: AsyncSession = Depends(get_db),
@@ -233,6 +272,7 @@ async def create_content_node(
     Contains processed data (text + tables) with full data lineage tracking.
     """
     try:
+        await BoardService.get_board_for_edit(db, content_data.board_id, current_user.id)
         content_node = await ContentNodeService.create_content_node(db, content_data)
         await db.commit()
         await db.refresh(content_node)
@@ -256,9 +296,7 @@ async def get_content_node(
     Supports optional cross-filtering via `?filters=<encoded JSON>`.
     See docs/CROSS_FILTER_SYSTEM.md
     """
-    content_node = await ContentNodeService.get_content_node(db, content_id)
-    if not content_node:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ContentNode not found")
+    content_node = await _require_content_view(db, content_id, current_user.id)
 
     # Apply cross-filters if provided
     if filters and content_node.content and content_node.content.get("tables"):
@@ -324,6 +362,7 @@ async def get_board_contents(
     current_user: User = Depends(get_current_user)
 ):
     """Get all ContentNodes for a board."""
+    await BoardService.get_board(db, board_id, current_user.id)
     contents = await ContentNodeService.get_board_contents(db, board_id)
     return contents
 
@@ -336,6 +375,7 @@ async def update_content_node(
     current_user: User = Depends(get_current_user)
 ):
     """Update ContentNode data or metadata."""
+    await _require_content_edit(db, content_id, current_user.id)
     content_node = await ContentNodeService.update_content_node(db, content_id, update_data)
     if not content_node:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ContentNode not found")
@@ -349,6 +389,7 @@ async def delete_content_node(
     current_user: User = Depends(get_current_user)
 ):
     """Delete ContentNode."""
+    await _require_content_edit(db, content_id, current_user.id)
     deleted = await ContentNodeService.delete_content_node(db, content_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ContentNode not found")
@@ -384,7 +425,7 @@ async def preview_transformation(
 
     try:
         nodes_data, _input_data, text_content, board_id = await _collect_content_nodes_data(
-            db, content_id, selected_node_ids
+            db, content_id, selected_node_ids, current_user.id
         )
 
         # V2 controller — preview only (no execution)
@@ -468,28 +509,48 @@ async def test_transformation(
     selected_node_ids = params.get("selected_node_ids", [str(content_id)])
     if isinstance(selected_node_ids, str):
         selected_node_ids = [selected_node_ids]
-    
+
+    primary_cn = await ContentNodeService.get_content_node(db, content_id)
+    if not primary_cn:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ContentNode not found",
+        )
+    await BoardService.get_board_for_edit(db, primary_cn.board_id, current_user.id)
+
     try:
         # Collect input data from all selected nodes
         input_data = {}
         text_content = ""  # For text-only ContentNodes
-        
+
+        from app.services.source_node_service import SourceNodeService
+
         for node_id_str in selected_node_ids:
             try:
                 node_id = UUID(node_id_str) if isinstance(node_id_str, str) else node_id_str
             except ValueError:
                 continue
-            
-            node = await ContentNodeService.get_content_node(db, node_id)
-            node_content = node.content if node else None
 
-            # Fallback: try SourceNode if ContentNode not found
-            if not node_content:
-                from app.services.source_node_service import SourceNodeService
+            node = await ContentNodeService.get_content_node(db, node_id)
+            node_content = None
+            if node:
+                if node.board_id != primary_cn.board_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Все выбранные узлы должны принадлежать одной доске",
+                    )
+                node_content = node.content
+            else:
                 source_node = await SourceNodeService.get_source_node(db, node_id)
-                if source_node and source_node.content:
+                if source_node:
+                    if source_node.board_id != primary_cn.board_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Все выбранные узлы должны принадлежать одной доске",
+                        )
                     node_content = source_node.content
-                    logger.info(f"📦 Using SourceNode fallback for {node_id} in test")
+                    if node_content:
+                        logger.info(f"📦 Using SourceNode fallback for {node_id} in test")
 
             if node_content:
                 # Collect text content
@@ -603,7 +664,7 @@ async def iterative_transformation(
 
     try:
         nodes_data, input_data, text_content, board_id = await _collect_content_nodes_data(
-            db, content_id, selected_node_ids
+            db, content_id, selected_node_ids, current_user.id
         )
 
         # V2 controller — generates + executes
@@ -849,7 +910,8 @@ async def execute_transformation(
         source_node = await ContentNodeService.get_content_node(db, content_id)
         if not source_node:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ContentNode not found")
-        
+        await BoardService.get_board_for_edit(db, source_node.board_id, current_user.id)
+
         # Collect all source nodes for input data
         all_source_nodes = []
         for node_id_str in selected_node_ids:
@@ -858,9 +920,14 @@ async def execute_transformation(
             except ValueError:
                 logger.warning(f"Invalid UUID format: {node_id_str}")
                 continue
-            
+
             node = await ContentNodeService.get_content_node(db, node_id)
             if node and node.content:
+                if node.board_id != source_node.board_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Все исходные узлы должны принадлежать одной доске",
+                    )
                 all_source_nodes.append(node)
         
         if not all_source_nodes:
@@ -956,7 +1023,12 @@ async def execute_transformation(
                 
                 if not existing_node:
                     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Target node {target_node_id} not found")
-                
+                if existing_node.board_id != source_node.board_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Целевой узел должен принадлежать той же доске",
+                    )
+
                 logger.info(f"🔄 UPDATE mode: updating existing node {target_node_id}")
                 
                 # Update content and lineage
@@ -1230,6 +1302,7 @@ async def transform_content_node(
         source_node = await ContentNodeService.get_content_node(db, content_id)
         if not source_node:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ContentNode not found")
+        await BoardService.get_board_for_edit(db, source_node.board_id, current_user.id)
 
         # 2. Generate code via V2 controller (skip_execution — route handles execution + DB save)
         orchestrator = _get_orchestrator_or_503()
@@ -1391,6 +1464,32 @@ async def transform_content(
         result = pd.merge(df0, df1, on='id')
     """
     try:
+        if not request.source_content_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="source_content_ids is required",
+            )
+        first = await ContentNodeService.get_content_node(db, request.source_content_ids[0])
+        if not first:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Source ContentNode not found",
+            )
+        board_id = first.board_id
+        for cid in request.source_content_ids[1:]:
+            cn = await ContentNodeService.get_content_node(db, cid)
+            if not cn:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"ContentNode {cid} not found",
+                )
+            if cn.board_id != board_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Все исходные узлы должны быть на одной доске",
+                )
+        await BoardService.get_board_for_edit(db, board_id, current_user.id)
+
         new_content = await ContentNodeService.transform_content(
             db,
             request.source_content_ids,
@@ -1427,6 +1526,7 @@ async def get_table(
     
     ContentNode can contain multiple tables. This endpoint retrieves a specific one by ID.
     """
+    await _require_content_view(db, request.content_node_id, current_user.id)
     table = await ContentNodeService.get_table(db, request.content_node_id, request.table_id)
     if not table:
         raise HTTPException(
@@ -1449,6 +1549,7 @@ async def get_lineage_chain(
     Returns the complete chain from original SourceNode to current ContentNode,
     including all intermediate transformations.
     """
+    await _require_content_view(db, content_id, current_user.id)
     lineage_chain = await ContentNodeService.get_lineage_chain(db, content_id)
     return lineage_chain
 
@@ -1463,6 +1564,7 @@ async def get_downstream_contents(
     
     Useful for understanding impact of changes and for replay operations.
     """
+    await _require_content_view(db, content_id, current_user.id)
     downstream = await ContentNodeService.get_downstream_contents(db, content_id)
     return downstream
 
@@ -1495,6 +1597,7 @@ async def create_visualization(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"ContentNode {content_id} not found"
             )
+        await BoardService.get_board_for_edit(db, content_node.board_id, current_user.id)
 
         content_data = content_node.content or {}
         selected_node_ids = [str(content_id)]
@@ -1631,13 +1734,7 @@ async def visualize_content_iterative(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"ContentNode {content_id} not found"
             )
-
-        board = await BoardService.get_board(db, content_node.board_id, current_user.id)
-        if not board:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this board"
-            )
+        await BoardService.get_board_for_edit(db, content_node.board_id, current_user.id)
 
         content_data = content_node.content or {}
         selected_node_ids = [str(content_id)]
@@ -1717,13 +1814,7 @@ async def visualize_content_multiagent(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"ContentNode {content_id} not found"
             )
-
-        board = await BoardService.get_board(db, content_node.board_id, current_user.id)
-        if not board:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this board"
-            )
+        await BoardService.get_board_for_edit(db, content_node.board_id, current_user.id)
 
         content_data = content_node.content or {}
         selected_node_ids = [str(content_id)]
@@ -1815,9 +1906,10 @@ async def visualize_content_multiagent_stream(
                 await queue.put({"type": "error", "error": f"ContentNode {content_id} not found"})
                 return
 
-            board = await BoardService.get_board(db, content_node.board_id, current_user.id)
-            if not board:
-                await queue.put({"type": "error", "error": "Access denied to this board"})
+            try:
+                await BoardService.get_board_for_edit(db, content_node.board_id, current_user.id)
+            except HTTPException as e:
+                await queue.put({"type": "error", "error": str(e.detail)})
                 return
 
             content_data = content_node.content or {}
@@ -1927,7 +2019,7 @@ async def transform_content_multiagent(
     try:
         # Collect data using helper
         nodes_data, input_data, text_content, board_id = await _collect_content_nodes_data(
-            db, content_id, selected_node_ids
+            db, content_id, selected_node_ids, current_user.id
         )
 
         # V2 controller
@@ -2043,7 +2135,7 @@ async def transform_content_multiagent_stream(
         try:
             await queue.put({"type": "start"})
             nodes_data, input_data, text_content, board_id = await _collect_content_nodes_data(
-                db, content_id, selected_node_ids
+                db, content_id, selected_node_ids, current_user.id
             )
 
             orchestrator = _get_orchestrator_or_503()
@@ -2150,13 +2242,7 @@ async def analyze_widget_suggestions(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"ContentNode {content_id} not found"
             )
-
-        board = await BoardService.get_board(db, content_node.board_id, current_user.id)
-        if not board:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this board"
-            )
+        await BoardService.get_board_for_edit(db, content_node.board_id, current_user.id)
 
         content_data = content_node.content or {}
         _cn_meta = content_node.node_metadata or {}
@@ -2216,6 +2302,7 @@ async def analyze_transform_suggestions(
         content_node = await ContentNodeService.get_content_node(db, content_id)
         if not content_node:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ContentNode not found")
+        await BoardService.get_board_for_edit(db, content_node.board_id, current_user.id)
 
         chat_history = request.get("chat_history", [])
         current_code = request.get("current_code")
@@ -2332,6 +2419,7 @@ async def get_node_dimension_mappings(
 
     See docs/CROSS_FILTER_SYSTEM.md
     """
+    await _require_content_view(db, content_id, current_user.id)
     mappings = await DimensionService.get_mappings_for_node(db, content_id)
     return {"mappings": mappings}
 
@@ -2356,6 +2444,7 @@ async def detect_dimensions(
     node = await ContentNodeService.get_content_node(db, content_id)
     if not node:
         raise HTTPException(status_code=404, detail="ContentNode not found")
+    await BoardService.get_board_for_edit(db, node.board_id, current_user.id)
 
     tables = (node.content or {}).get("tables", [])
     if not tables:

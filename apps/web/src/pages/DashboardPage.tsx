@@ -18,6 +18,12 @@ import { filesAPI, getFileImageUrl } from '@/services/api'
 import { notify } from '@/store/notificationStore'
 import { Button } from '@/components/ui/button'
 import {
+    Tooltip,
+    TooltipContent,
+    TooltipProvider,
+    TooltipTrigger,
+} from '@/components/ui/tooltip'
+import {
     DropdownMenu,
     DropdownMenuContent,
     DropdownMenuItem,
@@ -70,7 +76,10 @@ export function DashboardPage() {
         isLoading, isSaving,
     } = useDashboardStore()
     const { widgets, tables, fetchWidgets, fetchTables } = useLibraryStore()
-    const { setContext, loadDimensions, loadPresets, applyPreset, presets } = useFilterStore()
+    const {
+        setContext, loadDimensions, loadPresets, applyPreset, presets,
+        activeFilters, setInitiatorContentNodeIds, getConditionsByInitiator,
+    } = useFilterStore()
 
     const [showGrid, setShowGrid] = useState(true)
     const [zoom, setZoom] = useState(1)
@@ -150,6 +159,24 @@ export function DashboardPage() {
         }
         return () => setContext(null)
     }, [projectId, dashboardId, setContext])
+
+    // Виджеты-инициаторы (элемент дашборда) — полные данные для подсветки сегмента (как на доске)
+    useEffect(() => {
+        if (!dashboardId) return
+        const items = currentDashboard?.items ?? []
+        const ids: string[] = []
+        for (const it of items) {
+            if (it.item_type !== 'widget' || !it.source_id) continue
+            const w = widgets.find((x) => x.id === it.source_id)
+            const sourceCn =
+                w?.source_content_node_id
+                ?? (w?.config as Record<string, unknown> | undefined)?.sourceContentNodeId
+            if (typeof sourceCn === 'string' && getConditionsByInitiator(it.id).length > 0) {
+                ids.push(sourceCn)
+            }
+        }
+        setInitiatorContentNodeIds(ids)
+    }, [dashboardId, currentDashboard?.items, widgets, activeFilters, getConditionsByInitiator, setInitiatorContentNodeIds])
 
     // Auto-apply default preset on dashboard load
     useEffect(() => {
@@ -369,30 +396,52 @@ export function DashboardPage() {
                     <div className="w-px h-6 bg-border mx-1" />
 
                     {/* Editor mode toggle */}
-                    <div className="flex items-center gap-0.5 bg-muted rounded-md p-0.5">
-                        <Button
-                            variant={editorMode === 'edit' ? 'default' : 'ghost'}
-                            size="sm"
-                            className="h-7 gap-1 px-2"
-                            onClick={() => { setEditorMode('edit'); setShowGrid(true) }}
-                        >
-                            <Pencil className="h-3.5 w-3.5" />
-                            <span className="text-xs">Редактор</span>
-                        </Button>
-                        <Button
-                            variant={editorMode === 'view' ? 'default' : 'ghost'}
-                            size="sm"
-                            className="h-7 gap-1 px-2"
-                            onClick={() => {
-                                setEditorMode('view')
-                                deselectAll()
-                                setTimeout(() => handleCaptureThumbnail(true), 150)
-                            }}
-                        >
-                            <Eye className="h-3.5 w-3.5" />
-                            <span className="text-xs">Просмотр</span>
-                        </Button>
-                    </div>
+                    <TooltipProvider delayDuration={400}>
+                        <div className="flex items-center gap-0.5 bg-muted rounded-md p-0.5">
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Button
+                                        variant={editorMode === 'edit' ? 'default' : 'ghost'}
+                                        size="icon"
+                                        className="h-7 w-7"
+                                        aria-label="Редактор"
+                                        onClick={() => { setEditorMode('edit'); setShowGrid(true) }}
+                                    >
+                                        <Pencil className="h-3.5 w-3.5" />
+                                    </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="bottom">
+                                    <p className="font-medium">Редактор</p>
+                                    <p className="text-xs text-muted-foreground mt-1 leading-snug">
+                                        Перемещение и настройка элементов дашборда; отображается сетка для выравнивания.
+                                    </p>
+                                </TooltipContent>
+                            </Tooltip>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Button
+                                        variant={editorMode === 'view' ? 'default' : 'ghost'}
+                                        size="icon"
+                                        className="h-7 w-7"
+                                        aria-label="Просмотр"
+                                        onClick={() => {
+                                            setEditorMode('view')
+                                            deselectAll()
+                                            setTimeout(() => handleCaptureThumbnail(true), 150)
+                                        }}
+                                    >
+                                        <Eye className="h-3.5 w-3.5" />
+                                    </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="bottom">
+                                    <p className="font-medium">Просмотр</p>
+                                    <p className="text-xs text-muted-foreground mt-1 leading-snug">
+                                        Вид без режима редактирования, как у зрителя; при переключении обновляется миниатюра дашборда.
+                                    </p>
+                                </TooltipContent>
+                            </Tooltip>
+                        </div>
+                    </TooltipProvider>
 
                     {/* Open in a new window (view mode with shareable URL) */}
                     <Button

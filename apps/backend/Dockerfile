@@ -1,5 +1,7 @@
 # Backend Dockerfile for GigaBoard
-# Сборка из корня репозитория: docker build -f apps/backend/Dockerfile .
+# Сборка из корня репозитория:
+#   docker build -f apps/backend/Dockerfile .
+#   docker compose build backend
 #
 # В docker-compose.yml (production) код app/ КОПИРУЕТСЯ в образ — bind-mount нет.
 # Изменения в apps/backend/app попадут в контейнер только после:

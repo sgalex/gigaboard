@@ -40,6 +40,8 @@ GIGACHAT_MODELS: list[dict[str, str]] = [
 AGENT_KEYS = [
     "planner", "discovery", "research", "structurizer", "analyst",
     "transform_codex", "widget_codex", "reporter", "validator",
+    # Служебные ключи привязки LLM (не шаги плана), см. LLM_CONFIGURATION_CONCEPT.md
+    "context_graph_compression",
 ]
 
 

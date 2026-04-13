@@ -8,8 +8,9 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 from fastapi import HTTPException, status
 
-from app.models import Project, Dashboard, DashboardItem, DashboardShare
+from app.models import Dashboard, DashboardShare
 from app.schemas.dashboard import DashboardShareCreate
+from app.services.project_access_service import ProjectAccessService
 
 
 def _hash_password(password: str) -> str:
@@ -25,15 +26,11 @@ class ShareService:
     async def create_or_update_share(
         db: AsyncSession, dashboard_id: UUID, user_id: UUID, data: DashboardShareCreate
     ) -> DashboardShare:
-        # Verify dashboard ownership
-        result = await db.execute(
-            select(Dashboard)
-            .join(Project, Project.id == Dashboard.project_id)
-            .where(Dashboard.id == dashboard_id, Project.user_id == user_id)
-        )
+        result = await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))
         dashboard = result.scalar_one_or_none()
         if not dashboard:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
+        await ProjectAccessService.require_project_edit_access(db, dashboard.project_id, user_id)
 
         # Check for existing share
         result = await db.execute(
@@ -76,14 +73,15 @@ class ShareService:
         db: AsyncSession, dashboard_id: UUID, user_id: UUID
     ) -> DashboardShare:
         result = await db.execute(
-            select(DashboardShare)
+            select(DashboardShare, Dashboard.project_id)
             .join(Dashboard, Dashboard.id == DashboardShare.dashboard_id)
-            .join(Project, Project.id == Dashboard.project_id)
-            .where(DashboardShare.dashboard_id == dashboard_id, Project.user_id == user_id)
+            .where(DashboardShare.dashboard_id == dashboard_id)
         )
-        share = result.scalar_one_or_none()
-        if not share:
+        row = result.one_or_none()
+        if not row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Share not found")
+        share, project_id = row[0], row[1]
+        await ProjectAccessService.require_project_edit_access(db, project_id, user_id)
         return share
 
     @staticmethod

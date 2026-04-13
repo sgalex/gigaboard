@@ -10,6 +10,8 @@
  * - API_BASE origin resolution that works in about:blank iframe contexts
  */
 export function buildWidgetApiScript(params: {
+    /** Origin SPA — тот же, что UI; запросы к `/api/...` с того же хоста (прокси Vite/nginx). */
+    appOrigin: string
     contentNodeId: string
     authToken: string
     autoRefresh: boolean
@@ -23,7 +25,18 @@ export function buildWidgetApiScript(params: {
     /** Отфильтрованные таблицы (подмножество строк по активным фильтрам) — виджет сопоставляет с полными данными и определяет выделение без activeFilters */
     filteredTablesForHighlight?: Array<{ name: string; columns?: any[]; rows: any[] }>
 }): string {
-    const { contentNodeId, authToken, autoRefresh, refreshInterval, widgetId, activeFilters, precomputedTables, dataStack, filteredTablesForHighlight } = params
+    const {
+        appOrigin,
+        contentNodeId,
+        authToken,
+        autoRefresh,
+        refreshInterval,
+        widgetId,
+        activeFilters,
+        precomputedTables,
+        dataStack,
+        filteredTablesForHighlight,
+    } = params
 
     // Safely escape the filters string for embedding in JS
     const filtersLiteral = activeFilters ? `'${activeFilters.replace(/'/g, "\\'")}'` : 'null'
@@ -42,20 +55,20 @@ export function buildWidgetApiScript(params: {
             window.WIDGET_ID = ${widgetId != null ? `'${String(widgetId).replace(/'/g, "\\'")}'` : 'null'};
             window.__PRECOMPUTED_TABLES = ${precomputedLiteral};
             window.__DATA_STACK = ${dataStackLiteral};
-            // Resolve API_BASE: about:blank iframes may have "null" origin
-            window.API_BASE = (function() {
-                var origin = window.location.origin;
-                if (origin && origin !== 'null') return origin;
-                // Fallback: try ancestorOrigins (Chrome) or parent origin
+            // API_BASE задаёт родительское приложение (тот же origin, что UI); в about:blank iframe origin может быть "null"
+            window.API_BASE = ${JSON.stringify(appOrigin)};
+            (function() {
+                var o = window.location.origin;
+                if (o && o !== 'null') return;
                 try {
                     if (window.location.ancestorOrigins && window.location.ancestorOrigins.length > 0) {
-                        return window.location.ancestorOrigins[0];
+                        window.API_BASE = window.location.ancestorOrigins[0];
+                        return;
                     }
                     if (window.parent && window.parent.location.origin) {
-                        return window.parent.location.origin;
+                        window.API_BASE = window.parent.location.origin;
                     }
                 } catch(e) {}
-                return 'http://localhost:5173';
             })();
             window.AUTO_REFRESH_ENABLED = ${autoRefresh};
             window.REFRESH_INTERVAL = ${refreshInterval};

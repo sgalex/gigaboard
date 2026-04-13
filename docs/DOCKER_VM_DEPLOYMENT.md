@@ -270,6 +270,7 @@ docker compose exec postgres pg_dump -U gigaboard gigaboard > backup_$(date +%Y%
 | **502 / нет API с браузера** | `docker compose ps`, логи `backend`; CORS — `CORS_ORIGINS` должен включать Origin браузера |
 | **307 на POST, затем ERR_CONNECTION_REFUSED** | Редирект trailing slash строил URL на `backend:8000`. В образе включены `uvicorn --proxy-headers`, nginx передаёт `Host` / `X-Forwarded-Host` (`$http_host`). Пересоберите `frontend` + `backend` |
 | **413 при загрузке файла (Excel и др.)** | Nginx по умолчанию режет тело запроса (**1 MB**). В `apps/web/nginx.conf` задано `client_max_body_size` (согласуйте с `STORAGE_MAX_FILE_SIZE_MB`). После правки: `docker compose build frontend && docker compose up -d frontend`. Внешний nginx на ВМ — см. `res/nginx-vm-gigaboard.conf` (`client_max_body_size`) |
+| **Прогресс ИИ / стрим «застыл» на ВМ** | Внешний nginx перед Docker часто **буферизует** ответ (`proxy_buffering on` по умолчанию) — NDJSON доходит одним куском в конце. В `location /` добавьте `proxy_buffering off; proxy_cache off; proxy_request_buffering off;` (см. актуальный [`res/nginx-vm-gigaboard.conf`](../res/nginx-vm-gigaboard.conf)), затем `sudo nginx -t && sudo systemctl reload nginx`. Внутри образа фронта то же для `/api/` уже в `apps/web/nginx.conf` |
 | **Миграции** | Логи старта backend; локально: `cd apps/backend/migrations && uv run alembic heads` |
 | **Чистая переустановка БД** | `docker compose down` и удаление тома `*_postgres_data` (**удалит данные**) |
 

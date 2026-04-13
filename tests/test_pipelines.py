@@ -93,7 +93,7 @@ def _setup_gigachat_responses(mock_gigachat, responses: list[str]):
 class TestResearchPipeline:
     """
     Full research pipeline:
-    Planner → structurizer → analyst → reporter → validator
+    Planner → structurizer → analyst → reporter
     """
 
     @pytest.mark.asyncio
@@ -101,7 +101,7 @@ class TestResearchPipeline:
         """Orchestrator should run full research pipeline end-to-end."""
         gc = _make_mock_gigachat()
 
-        # Responses: planner, structurizer, analyst, reporter, validator,
+        # Responses: planner, structurizer, analyst, reporter
         #            (+ replan query — but adaptive_planning=False skips it)
         _setup_gigachat_responses(gc, [
             # 1. Planner
@@ -129,18 +129,11 @@ class TestResearchPipeline:
             }),
             # 4. Reporter
             "## Sales Report\n\nEU sales are 2x higher than US sales.",
-            # 5. Validator
-            json.dumps({
-                "valid": True,
-                "confidence": 0.95,
-                "message": "Result matches request",
-                "issues": [],
-            }),
         ])
 
         orch = await _setup_orchestrator(
             gc,
-            ["planner", "structurizer", "analyst", "reporter", "validator"],
+            ["planner", "structurizer", "analyst", "reporter"],
         )
 
         result = await orch.process_request(
@@ -170,7 +163,7 @@ class TestResearchPipeline:
 class TestTransformPipeline:
     """
     Transform pipeline:
-    TransformationController → Orchestrator → planner → codex → validator
+    TransformationController → Orchestrator → planner → codex
     """
 
     @pytest.mark.asyncio
@@ -195,16 +188,9 @@ class TestTransformPipeline:
                 "description": "Filter rows where amount > 100",
                 "output_schema": [{"name": "amount", "type": "float"}],
             }),
-            # 3. Validator
-            json.dumps({
-                "valid": True,
-                "confidence": 0.9,
-                "message": "OK",
-                "issues": [],
-            }),
         ])
 
-        orch = await _setup_orchestrator(gc, ["planner", "transform_codex", "validator"])
+        orch = await _setup_orchestrator(gc, ["planner", "transform_codex"])
 
         from apps.backend.app.services.controllers.transformation_controller import (
             TransformationController,
@@ -278,7 +264,7 @@ class TestTransformPipeline:
 class TestWidgetPipeline:
     """
     Widget pipeline:
-    WidgetController → Orchestrator → planner → codex → validator
+    WidgetController → Orchestrator → planner → codex
     """
 
     @pytest.mark.asyncio
@@ -302,23 +288,18 @@ class TestWidgetPipeline:
                     }},
                 ],
             }),
-            # 2. TransformCodex
+            # 2. expand_step (перед выполнением шага)
+            json.dumps({"atomic": True}),
+            # 3. TransformCodex
             json.dumps({
                 "widget_code": widget_html,
                 "widget_name": "Sales Chart",
                 "widget_type": "bar",
                 "description": "Bar chart of sales by region",
             }),
-            # 3. Validator
-            json.dumps({
-                "valid": True,
-                "confidence": 0.9,
-                "message": "OK",
-                "issues": [],
-            }),
         ])
 
-        orch = await _setup_orchestrator(gc, ["planner", "transform_codex", "validator"])
+        orch = await _setup_orchestrator(gc, ["planner", "transform_codex"])
 
         from apps.backend.app.services.controllers.widget_controller import (
             WidgetController,

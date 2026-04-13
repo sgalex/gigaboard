@@ -1,12 +1,13 @@
 """Edge service for Source-Content Node architecture."""
 from typing import List, Optional
 from uuid import UUID
-from sqlalchemy import select, and_, func
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models import CommentNode, ContentNode, SourceNode, WidgetNode
 from app.models.edge import Edge, EdgeType
-from app.models import SourceNode, ContentNode, WidgetNode, CommentNode, Board
 from app.schemas.edge import EdgeCreate, EdgeUpdate
+from app.services.board_service import BoardService
 
 
 class EdgeService:
@@ -20,18 +21,7 @@ class EdgeService:
         user_id: UUID
     ) -> Edge:
         """Create a new edge between nodes."""
-        # Verify board ownership
-        board_result = await db.execute(
-            select(Board).where(
-                and_(
-                    Board.id == board_id,
-                    Board.user_id == user_id
-                )
-            )
-        )
-        board = board_result.scalar_one_or_none()
-        if not board:
-            raise ValueError("Board not found or access denied")
+        await BoardService.get_board_for_edit(db, board_id, user_id)
         
         # Validate source node exists
         await EdgeService._validate_node_exists(
@@ -79,18 +69,7 @@ class EdgeService:
         user_id: UUID
     ) -> Edge:
         """Get a single edge by ID."""
-        # Verify board ownership
-        board_result = await db.execute(
-            select(Board).where(
-                and_(
-                    Board.id == board_id,
-                    Board.user_id == user_id
-                )
-            )
-        )
-        board = board_result.scalar_one_or_none()
-        if not board:
-            raise ValueError("Board not found or access denied")
+        await BoardService.get_board(db, board_id, user_id)
         
         # Get edge
         result = await db.execute(
@@ -115,18 +94,7 @@ class EdgeService:
         user_id: UUID
     ) -> List[Edge]:
         """List all edges for a board."""
-        # Verify board ownership
-        board_result = await db.execute(
-            select(Board).where(
-                and_(
-                    Board.id == board_id,
-                    Board.user_id == user_id
-                )
-            )
-        )
-        board = board_result.scalar_one_or_none()
-        if not board:
-            raise ValueError("Board not found or access denied")
+        await BoardService.get_board(db, board_id, user_id)
         
         # Get all edges
         result = await db.execute(
@@ -152,7 +120,8 @@ class EdgeService:
         """Update an edge."""
         # Get edge with ownership verification
         edge = await EdgeService.get_edge(db, board_id, edge_id, user_id)
-        
+        await BoardService.get_board_for_edit(db, board_id, user_id)
+
         # Update fields
         update_data = edge_data.model_dump(exclude_unset=True)
         for field, value in update_data.items():
@@ -173,7 +142,8 @@ class EdgeService:
         """Delete an edge (soft delete)."""
         # Get edge with ownership verification
         edge = await EdgeService.get_edge(db, board_id, edge_id, user_id)
-        
+        await BoardService.get_board_for_edit(db, board_id, user_id)
+
         # Soft delete
         from datetime import datetime
         edge.deleted_at = datetime.utcnow()

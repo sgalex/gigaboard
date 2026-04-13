@@ -36,6 +36,14 @@ class ProjectResponse(ProjectBase):
         from_attributes = True
 
 
+class ProjectAccessMemberPreview(BaseModel):
+    """Краткая запись участника для плашки проекта (hover)."""
+
+    user_id: UUID
+    username: str
+    role: str  # owner | viewer | editor | admin
+
+
 class ProjectWithBoardsResponse(ProjectResponse):
     """Schema for project with boards and stats for welcome/list."""
     
@@ -47,6 +55,35 @@ class ProjectWithBoardsResponse(ProjectResponse):
     tables_count: int = 0  # Sum of tables in content.tables across all ContentNodes
     dimensions_count: int = 0  # Dimensions (cross-filter axes) in project
     filters_count: int = 0  # Filter presets in project
-    
+    is_owner: bool = True  # False when project is shared with the current user
+    my_access: str = "owner"  # owner | viewer | editor | admin — роль текущего пользователя
+    access_user_count: int = 1  # владелец + соавторы
+    access_members_preview: list[ProjectAccessMemberPreview] = Field(default_factory=list)
+
     class Config:
         from_attributes = True
+
+
+class UserSearchResult(BaseModel):
+    """Public user info for search / collaborator pickers."""
+
+    id: UUID
+    username: str
+    email: str
+
+
+class ProjectCollaboratorEntry(BaseModel):
+    user_id: UUID
+    username: str
+    email: str
+    role: str  # owner | viewer | editor | admin
+    created_at: datetime
+
+
+class ProjectCollaboratorAdd(BaseModel):
+    user_id: UUID
+    role: str = "editor"  # viewer | editor | admin
+
+
+class ProjectCollaboratorRoleUpdate(BaseModel):
+    role: str  # viewer | editor | admin

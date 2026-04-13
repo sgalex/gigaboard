@@ -34,6 +34,8 @@ const DEFAULT_TIMEOUTS: Record<string, number> = {
     widget_codex: 90,
     reporter: 60,
     validator: 30,
+    /** Служебный ключ: сжатие уровней context_graph (не шаг плана) */
+    context_graph_compression: 120,
 }
 const DEFAULT_RETRIES: Record<string, number> = {
     planner: 1,

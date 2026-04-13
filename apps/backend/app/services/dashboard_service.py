@@ -1,17 +1,20 @@
 """Dashboard service — CRUD for Dashboard + DashboardItem."""
 from uuid import UUID
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
-from sqlalchemy.orm import selectinload
-from sqlalchemy import func
-from fastapi import HTTPException, status
 
-from app.models import Project, Dashboard, DashboardItem
+from fastapi import HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.models import Dashboard, DashboardItem
 from app.schemas.dashboard import (
-    DashboardCreate, DashboardUpdate,
-    DashboardItemCreate, DashboardItemUpdate,
     BatchItemUpdateRequest,
+    DashboardCreate,
+    DashboardItemCreate,
+    DashboardItemUpdate,
+    DashboardUpdate,
 )
+from app.services.project_access_service import ProjectAccessService
 
 
 class DashboardService:
@@ -23,11 +26,7 @@ class DashboardService:
     async def create_dashboard(
         db: AsyncSession, project_id: UUID, user_id: UUID, data: DashboardCreate
     ) -> Dashboard:
-        result = await db.execute(
-            select(Project).where(Project.id == project_id, Project.user_id == user_id)
-        )
-        if not result.scalar_one_or_none():
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        await ProjectAccessService.require_project_edit_access(db, project_id, user_id)
 
         user_settings = data.settings or {}
         settings = {
@@ -56,11 +55,7 @@ class DashboardService:
     async def list_dashboards(
         db: AsyncSession, project_id: UUID, user_id: UUID
     ) -> list[Dashboard]:
-        result = await db.execute(
-            select(Project).where(Project.id == project_id, Project.user_id == user_id)
-        )
-        if not result.scalar_one_or_none():
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        await ProjectAccessService.require_project_access(db, project_id, user_id)
 
         result = await db.execute(
             select(Dashboard)
@@ -75,8 +70,7 @@ class DashboardService:
     ) -> Dashboard:
         result = await db.execute(
             select(Dashboard)
-            .join(Project, Project.id == Dashboard.project_id)
-            .where(Dashboard.id == dashboard_id, Project.user_id == user_id)
+            .where(Dashboard.id == dashboard_id)
             .options(
                 selectinload(Dashboard.items),
                 selectinload(Dashboard.share),
@@ -85,6 +79,7 @@ class DashboardService:
         dashboard = result.scalar_one_or_none()
         if not dashboard:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
+        await ProjectAccessService.require_project_access(db, dashboard.project_id, user_id)
         return dashboard
 
     @staticmethod
@@ -92,6 +87,9 @@ class DashboardService:
         db: AsyncSession, dashboard_id: UUID, user_id: UUID, data: DashboardUpdate
     ) -> Dashboard:
         dashboard = await DashboardService.get_dashboard(db, dashboard_id, user_id)
+        await ProjectAccessService.require_project_edit_access(
+            db, dashboard.project_id, user_id
+        )
         for field, value in data.model_dump(exclude_unset=True).items():
             if field == "settings" and value is not None:
                 # Merge settings — don't overwrite the whole dict
@@ -109,6 +107,9 @@ class DashboardService:
         db: AsyncSession, dashboard_id: UUID, user_id: UUID
     ) -> None:
         dashboard = await DashboardService.get_dashboard(db, dashboard_id, user_id)
+        await ProjectAccessService.require_project_edit_access(
+            db, dashboard.project_id, user_id
+        )
         await db.delete(dashboard)
         await db.commit()
 
@@ -118,8 +119,10 @@ class DashboardService:
     async def add_item(
         db: AsyncSession, dashboard_id: UUID, user_id: UUID, data: DashboardItemCreate
     ) -> DashboardItem:
-        # verify ownership
-        await DashboardService.get_dashboard(db, dashboard_id, user_id)
+        dash = await DashboardService.get_dashboard(db, dashboard_id, user_id)
+        await ProjectAccessService.require_project_edit_access(
+            db, dash.project_id, user_id
+        )
 
         # Determine max z_index
         result = await db.execute(
@@ -153,14 +156,15 @@ class DashboardService:
         db: AsyncSession, item_id: UUID, user_id: UUID, data: DashboardItemUpdate
     ) -> DashboardItem:
         result = await db.execute(
-            select(DashboardItem)
+            select(DashboardItem, Dashboard.project_id)
             .join(Dashboard, Dashboard.id == DashboardItem.dashboard_id)
-            .join(Project, Project.id == Dashboard.project_id)
-            .where(DashboardItem.id == item_id, Project.user_id == user_id)
+            .where(DashboardItem.id == item_id)
         )
-        item = result.scalar_one_or_none()
-        if not item:
+        row = result.one_or_none()
+        if not row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard item not found")
+        item, project_id = row[0], row[1]
+        await ProjectAccessService.require_project_edit_access(db, project_id, user_id)
 
         for field, value in data.model_dump(exclude_unset=True).items():
             if field == "layout" and value is not None:
@@ -181,14 +185,15 @@ class DashboardService:
         db: AsyncSession, item_id: UUID, user_id: UUID
     ) -> None:
         result = await db.execute(
-            select(DashboardItem)
+            select(DashboardItem, Dashboard.project_id)
             .join(Dashboard, Dashboard.id == DashboardItem.dashboard_id)
-            .join(Project, Project.id == Dashboard.project_id)
-            .where(DashboardItem.id == item_id, Project.user_id == user_id)
+            .where(DashboardItem.id == item_id)
         )
-        item = result.scalar_one_or_none()
-        if not item:
+        row = result.one_or_none()
+        if not row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard item not found")
+        item, project_id = row[0], row[1]
+        await ProjectAccessService.require_project_edit_access(db, project_id, user_id)
         await db.delete(item)
         await db.commit()
 
@@ -197,8 +202,10 @@ class DashboardService:
         db: AsyncSession, dashboard_id: UUID, user_id: UUID, data: BatchItemUpdateRequest
     ) -> list[DashboardItem]:
         """Batch update multiple items (e.g. after drag/resize on canvas)."""
-        # verify ownership
-        await DashboardService.get_dashboard(db, dashboard_id, user_id)
+        dash = await DashboardService.get_dashboard(db, dashboard_id, user_id)
+        await ProjectAccessService.require_project_edit_access(
+            db, dash.project_id, user_id
+        )
 
         updated: list[DashboardItem] = []
         for update in data.items:
@@ -235,14 +242,15 @@ class DashboardService:
     ) -> DashboardItem:
         """Duplicate a dashboard item with offset."""
         result = await db.execute(
-            select(DashboardItem)
+            select(DashboardItem, Dashboard.project_id)
             .join(Dashboard, Dashboard.id == DashboardItem.dashboard_id)
-            .join(Project, Project.id == Dashboard.project_id)
-            .where(DashboardItem.id == item_id, Project.user_id == user_id)
+            .where(DashboardItem.id == item_id)
         )
-        original = result.scalar_one_or_none()
-        if not original:
+        row = result.one_or_none()
+        if not row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard item not found")
+        original, project_id = row[0], row[1]
+        await ProjectAccessService.require_project_edit_access(db, project_id, user_id)
 
         # Get max z
         result = await db.execute(
