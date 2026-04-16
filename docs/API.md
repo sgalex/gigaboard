@@ -11,6 +11,7 @@
 - **5 типов связей**: TRANSFORMATION, VISUALIZATION, COMMENT, REFERENCE, DRILL_DOWN
 - **Multi-Agent System**: Orchestrator (Single Path) → 9 ролей в плане (planner, discovery, research, structurizer, analyst, transform_codex, widget_codex, reporter, validator) + шаги `context_filter` и др.; ключ плана `validator` исполняет **QualityGateAgent**; 6 satellite-контроллеров (Transform, TransformSuggestions, Widget, WidgetSuggestions, AI Assistant, Research). См. [`MULTI_AGENT.md`](./MULTI_AGENT.md)
 - **Real-time**: Socket.IO для коллаборативных обновлений
+- **Доступ к проекту и доске**: роли соавторов `viewer` / `editor` / `admin`, владелец проекта; разделение операций чтения и записи на уровне маршрутов. См. [`PROJECT_ACCESS.md`](./PROJECT_ACCESS.md)
 
 **Версионирование**: Все endpoints под `/api/v1` (кроме `/health` и `/ai/resolve`)
 
@@ -68,13 +69,33 @@ TokenResponse { access_token: str, token_type: "bearer", user: UserResponse, exp
 
 ## 3. Projects (`/api/v1/projects`)
 
-| Method | Path                            | Request Body    | Response                          | Status Code | Описание         |
-| ------ | ------------------------------- | --------------- | --------------------------------- | ----------- | ---------------- |
-| POST   | `/api/v1/projects`              | `ProjectCreate` | `ProjectResponse`                 | 201         | Создать проект   |
-| GET    | `/api/v1/projects`              | —               | `list[ProjectWithBoardsResponse]` | 200         | Список проектов  |
-| GET    | `/api/v1/projects/{project_id}` | —               | `ProjectResponse`                 | 200         | Получить проект  |
-| PUT    | `/api/v1/projects/{project_id}` | `ProjectUpdate` | `ProjectResponse`                 | 200         | Обновить         |
-| DELETE | `/api/v1/projects/{project_id}` | —               | —                                 | 204         | Удалить (каскад) |
+Матрица прав (владелец / viewer / editor / admin), проверки `get_board` vs `get_board_for_edit` и поведение UI — в [`PROJECT_ACCESS.md`](./PROJECT_ACCESS.md).
+
+| Method | Path                                                            | Request Body                   | Response                          | Status Code | Описание |
+| ------ | --------------------------------------------------------------- | ------------------------------ | --------------------------------- | ----------- | -------- |
+| POST   | `/api/v1/projects`                                              | `ProjectCreate`                | `ProjectResponse`                 | 201         | Создать проект |
+| GET    | `/api/v1/projects`                                              | —                              | `list[ProjectWithBoardsResponse]` | 200         | Список проектов (владелец + проекты, куда приглашён) |
+| POST   | `/api/v1/projects/import-zip`                                   | `multipart/form-data`: поле **`file`** (ZIP), опционально **`name`** (имя нового проекта) | `ProjectResponse` | 201 | Импорт проекта из ZIP, созданный **`GET .../export`**; новый проект у текущего пользователя (**не** viewer). См. `manifest.json` + `data.json` + `files/` в архиве |
+| GET    | `/api/v1/projects/{project_id}/export`                          | —                              | `application/zip` (файл)            | 200         | Экспорт проекта в ZIP: доски (узлы, рёбра), дашборды и элементы, библиотека, измерения и маппинги, пресеты фильтров, вложенные файлы по `file_id`. Требуется **право на изменение** проекта (не viewer). Имя в `Content-Disposition`: `ProjectName_YYYYMMDD_hhmm.zip` (локальное время сервера; для не-ASCII — `filename*` UTF-8) |
+| GET    | `/api/v1/projects/{project_id}`                                 | —                              | `ProjectResponse`                 | 200         | Получить проект (достаточно любого доступа к проекту) |
+| PUT    | `/api/v1/projects/{project_id}`                                 | `ProjectUpdate`                | `ProjectResponse`                 | 200         | Обновить имя/описание (**только владелец**) |
+| DELETE | `/api/v1/projects/{project_id}`                                 | —                              | —                                 | 204         | Удалить каскадно (**только владелец**) |
+| GET    | `/api/v1/projects/{project_id}/collaborators`                   | —                              | `list[ProjectCollaboratorEntry]`  | 200         | Список участников (владелец или любой соавтор) |
+| POST   | `/api/v1/projects/{project_id}/collaborators`                   | `ProjectCollaboratorAdd`       | —                                 | 204         | Добавить соавтора (**владелец или admin**); тело: `user_id`, `role` ∈ `viewer` \| `editor` \| `admin` |
+| PATCH  | `/api/v1/projects/{project_id}/collaborators/{collaborator_user_id}` | `ProjectCollaboratorRoleUpdate` | —                            | 204         | Сменить роль соавтора (**владелец или admin**; не владелец проекта) |
+| DELETE | `/api/v1/projects/{project_id}/collaborators/{collaborator_user_id}` | —                              | —                                 | 204         | Отозвать доступ (**владелец или admin**; не владелец проекта) |
+
+### ZIP: экспорт и импорт целого проекта
+
+- **Сборка и разбор**: `apps/backend/app/services/project_bundle_service.py` — в архиве `manifest.json`, `data.json`, каталог **`files/`** с бинарными вложениями по `file_id`; при импорте — переназначение UUID сущностей и вставка в одной транзакции; ссылки из библиотеки/пресетов на узлы вне снимка **обнуляются** (санитизация), чтобы не нарушать FK.
+- **Превью досок и дашбордов**: в `thumbnail_url` хранится путь вида `/api/v1/files/image/{file_id}` — соответствующие файлы **включаются в `files/`** и при импорте загружаются в хранилище с новым `file_id`, после чего URL в данных проекта **переписывается** на новый идентификатор (аналогично для превью виджетов библиотеки, если задано).
+- **Имя файла экспорта**: `ProjectName_YYYYMMDD_hhmm.zip` — формируется на сервере (`app/utils/export_filename.py`, локальное время процесса) и дублируется на клиенте при скачивании через браузер; в `Content-Disposition` для не-ASCII в имени дополнительно задаётся **`filename*=UTF-8''...`**.
+
+### Поиск пользователей для приглашения (`/api/v1/users/search`)
+
+| Method | Path                      | Query | Response                 | Описание |
+| ------ | ------------------------- | ----- | ------------------------ | -------- |
+| GET    | `/api/v1/users/search`    | **`project_id`** (UUID, обязательный), **`q`** (строка, до 200 символов; подстрока по имени или email) | `list[UserSearchResult]` | Каталог пользователей для диалога «Совместный доступ»; требуется **`require_project_share_access`** на указанном `project_id` (владелец или admin). В выдачу не попадает текущий пользователь. |
 
 <details>
 <summary>📄 Schemas</summary>
@@ -83,7 +104,18 @@ TokenResponse { access_token: str, token_type: "bearer", user: UserResponse, exp
 ProjectCreate { name: str (1-200), description: str? }
 ProjectUpdate { name: str? (1-200), description: str? }
 ProjectResponse { id, user_id, name, description?, created_at, updated_at }
-ProjectWithBoardsResponse extends ProjectResponse { boards_count: int }
+ProjectWithBoardsResponse extends ProjectResponse {
+  boards_count, dashboards_count, sources_count, content_nodes_count,
+  widgets_count, tables_count, dimensions_count, filters_count: int
+  is_owner: bool
+  my_access: str  // owner | viewer | editor | admin
+  access_user_count: int
+  access_members_preview: list[{ user_id, username, role }]
+}
+UserSearchResult { id, username, email }
+ProjectCollaboratorEntry { user_id, username, email, role, created_at }
+ProjectCollaboratorAdd { user_id, role?: viewer|editor|admin }  // в UI «Совместный доступ» передаётся viewer
+ProjectCollaboratorRoleUpdate { role: viewer|editor|admin }
 ```
 
 </details>
@@ -91,6 +123,8 @@ ProjectWithBoardsResponse extends ProjectResponse { boards_count: int }
 ---
 
 ## 4. Boards (`/api/v1/boards`)
+
+Создание/изменение/удаление борда и связанных узлов требует **права на изменение** проекта борда (не роль **viewer**). См. [`PROJECT_ACCESS.md`](./PROJECT_ACCESS.md).
 
 | Method | Path                        | Request Body         | Response                       | Status Code | Описание         |
 | ------ | --------------------------- | -------------------- | ------------------------------ | ----------- | ---------------- |

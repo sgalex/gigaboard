@@ -15,6 +15,8 @@ import {
     Table2,
     Columns3,
     Pencil,
+    Download,
+    Loader2,
 } from 'lucide-react'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { ProjectExplorer } from '@/components/ProjectExplorer'
@@ -37,13 +39,15 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { getProxiedImageUrl } from '@/services/api'
+import { getProxiedImageUrl, projectsAPI } from '@/services/api'
 import { useProjectStore } from '@/store/projectStore'
+import { notify } from '@/store/notificationStore'
 import { useBoardStore } from '@/store/boardStore'
 import { useDashboardStore } from '@/store/dashboardStore'
 import { useUIStore } from '@/store/uiStore'
 import { formatDistance } from 'date-fns'
 import { ru } from 'date-fns/locale'
+import { buildProjectExportZipFilename } from '@/lib/projectExportFilename'
 import type { BoardWithNodes } from '@/types'
 import type { Dashboard } from '@/types/dashboard'
 
@@ -56,7 +60,7 @@ const DASHBOARD_STATUS_LABELS: Record<string, string> = {
 export function ProjectOverviewPage() {
     const { projectId } = useParams<{ projectId: string }>()
     const navigate = useNavigate()
-    const { currentProject, fetchProject, updateProject } = useProjectStore()
+    const { currentProject, fetchProject, updateProject, projects, fetchProjects } = useProjectStore()
     const { boards, fetchBoards, deleteBoard, isLoading: boardsLoading } = useBoardStore()
     const { dashboards, fetchDashboards, deleteDashboard, isLoading: dashboardsLoading } = useDashboardStore()
     const { openCreateBoardDialog, openCreateDashboardDialog } = useUIStore()
@@ -67,6 +71,10 @@ export function ProjectOverviewPage() {
     const [editName, setEditName] = useState('')
     const [editDescription, setEditDescription] = useState('')
     const [isSavingProject, setIsSavingProject] = useState(false)
+    const [exporting, setExporting] = useState(false)
+
+    const listMeta = projectId ? projects.find((p) => p.id === projectId) : undefined
+    const canExportZip = !listMeta || listMeta.my_access !== 'viewer'
 
     useEffect(() => {
         if (projectId) {
@@ -75,6 +83,12 @@ export function ProjectOverviewPage() {
             fetchDashboards(projectId)
         }
     }, [projectId, fetchProject, fetchBoards, fetchDashboards])
+
+    useEffect(() => {
+        if (projectId && !projects.some((p) => p.id === projectId)) {
+            void fetchProjects()
+        }
+    }, [projectId, projects, fetchProjects])
 
     const handleBoardClick = (boardId: string) => {
         navigate(`/project/${projectId}/board/${boardId}`)
@@ -117,6 +131,26 @@ export function ProjectOverviewPage() {
             setEditName(currentProject.name)
             setEditDescription(currentProject.description ?? '')
             setIsEditProjectOpen(true)
+        }
+    }
+
+    const handleExportZip = async () => {
+        if (!projectId || !currentProject) return
+        setExporting(true)
+        try {
+            const blob = await projectsAPI.exportZip(projectId)
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = buildProjectExportZipFilename(currentProject.name)
+            a.click()
+            URL.revokeObjectURL(url)
+            notify.success('Архив сохранён', { title: 'Экспорт' })
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : 'Не удалось выгрузить проект'
+            notify.error(msg, { title: 'Экспорт' })
+        } finally {
+            setExporting(false)
         }
     }
 
@@ -195,25 +229,21 @@ export function ProjectOverviewPage() {
                                 <Pencil className="h-4 w-4" />
                             </Button>
                         </div>
-                        <div className="flex flex-wrap gap-2 shrink-0">
-                            <Button
-                                onClick={() => openCreateBoardDialog(projectId)}
-                                size="sm"
-                                className="gap-1.5 rounded-full shadow-sm"
-                            >
-                                <Workflow className="h-3.5 w-3.5" />
-                                Создать доску
-                            </Button>
-                            <Button
-                                variant="secondary"
-                                size="sm"
-                                onClick={() => openCreateDashboardDialog(projectId)}
-                                className="gap-1.5 rounded-full"
-                            >
-                                <LayoutDashboard className="h-3.5 w-3.5" />
-                                Создать дашборд
-                            </Button>
-                        </div>
+                        {canExportZip ? (
+                            <div className="flex flex-wrap gap-2 shrink-0">
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="gap-1.5 rounded-full"
+                                    disabled={exporting}
+                                    onClick={() => void handleExportZip()}
+                                    title="Скачать ZIP со всем содержимым проекта"
+                                >
+                                    <Download className="h-3.5 w-3.5" />
+                                    {exporting ? 'Экспорт…' : 'Экспорт'}
+                                </Button>
+                            </div>
+                        ) : null}
                     </header>
 
                     {/* Edit project dialog */}
@@ -268,12 +298,22 @@ export function ProjectOverviewPage() {
                     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_auto_1fr] lg:gap-0">
                     {/* Boards section */}
                     <section className="min-w-0 lg:pr-8">
-                        <h2 className="text-lg font-semibold text-foreground flex items-center gap-2 mb-2 sm:text-xl">
-                            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                                <Workflow className="h-4 w-4" />
-                            </span>
-                            Доски проекта
-                        </h2>
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                            <h2 className="text-lg font-semibold text-foreground flex min-w-0 flex-1 items-center gap-2 sm:text-xl">
+                                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                                    <Workflow className="h-4 w-4" />
+                                </span>
+                                Доски проекта
+                            </h2>
+                            <Button
+                                onClick={() => openCreateBoardDialog(projectId)}
+                                size="sm"
+                                className="gap-1.5 rounded-full shadow-sm shrink-0"
+                            >
+                                <Workflow className="h-3.5 w-3.5" />
+                                Создать доску
+                            </Button>
+                        </div>
 
                         {boardsLoading ? (
                             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -408,12 +448,23 @@ export function ProjectOverviewPage() {
 
                     {/* Dashboards section */}
                     <section className="min-w-0 lg:pl-8">
-                        <h2 className="text-lg font-semibold text-foreground flex items-center gap-2 mb-2 sm:text-xl">
-                            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                                <LayoutDashboard className="h-4 w-4" />
-                            </span>
-                            Дашборды проекта
-                        </h2>
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                            <h2 className="text-lg font-semibold text-foreground flex min-w-0 flex-1 items-center gap-2 sm:text-xl">
+                                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                                    <LayoutDashboard className="h-4 w-4" />
+                                </span>
+                                Дашборды проекта
+                            </h2>
+                            <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => openCreateDashboardDialog(projectId)}
+                                className="gap-1.5 rounded-full shrink-0"
+                            >
+                                <LayoutDashboard className="h-3.5 w-3.5" />
+                                Создать дашборд
+                            </Button>
+                        </div>
 
                         {dashboardsLoading ? (
                             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -521,6 +572,23 @@ export function ProjectOverviewPage() {
                     </div>
                 </div>
             </div>
+
+            {exporting ? (
+                <div
+                    className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 backdrop-blur-sm"
+                    role="status"
+                    aria-live="polite"
+                    aria-busy="true"
+                >
+                    <div className="flex flex-col items-center gap-4 rounded-xl border bg-card px-10 py-8 shadow-lg">
+                        <Loader2 className="h-12 w-12 animate-spin text-primary" aria-hidden />
+                        <p className="text-sm font-medium text-foreground">Экспорт проекта в ZIP…</p>
+                        <p className="max-w-xs text-center text-xs text-muted-foreground">
+                            Формируется архив, это может занять время при больших файлах данных.
+                        </p>
+                    </div>
+                </div>
+            ) : null}
 
             <ConfirmDialog
                 open={!!boardToDelete}

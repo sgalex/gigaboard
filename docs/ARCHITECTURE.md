@@ -61,6 +61,8 @@ UI представляет бесконечное полотно (React Flow), 
 - **Управление трансформациями**: создание, выполнение, версионирование, replay (5 режимов)
 - **Streaming support**: WebSocket/SSE/Kafka handlers, аккумуляция + архивирование
 - Аутентификация и авторизация (JWT)
+- **Доступ к проекту и доске**: роли соавторов в `project_collaborators` (`viewer`, `editor`, `admin`), владелец проекта; разграничение просмотра и мутаций (`ProjectAccessService`, `BoardService.get_board` / `get_board_for_edit`). См. [`PROJECT_ACCESS.md`](./PROJECT_ACCESS.md)
+- **Экспорт/импорт проекта (ZIP)**: полный снимок проекта через `ProjectBundleService` и маршруты `GET /api/v1/projects/{id}/export`, `POST /api/v1/projects/import-zip` (см. [`API.md`](./API.md) §3)
 - Валидация контрактов (Pydantic v2)
 **Интерфейсы**: HTTP/JSON, OpenAPI/Swagger UI.
 

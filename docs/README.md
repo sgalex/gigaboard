@@ -37,6 +37,7 @@ Package:   uv (Python), npm (Frontend)
 | ---------------------------------------- | -------------------------------------------------------------- |
 | [SPECIFICATIONS.md](./SPECIFICATIONS.md) | Функциональные и нефункциональные требования (FR-1..FR-23)     |
 | [ARCHITECTURE.md](./ARCHITECTURE.md)     | Архитектура: 4 типа узлов, Multi-Agent System, Data-Centric Canvas |
+| [PROJECT_ACCESS.md](./PROJECT_ACCESS.md) | Роли в проекте (viewer / editor / admin), доска, шаринг, API     |
 | [API.md](./API.md)                       | REST и WebSocket endpoints                                     |
 
 ### Архитектура узлов и связей
@@ -107,6 +108,11 @@ Package:   uv (Python), npm (Frontend)
 - Левая секция: upload JSON + collapsible preview исходного JSON.
 - Правая секция: табы таблиц мэппинга (rename/delete/add), редактор столбцов и встроенный preview.
 - Контракт хранения: `schema_snapshot`, `mapping_spec`, `generation_meta` в `SourceNode.config`.
+
+**Экспорт и импорт проекта (актуализация 2026-04-16):**
+- Серверный снимок проекта в **ZIP**: `GET /api/v1/projects/{id}/export` и `POST /api/v1/projects/import-zip` (см. [API.md](./API.md) §3, бэкенд `ProjectBundleService`); в архив попадают и **файлы превью** досок/дашбордов по `thumbnail_url` (`/api/v1/files/image/{file_id}`).
+- Имя скачиваемого файла: **`ProjectName_YYYYMMDD_hhmm.zip`** (локальное время; санитизация имени; в заголовке для не-ASCII — `filename*` UTF-8).
+- UI: на экране приветствия кнопка **«Импорт проекта»** в блоке приветствия и при пустом списке проектов; **«Экспорт»** — в меню карточки проекта (не viewer) и на странице обзора проекта; пункт **«Удалить»** в меню карточки отделён разделителем и стоит последним.
 
 **Источники document / «Поиск с ИИ» (актуализация 2026-03-28):**
 - Диалог «Поиск с ИИ»: режим **редактирования** с карточки (`existingSource`, сохранение конфига и контента).

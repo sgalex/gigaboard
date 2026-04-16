@@ -1,6 +1,7 @@
 # Dev-сервер Vite (docker-compose.dev.yml).
 # Сборка из корня монорепозитория — copy-libs.cjs берёт echarts/leaflet из корневого node_modules.
-# В compose смонтированы ./apps/web/src (и др.) — правки TS/React видны без пересборки образа.
+# В compose смонтированы src, public, scripts, vite/postcss/tailwind — правки без пересборки образа.
+# Смена зависимостей в package.json — пересборка: docker compose ... build frontend
 FROM node:20-alpine
 
 WORKDIR /workspace

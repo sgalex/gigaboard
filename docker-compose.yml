@@ -3,7 +3,8 @@
 # Обновление образов после git pull:
 #   docker compose build
 #   docker compose up -d
-# При подозрении на кэш: docker compose build --no-cache
+# Обновить базовые образы (postgres/redis/node): docker compose build --pull
+# При подозрении на кэш слоёв: docker compose build --no-cache
 #
 # ВАЖНО — стриминг NDJSON (мультиагент, прогресс в UI):
 # - В образе frontend apps/web/nginx.conf уже: proxy_buffering off для /api/.

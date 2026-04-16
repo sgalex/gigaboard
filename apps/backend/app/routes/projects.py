@@ -1,7 +1,9 @@
 """Project routes."""
+from datetime import datetime
+from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_db
@@ -17,8 +19,10 @@ from app.schemas import (
     ProjectUpdate,
     ProjectWithBoardsResponse,
 )
+from app.services.project_bundle_service import ProjectBundleService
 from app.services.project_service import ProjectService
 from app.services.project_share_service import ProjectShareService
+from app.utils.export_filename import build_project_export_zip_filename
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 
@@ -39,6 +43,26 @@ async def create_project(
     return project
 
 
+@router.post(
+    "/import-zip",
+    response_model=ProjectResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={400: {"model": ErrorResponse}, 401: {"model": ErrorResponse}},
+)
+async def import_project_zip(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    file: UploadFile = File(..., description="ZIP из GET .../export"),
+    name: str | None = Form(None, description="Имя нового проекта (иначе «… (import)»)"),
+):
+    """Импорт проекта из ZIP (серверный снимок). Создаёт новый проект у текущего пользователя."""
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Пустой файл")
+    project = await ProjectBundleService.import_zip(db, current_user.id, raw, name)
+    return project
+
+
 @router.get(
     "",
     response_model=list[ProjectWithBoardsResponse],
@@ -51,6 +75,27 @@ async def list_projects(
     """List all projects for current user."""
     projects = await ProjectService.list_projects_with_counts(db, current_user.id)
     return projects
+
+
+@router.get(
+    "/{project_id}/export",
+    responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+async def export_project_zip(
+    project_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Экспорт проекта в ZIP (доски, узлы, дашборды, библиотека, измерения, пресеты, файлы)."""
+    zip_bytes, project_name = await ProjectBundleService.export_zip(db, project_id, current_user.id)
+    filename = build_project_export_zip_filename(project_name)
+    ascii_fallback = (
+        filename
+        if filename.isascii()
+        else f"project_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
+    )
+    cd = f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{quote(filename)}'
+    return Response(content=zip_bytes, media_type="application/zip", headers={"Content-Disposition": cd})
 
 
 @router.get(

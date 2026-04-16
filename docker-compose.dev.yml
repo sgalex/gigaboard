@@ -1,8 +1,10 @@
 # Разработка: объединяется с базовым compose (postgres, redis, сеть, тома).
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Инструменты (pgAdmin, Redis Commander):
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile tools up -d
+#
 # Backend: bind-mount ./apps/backend/app, uvicorn --reload.
-# Frontend: Vite :5173, VITE_DEV_PROXY_TARGET → backend:8000 (см. apps/web/vite.config.ts).
-# Инструменты (pgadmin, redis-commander): профиль tools — см. compose profiles.
+# Frontend: Vite :5173 (FRONTEND_DEV_PORT), прокси на backend:8000 (VITE_DEV_PROXY_TARGET / vite.config.ts).
 
 services:
   backend:
@@ -28,8 +30,11 @@ services:
     volumes:
       - ./apps/web/src:/workspace/apps/web/src
       - ./apps/web/public:/workspace/apps/web/public
+      - ./apps/web/scripts:/workspace/apps/web/scripts
       - ./apps/web/vite.config.ts:/workspace/apps/web/vite.config.ts
       - ./apps/web/index.html:/workspace/apps/web/index.html
+      - ./apps/web/postcss.config.cjs:/workspace/apps/web/postcss.config.cjs
+      - ./apps/web/tailwind.config.js:/workspace/apps/web/tailwind.config.js
     environment:
       NODE_ENV: development
       VITE_DEV_PROXY_TARGET: http://backend:8000

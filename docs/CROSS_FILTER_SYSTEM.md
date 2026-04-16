@@ -4,7 +4,7 @@
 **Актуализировано**: 20 марта 2026 — §3.5: связь с Multi-Agent (`readTableData`, `_compute_filtered_pipeline`)  
 **Приоритет**: High  
 **Дата создания**: 27 февраля 2026  
-**Связанные документы**: [BOARD_SYSTEM.md](./BOARD_SYSTEM.md), [DASHBOARD_SYSTEM.md](./DASHBOARD_SYSTEM.md), [DATA_NODE_SYSTEM.md](./DATA_NODE_SYSTEM.md), [DRILL_DOWN_SYSTEM.md](./DRILL_DOWN_SYSTEM.md), [MULTI_AGENT.md](./MULTI_AGENT.md) (тулы оркестратора и `_compute_filtered_pipeline`)
+**Связанные документы**: [BOARD_SYSTEM.md](./BOARD_SYSTEM.md), [DASHBOARD_SYSTEM.md](./DASHBOARD_SYSTEM.md), [DATA_NODE_SYSTEM.md](./DATA_NODE_SYSTEM.md), [DRILL_DOWN_SYSTEM.md](./DRILL_DOWN_SYSTEM.md), [MULTI_AGENT.md](./MULTI_AGENT.md) (тулы оркестратора и `_compute_filtered_pipeline`), [PROJECT_ACCESS.md](./PROJECT_ACCESS.md) (роль **viewer**: без мутаций измерений/пресетов и записи фильтров на сервере)
 
 ---
 
@@ -598,6 +598,8 @@ erDiagram
 ---
 
 ## 5. API
+
+**Права доступа:** мутации измерений, маппингов, пресетов и изменение сохранённых фильтров на доске/дашборде выполняются только при **праве на изменение** проекта (не **viewer**). Чтение измерений, списка пресетов и данных с учётом фильтров — в рамках доступа к проекту/доске для просмотра. Подробнее: [`PROJECT_ACCESS.md`](./PROJECT_ACCESS.md).
 
 ### 5.1 Dimensions API
 

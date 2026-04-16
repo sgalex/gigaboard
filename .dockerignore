@@ -35,3 +35,4 @@ data/
 
 # Тесты и скрипты разработки (не нужны в runtime-образе backend)
 apps/backend/scripts
+apps/backend/tests

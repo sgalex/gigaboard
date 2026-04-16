@@ -21,6 +21,9 @@ import {
     MoreHorizontal,
     Share2,
     Users,
+    Download,
+    Upload,
+    Loader2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
@@ -39,16 +42,21 @@ import {
     DropdownMenu,
     DropdownMenuContent,
     DropdownMenuItem,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ShareProjectDialog } from '@/components/projects/ShareProjectDialog'
+import { ImportProjectDialog } from '@/components/projects/ImportProjectDialog'
+import { projectsAPI } from '@/services/api'
 import { useProjectStore } from '@/store/projectStore'
+import { notify } from '@/store/notificationStore'
 import { useUIStore } from '@/store/uiStore'
 import { useAuthStore } from '@/store/authStore'
 import type { ProjectMyAccess, ProjectWithBoards } from '@/types'
 import { formatDistance } from 'date-fns'
 import { ru } from 'date-fns/locale'
+import { buildProjectExportZipFilename } from '@/lib/projectExportFilename'
 
 const ACCESS_ROLE_RU: Record<string, string> = {
     owner: 'Владелец',
@@ -128,6 +136,8 @@ export function WelcomePage() {
     const [editDescription, setEditDescription] = useState('')
     const [isDeleting, setIsDeleting] = useState(false)
     const [isSaving, setIsSaving] = useState(false)
+    const [importOpen, setImportOpen] = useState(false)
+    const [exportingId, setExportingId] = useState<string | null>(null)
 
     useEffect(() => {
         fetchProjects()
@@ -152,6 +162,26 @@ export function WelcomePage() {
         } finally {
             setIsDeleting(false)
             setProjectToDelete(null)
+        }
+    }
+
+    const handleExportProject = async (project: ProjectWithBoards, e?: React.MouseEvent) => {
+        e?.stopPropagation()
+        setExportingId(project.id)
+        try {
+            const blob = await projectsAPI.exportZip(project.id)
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = buildProjectExportZipFilename(project.name)
+            a.click()
+            URL.revokeObjectURL(url)
+            notify.success('Архив сохранён', { title: 'Экспорт' })
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : 'Не удалось выгрузить проект'
+            notify.error(msg, { title: 'Экспорт' })
+        } finally {
+            setExportingId(null)
         }
     }
 
@@ -258,12 +288,21 @@ export function WelcomePage() {
                             <Plus className="h-5 w-5" />
                             Создать проект
                         </Button>
+                        <Button
+                            variant="outline"
+                            size="lg"
+                            className="gap-2 rounded-full px-6"
+                            onClick={() => setImportOpen(true)}
+                        >
+                            <Upload className="h-5 w-5" />
+                            Импорт проекта
+                        </Button>
                     </div>
                 </header>
 
                 {/* Projects Section */}
                 <section>
-                    <div className="mb-6 flex items-center justify-between">
+                    <div className="mb-6">
                         <h2 className="text-xl font-semibold text-foreground flex items-center gap-2 sm:text-2xl">
                             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
                                 <FolderKanban className="h-5 w-5" />
@@ -297,10 +336,21 @@ export function WelcomePage() {
                                 <p className="text-center text-sm text-muted-foreground mb-6 max-w-sm">
                                     Создайте первый проект — добавьте источники данных, постройте трансформации и дашборды.
                                 </p>
-                                <Button onClick={openCreateProjectDialog} className="gap-2 rounded-full" size="lg">
-                                    <Plus className="h-4 w-4" />
-                                    Создать проект
-                                </Button>
+                                <div className="flex flex-wrap justify-center gap-3">
+                                    <Button onClick={openCreateProjectDialog} className="gap-2 rounded-full" size="lg">
+                                        <Plus className="h-4 w-4" />
+                                        Создать проект
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        onClick={() => setImportOpen(true)}
+                                        className="gap-2 rounded-full"
+                                        size="lg"
+                                    >
+                                        <Upload className="h-4 w-4" />
+                                        Импорт проекта
+                                    </Button>
+                                </div>
                             </CardContent>
                         </Card>
                     ) : (
@@ -308,6 +358,8 @@ export function WelcomePage() {
                             {projects.map((project: ProjectWithBoards, index) => {
                                 const access = resolveMyAccess(project)
                                 const canShareProject = access === 'owner' || access === 'admin'
+                                const canExportProject = access !== 'viewer'
+                                const showProjectMenu = access !== 'viewer' || canShareProject
                                 const isOwner = access === 'owner'
                                 return (
                                 <Card
@@ -377,7 +429,7 @@ export function WelcomePage() {
                                     </CardContent>
                                     <CardFooter className="flex items-center justify-between gap-2 border-t pt-3 text-xs opacity-0 transition-opacity group-hover:opacity-100">
                                         <div className="flex min-h-7 items-center">
-                                            {canShareProject ? (
+                                            {showProjectMenu ? (
                                                 <DropdownMenu>
                                                     <DropdownMenuTrigger asChild>
                                                         <Button
@@ -396,16 +448,41 @@ export function WelcomePage() {
                                                         onClick={(e) => e.stopPropagation()}
                                                     >
                                                         {isOwner ? (
+                                                            <DropdownMenuItem
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation()
+                                                                    setProjectToEdit(project)
+                                                                }}
+                                                            >
+                                                                <Pencil className="mr-2 h-3.5 w-3.5" />
+                                                                Изменить
+                                                            </DropdownMenuItem>
+                                                        ) : null}
+                                                        {canExportProject ? (
+                                                            <DropdownMenuItem
+                                                                disabled={exportingId === project.id}
+                                                                onClick={(e) => void handleExportProject(project, e)}
+                                                            >
+                                                                <Download className="mr-2 h-3.5 w-3.5" />
+                                                                {exportingId === project.id
+                                                                    ? 'Экспорт…'
+                                                                    : 'Экспорт'}
+                                                            </DropdownMenuItem>
+                                                        ) : null}
+                                                        {canShareProject ? (
+                                                            <DropdownMenuItem
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation()
+                                                                    setProjectToShare(project)
+                                                                }}
+                                                            >
+                                                                <Share2 className="mr-2 h-3.5 w-3.5" />
+                                                                Поделиться
+                                                            </DropdownMenuItem>
+                                                        ) : null}
+                                                        {isOwner ? (
                                                             <>
-                                                                <DropdownMenuItem
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation()
-                                                                        setProjectToEdit(project)
-                                                                    }}
-                                                                >
-                                                                    <Pencil className="mr-2 h-3.5 w-3.5" />
-                                                                    Изменить
-                                                                </DropdownMenuItem>
+                                                                <DropdownMenuSeparator />
                                                                 <DropdownMenuItem
                                                                     className="text-destructive focus:text-destructive"
                                                                     onClick={(e) => {
@@ -418,15 +495,6 @@ export function WelcomePage() {
                                                                 </DropdownMenuItem>
                                                             </>
                                                         ) : null}
-                                                        <DropdownMenuItem
-                                                            onClick={(e) => {
-                                                                e.stopPropagation()
-                                                                setProjectToShare(project)
-                                                            }}
-                                                        >
-                                                            <Share2 className="mr-2 h-3.5 w-3.5" />
-                                                            Поделиться
-                                                        </DropdownMenuItem>
                                                     </DropdownMenuContent>
                                                 </DropdownMenu>
                                             ) : null}
@@ -515,6 +583,25 @@ export function WelcomePage() {
                         resolveMyAccess(projectToShare) === 'admin')
                 }
             />
+
+            <ImportProjectDialog open={importOpen} onOpenChange={setImportOpen} />
+
+            {exportingId ? (
+                <div
+                    className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 backdrop-blur-sm"
+                    role="status"
+                    aria-live="polite"
+                    aria-busy="true"
+                >
+                    <div className="flex flex-col items-center gap-4 rounded-xl border bg-card px-10 py-8 shadow-lg">
+                        <Loader2 className="h-12 w-12 animate-spin text-primary" aria-hidden />
+                        <p className="text-sm font-medium text-foreground">Экспорт проекта в ZIP…</p>
+                        <p className="max-w-xs text-center text-xs text-muted-foreground">
+                            Формируется архив, это может занять время при больших файлах данных.
+                        </p>
+                    </div>
+                </div>
+            ) : null}
         </div>
     )
 }

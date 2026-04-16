@@ -120,6 +120,46 @@ export const projectsAPI = {
         api.patch(`/api/v1/projects/${projectId}/collaborators/${userId}`, { role }),
     removeCollaborator: (projectId: string, userId: string) =>
         api.delete(`/api/v1/projects/${projectId}/collaborators/${userId}`),
+
+    /** ZIP-снимок проекта (см. docs/API.md). */
+    exportZip: async (projectId: string): Promise<Blob> => {
+        try {
+            const res = await api.get<Blob>(`/api/v1/projects/${projectId}/export`, {
+                responseType: 'blob',
+            })
+            return res.data
+        } catch (e: unknown) {
+            const err = e as { response?: { data?: unknown } }
+            const data = err.response?.data
+            if (data instanceof Blob) {
+                try {
+                    const text = await data.text()
+                    const j = JSON.parse(text) as { detail?: string | unknown }
+                    const d = j?.detail
+                    const msg =
+                        typeof d === 'string'
+                            ? d
+                            : Array.isArray(d)
+                              ? d.map((x: { msg?: string }) => x?.msg).filter(Boolean).join('; ')
+                              : 'Не удалось экспортировать проект'
+                    throw new Error(msg)
+                } catch {
+                    throw new Error('Не удалось экспортировать проект')
+                }
+            }
+            throw e
+        }
+    },
+
+    /** Импорт из ZIP → новый проект у текущего пользователя. */
+    importZip: (file: File, name?: string) => {
+        const fd = new FormData()
+        fd.append('file', file)
+        if (name?.trim()) {
+            fd.append('name', name.trim())
+        }
+        return api.post<Project>('/api/v1/projects/import-zip', fd)
+    },
 }
 
 export const usersAPI = {

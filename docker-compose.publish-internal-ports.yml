@@ -1,7 +1,9 @@
 # Опционально: опубликовать Postgres, Redis и backend на хосте (отладка, pgAdmin с хоста).
-# Запуск: docker compose -f docker-compose.yml -f docker-compose.publish-internal-ports.yml up -d
+# Запуск:
+#   docker compose -f docker-compose.yml -f docker-compose.publish-internal-ports.yml up -d
 #
 # По умолчанию в docker-compose.yml наружу выходит только frontend (FRONTEND_PORT).
+# Переменные портов: POSTGRES_PORT, REDIS_PORT, BACKEND_PORT в .env (см. .env.example).
 
 services:
   postgres:

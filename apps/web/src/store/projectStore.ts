@@ -14,11 +14,13 @@ interface ProjectStore {
     error: string | null
 
     // Actions
-    fetchProjects: () => Promise<void>
+    /** silent: обновить список без isLoading (например после импорта ZIP — сразу актуальные счётчики на карточке). */
+    fetchProjects: (opts?: { silent?: boolean }) => Promise<void>
     createProject: (data: ProjectCreate) => Promise<Project | null>
     fetchProject: (id: string) => Promise<void>
     updateProject: (id: string, data: ProjectUpdate) => Promise<void>
     deleteProject: (id: string) => Promise<void>
+    importProjectFromZip: (file: File, name?: string) => Promise<Project | null>
     setCurrentProject: (project: Project | null) => void
     clearError: () => void
 }
@@ -31,14 +33,24 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     error: null,
 
     // Fetch all projects
-    fetchProjects: async () => {
-        set({ isLoading: true, error: null })
+    fetchProjects: async (opts?: { silent?: boolean }) => {
+        const silent = Boolean(opts?.silent)
+        if (!silent) {
+            set({ isLoading: true, error: null })
+        }
         try {
             const response = await projectsAPI.list()
-            set({ projects: response.data, isLoading: false })
+            set((state) => ({
+                projects: response.data,
+                ...(silent ? {} : { isLoading: false }),
+                error: null,
+            }))
         } catch (error: any) {
             const message = error.response?.data?.detail || 'Не удалось загрузить проекты'
-            set({ error: message, isLoading: false })
+            set((state) => ({
+                ...(silent ? {} : { isLoading: false }),
+                error: message,
+            }))
             notify.error(message, { title: 'Ошибка загрузки' })
         }
     },
@@ -131,6 +143,28 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             const message = error.response?.data?.detail || 'Не удалось удалить проект'
             set({ error: message, isLoading: false })
             notify.error(message, { title: 'Ошибка удаления' })
+        }
+    },
+
+    importProjectFromZip: async (file: File, name?: string) => {
+        set({ error: null })
+        try {
+            const response = await projectsAPI.importZip(file, name)
+            const newProject = response.data
+            await get().fetchProjects({ silent: true })
+            notify.success(`Проект «${newProject.name}» импортирован`, { title: 'Импорт' })
+            return newProject
+        } catch (error: unknown) {
+            const er = error as { response?: { data?: { detail?: string } }; message?: string }
+            const message =
+                er.response?.data?.detail ||
+                er.message ||
+                'Не удалось импортировать архив'
+            set({ error: typeof message === 'string' ? message : 'Ошибка импорта' })
+            notify.error(typeof message === 'string' ? message : 'Ошибка импорта', {
+                title: 'Импорт',
+            })
+            return null
         }
     },
 

@@ -22,6 +22,8 @@
 
 **История чата**: для доски — PostgreSQL (`chat_messages`, привязка к `board_id`); для дашборда — **Redis** (сессии по пользователю и `dashboard_id`), см. `apps/backend/app/routes/ai_assistant.py`.
 
+**Права доступа (доска)**: чтение истории чата доски допускается при **просмотре** проекта доски. **Отправка** сообщений (REST `POST .../boards/{board_id}/ai/chat`, Socket.IO стрим, удаление сессии чата) требует **права на изменение** проекта (`get_board_for_edit` / `require_project_edit_access`); участник с ролью **viewer** в проекте получит отказ. См. [`PROJECT_ACCESS.md`](./PROJECT_ACCESS.md).
+
 **Сервер (дашборд, Socket.IO)**: в событии `ai_chat_stream` передаются `scope: "dashboard"`, `board_id` (идентификатор дашборда), `access_token` (JWT) и остальные поля; обработчик в `apps/backend/app/core/socketio.py` проверяет токен, строит контекст дашборда и передаёт в оркестратор `_progress_callback` / `_enable_plan_progress`, как для доски.
 
 **Подключение клиента**: при использовании `io({ auth: { token } })` серверный обработчик `connect` принимает третий аргумент `auth` (требование python-socketio / Socket.IO v4).
