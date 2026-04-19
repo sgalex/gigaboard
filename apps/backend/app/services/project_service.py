@@ -70,17 +70,28 @@ class ProjectService:
     @staticmethod
     async def list_projects_with_counts(
         db: AsyncSession,
-        user_id: UUID
+        user_id: UUID,
+        *,
+        owner_user_id: UUID | None = None,
+        requester_is_admin: bool = False,
     ) -> list[dict]:
         """List all projects with boards, dashboards, sources, widgets, tables counts."""
-        accessible = or_(
-            Project.user_id == user_id,
-            Project.id.in_(
-                select(ProjectCollaborator.project_id).where(
-                    ProjectCollaborator.user_id == user_id
+        if owner_user_id is not None:
+            if not requester_is_admin:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Admin access required",
                 )
-            ),
-        )
+            accessible = Project.user_id == owner_user_id
+        else:
+            accessible = or_(
+                Project.user_id == user_id,
+                Project.id.in_(
+                    select(ProjectCollaborator.project_id).where(
+                        ProjectCollaborator.user_id == user_id
+                    )
+                ),
+            )
         result = await db.execute(
             select(
                 Project,

@@ -4,7 +4,7 @@
 
 Инструкция описывает **пошаговый запуск полного стека GigaBoard** (PostgreSQL, Redis, FastAPI backend, nginx + frontend) на **виртуальной машине с Linux** через **Docker Engine** и **Docker Compose**. По умолчанию **на хост публикуется только порт веб-интерфейса** (`FRONTEND_PORT`, nginx): REST (`/api/`), Socket.IO (`/socket.io/`) и документация API (`/docs`, `/redoc`) проксируются внутрь сети Compose. PostgreSQL, Redis и backend **не слушают порты на хосте**. Для локального Docker Desktop на Windows/Mac см. также [DOCKER_DESKTOP.md](../DOCKER_DESKTOP.md) в корне репозитория.
 
-**Ключевые файлы:** корневой `docker-compose.yml`, `apps/backend/Dockerfile`, `apps/web/Dockerfile`, шаблон [`.env.example`](../.env.example), вспомогательные ресурсы в [`res/`](../res/) (см. [`res/README.md`](../res/README.md)).
+**Ключевые файлы:** корневой [`docker-compose.yml`](../docker-compose.yml), опционально [`docker-compose.dev.yml`](../docker-compose.dev.yml) (Vite + `--reload`), [`docker-compose.publish-internal-ports.yml`](../docker-compose.publish-internal-ports.yml), `apps/backend/Dockerfile`, `apps/web/Dockerfile`, шаблон [`.env.example`](../.env.example), вспомогательные ресурсы в [`res/`](../res/) (см. [`res/README.md`](../res/README.md)).
 
 **База данных в контейнере:** сервис `backend` получает `DATABASE_URL` **только** из `docker-compose.yml` (хост `postgres`, не `localhost`). Строка `DATABASE_URL` в корневом `.env` на машине разработчика **не подменяет** подключение внутри контейнера: при старте в логах backend будет строка вида `Database target (DATABASE_URL): postgres:5432/gigaboard`. Локальный `run-backend.ps1` и Docker — это **разные** экземпляры Postgres, если вы не настраиваете общий хост вручную.
 
@@ -115,7 +115,8 @@ CORS_ORIGINS=http://10.0.0.5,http://10.0.0.5:80,http://gigaboard.example.com,htt
 
 | Переменная | По умолчанию | Когда менять |
 |------------|--------------|--------------|
-| `FRONTEND_PORT` | `3000` | Нужен стандартный HTTP 80 → `80` (на Linux может потребоваться `sudo`); иначе любой свободный порт (`8080` и т.д.) |
+| `FRONTEND_PORT` | `3000` | Только **production**-стек (`docker compose up`): хост → nginx в контейнере `:80`. Нужен HTTP 80 → `80` (на Linux может потребоваться привилегированный порт); иначе любой свободный порт (`8080` и т.д.) |
+| `FRONTEND_DEV_PORT` | `5173` | Только **dev**-слияние с [`docker-compose.dev.yml`](../docker-compose.dev.yml): хост → Vite в контейнере. С `FRONTEND_PORT` **не** путается: в dev для `frontend` порты в override заданы через `!override`, чтобы не оставался лишний маппинг `FRONTEND_PORT:80` от базового compose (см. [Merge в Compose](https://docs.docker.com/reference/compose-file/merge/)). |
 
 **Публикация Postgres / Redis / backend на хост** (отладка, pgAdmin с ноутбука и т.п.):
 
@@ -123,9 +124,28 @@ CORS_ORIGINS=http://10.0.0.5,http://10.0.0.5:80,http://gigaboard.example.com,htt
 docker compose -f docker-compose.yml -f docker-compose.publish-internal-ports.yml up -d
 ```
 
-Файл `docker-compose.publish-internal-ports.yml` добавляет `ports` для `postgres`, `redis`, `backend` (переменные `POSTGRES_PORT`, `REDIS_PORT`, `BACKEND_PORT` из `.env`).
+Файл `docker-compose.publish-internal-ports.yml` добавляет `ports` для `postgres`, `redis`, `backend` (переменные `POSTGRES_PORT`, `REDIS_PORT`, `BACKEND_PORT` из `.env`; см. комментарии в [`.env.example`](../.env.example)).
 
 **Сборка SPA для одного origin с nginx:** не задавайте `VITE_API_URL` в `.env` (или оставьте пустым) — фронт ходит на `/api/...` и Socket.IO на тот же хост.
+
+### (Опционально) Dev-стек на ВМ: Vite + hot reload backend
+
+Из корня репозитория:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+- Веб-интерфейс: `http://<VM_IP>:5173` (или значение **`FRONTEND_DEV_PORT`** в `.env`). Прокси API на `backend:8000` задаётся в compose (`VITE_DEV_PROXY_TARGET`).
+- **pgAdmin** и **Redis Commander** подключаются только с профилем **`tools`**:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile tools up -d
+```
+
+Порты по умолчанию: `PGADMIN_PORT` → 5050, `REDIS_COMMANDER_PORT` → 8081 (см. `docker-compose.dev.yml`).
+
+После смены зависимостей в `package.json` / корневом lockfile пересоберите образ frontend: `docker compose -f docker-compose.yml -f docker-compose.dev.yml build frontend`.
 
 **Сборка backend, если с ВМ недоступен `pypi.org`:**
 
@@ -163,6 +183,7 @@ sudo ufw status
 ```bash
 cd /opt/gigaboard   # ваш путь
 docker compose build
+# при необходимости подтянуть базовые образы (postgres/redis/node): docker compose build --pull
 docker compose up -d
 ```
 
@@ -234,6 +255,7 @@ docker compose down
 cd /opt/gigaboard
 git pull
 docker compose build
+# опционально: docker compose build --pull
 docker compose up -d
 ```
 
@@ -269,7 +291,7 @@ docker compose exec postgres pg_dump -U gigaboard gigaboard > backup_$(date +%Y%
 | **Порт занят** | `FRONTEND_PORT` в `.env`; при использовании `docker-compose.publish-internal-ports.yml` — также `POSTGRES_PORT`, `REDIS_PORT`, `BACKEND_PORT` |
 | **502 / нет API с браузера** | `docker compose ps`, логи `backend`; CORS — `CORS_ORIGINS` должен включать Origin браузера |
 | **307 на POST, затем ERR_CONNECTION_REFUSED** | Редирект trailing slash строил URL на `backend:8000`. В образе включены `uvicorn --proxy-headers`, nginx передаёт `Host` / `X-Forwarded-Host` (`$http_host`). Пересоберите `frontend` + `backend` |
-| **413 при загрузке файла (Excel и др.)** | Nginx по умолчанию режет тело запроса (**1 MB**). В `apps/web/nginx.conf` задано `client_max_body_size` (согласуйте с `STORAGE_MAX_FILE_SIZE_MB`). После правки: `docker compose build frontend && docker compose up -d frontend`. Внешний nginx на ВМ — см. `res/nginx-vm-gigaboard.conf` (`client_max_body_size`) |
+| **413 при загрузке файла (Excel и др.) или при импорте ZIP проекта** | Nginx по умолчанию режет тело запроса (**1 MB**). В `apps/web/nginx.conf` задано `client_max_body_size` (по умолчанию **100m**; согласуйте с `STORAGE_MAX_FILE_SIZE_MB` и размером архивов импорта). После правки: `docker compose build frontend && docker compose up -d frontend`. Внешний nginx на ВМ — см. `res/nginx-vm-gigaboard.conf` (`client_max_body_size`) |
 | **Прогресс ИИ / стрим «застыл» на ВМ** | Внешний nginx перед Docker часто **буферизует** ответ (`proxy_buffering on` по умолчанию) — NDJSON доходит одним куском в конце. В `location /` добавьте `proxy_buffering off; proxy_cache off; proxy_request_buffering off;` (см. актуальный [`res/nginx-vm-gigaboard.conf`](../res/nginx-vm-gigaboard.conf)), затем `sudo nginx -t && sudo systemctl reload nginx`. Внутри образа фронта то же для `/api/` уже в `apps/web/nginx.conf` |
 | **Миграции** | Логи старта backend; локально: `cd apps/backend/migrations && uv run alembic heads` |
 | **Чистая переустановка БД** | `docker compose down` и удаление тома `*_postgres_data` (**удалит данные**) |
@@ -278,7 +300,7 @@ docker compose exec postgres pg_dump -U gigaboard gigaboard > backup_$(date +%Y%
 
 ## Связанные документы
 
-- [COMMANDS.md](./COMMANDS.md) — команды разработки и кратко про Docker Compose  
+- [COMMANDS.md](./COMMANDS.md) — команды разработки, production/dev Compose и профиль `tools` (pgAdmin, Redis Commander)  
 - [ADMIN_AND_SYSTEM_LLM.md](./ADMIN_AND_SYSTEM_LLM.md) — настройка LLM и админа в UI (не через `GIGACHAT_*` в `.env`)  
 - [`.env.example`](../.env.example) — полный перечень переменных с комментариями  
 - [`res/nginx-vm-gigaboard.conf`](../res/nginx-vm-gigaboard.conf) — готовый reverse-proxy конфиг nginx для ВМ (перед Docker Compose фронтом)

@@ -5,6 +5,7 @@
 #
 # Backend: bind-mount ./apps/backend/app, uvicorn --reload.
 # Frontend: Vite :5173 (FRONTEND_DEV_PORT), прокси на backend:8000 (VITE_DEV_PROXY_TARGET / vite.config.ts).
+# Порты: !override — иначе при merge с docker-compose.yml останется ещё FRONTEND_PORT:80 (nginx), а в dev-образе слушается только 5173.
 
 services:
   backend:
@@ -25,13 +26,14 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile.dev
-    ports:
+    ports: !override
       - "${FRONTEND_DEV_PORT:-5173}:5173"
     volumes:
       - ./apps/web/src:/workspace/apps/web/src
       - ./apps/web/public:/workspace/apps/web/public
       - ./apps/web/scripts:/workspace/apps/web/scripts
       - ./apps/web/vite.config.ts:/workspace/apps/web/vite.config.ts
+      - ./apps/web/tsconfig.json:/workspace/apps/web/tsconfig.json
       - ./apps/web/index.html:/workspace/apps/web/index.html
       - ./apps/web/postcss.config.cjs:/workspace/apps/web/postcss.config.cjs
       - ./apps/web/tailwind.config.js:/workspace/apps/web/tailwind.config.js

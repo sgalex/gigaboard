@@ -218,6 +218,37 @@ export function operatorLabel(op: FilterOperator): string {
     return labels[op] || op
 }
 
+/** Имена измерений (поле `dim`), участвующие в активном кросс-фильтре. */
+export function activeFilterDimensions(expr: FilterExpression | null): Set<string> {
+    return new Set(flattenConditions(expr).map((c) => c.dim))
+}
+
+/**
+ * Есть ли у таблицы поле, сопоставленное с измерением из активного фильтра (nodeMappings).
+ * См. DimensionColumnMapping: node_id, table_name, column_name, dim_name.
+ */
+export function isTableAffectedByCrossFilter(
+    table: { name: string; columns?: { name: string }[]; rows?: Record<string, unknown>[] },
+    activeDims: Set<string>,
+    nodeMappings: DimensionColumnMapping[] | undefined
+): boolean {
+    if (!activeDims.size) return false
+    const colNames = new Set<string>()
+    for (const c of table.columns ?? []) {
+        if (c?.name) colNames.add(c.name)
+    }
+    if (colNames.size === 0 && table.rows?.[0]) {
+        for (const k of Object.keys(table.rows[0])) colNames.add(k)
+    }
+    for (const m of nodeMappings ?? []) {
+        if (!activeDims.has(m.dim_name)) continue
+        const tableOk = !m.table_name || m.table_name === table.name
+        const colOk = colNames.has(m.column_name)
+        if (tableOk && colOk) return true
+    }
+    return false
+}
+
 /**
  * Encode FilterExpression for use as URL query parameter.
  */

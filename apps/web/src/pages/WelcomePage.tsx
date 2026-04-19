@@ -24,6 +24,9 @@ import {
     Download,
     Upload,
     Loader2,
+    Check,
+    Search,
+    X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
@@ -48,12 +51,12 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ShareProjectDialog } from '@/components/projects/ShareProjectDialog'
 import { ImportProjectDialog } from '@/components/projects/ImportProjectDialog'
-import { projectsAPI } from '@/services/api'
+import { projectsAPI, usersAPI } from '@/services/api'
 import { useProjectStore } from '@/store/projectStore'
 import { notify } from '@/store/notificationStore'
 import { useUIStore } from '@/store/uiStore'
 import { useAuthStore } from '@/store/authStore'
-import type { ProjectMyAccess, ProjectWithBoards } from '@/types'
+import type { ProjectMyAccess, ProjectWithBoards, UserSearchResult } from '@/types'
 import { formatDistance } from 'date-fns'
 import { ru } from 'date-fns/locale'
 import { buildProjectExportZipFilename } from '@/lib/projectExportFilename'
@@ -138,10 +141,61 @@ export function WelcomePage() {
     const [isSaving, setIsSaving] = useState(false)
     const [importOpen, setImportOpen] = useState(false)
     const [exportingId, setExportingId] = useState<string | null>(null)
+    const [userPickerOpen, setUserPickerOpen] = useState(false)
+    const [activeProjectsTab, setActiveProjectsTab] = useState<'mine' | string>('mine')
+    const [selectedUsers, setSelectedUsers] = useState<UserSearchResult[]>([])
+    const [userSearchQuery, setUserSearchQuery] = useState('')
+    const [userSearchResults, setUserSearchResults] = useState<UserSearchResult[]>([])
+    const [isUserSearchLoading, setIsUserSearchLoading] = useState(false)
+
+    const isAdmin = user?.role === 'admin'
+    const activeSelectedUser =
+        activeProjectsTab === 'mine'
+            ? null
+            : selectedUsers.find((candidate) => candidate.id === activeProjectsTab) ?? null
+    const isViewingSelectedUser = isAdmin && activeSelectedUser !== null
+    const ownerUserId = isViewingSelectedUser ? activeSelectedUser.id : undefined
+    const hasAdditionalTabs = selectedUsers.length > 0
 
     useEffect(() => {
-        fetchProjects()
-    }, [fetchProjects])
+        fetchProjects({ ownerUserId })
+    }, [fetchProjects, ownerUserId])
+
+    useEffect(() => {
+        if (isAdmin) return
+        setActiveProjectsTab('mine')
+        setSelectedUsers([])
+    }, [isAdmin])
+
+    useEffect(() => {
+        if (!userPickerOpen || !isAdmin) return
+        let cancelled = false
+        const timer = window.setTimeout(async () => {
+            setIsUserSearchLoading(true)
+            try {
+                const response = await usersAPI.listForAdmin(userSearchQuery, 200)
+                if (cancelled) return
+                setUserSearchResults(response.data.filter((candidate) => candidate.id !== user?.id))
+            } catch (error: unknown) {
+                if (cancelled) return
+                const msg =
+                    error instanceof Error
+                        ? error.message
+                        : 'Не удалось загрузить список пользователей'
+                notify.error(msg, { title: 'Выбор пользователя' })
+                setUserSearchResults([])
+            } finally {
+                if (!cancelled) {
+                    setIsUserSearchLoading(false)
+                }
+            }
+        }, 250)
+
+        return () => {
+            cancelled = true
+            window.clearTimeout(timer)
+        }
+    }, [isAdmin, user?.id, userPickerOpen, userSearchQuery])
 
     useEffect(() => {
         if (projectToEdit) {
@@ -212,6 +266,29 @@ export function WelcomePage() {
 
     const fullName = user?.username || user?.email?.split('@')[0] || ''
     const displayName = fullName ? fullName.trim().split(/\s+/)[0] : 'друг'
+
+    const handleSelectProjectsTab = (tab: 'mine' | string) => {
+        if (tab !== 'mine' && !selectedUsers.some((candidate) => candidate.id === tab)) return
+        setActiveProjectsTab(tab)
+    }
+
+    const handlePickUserProjects = (candidate: UserSearchResult) => {
+        setSelectedUsers((prev) => {
+            if (prev.some((item) => item.id === candidate.id)) {
+                return prev
+            }
+            return [...prev, candidate]
+        })
+        setActiveProjectsTab(candidate.id)
+        setUserPickerOpen(false)
+    }
+
+    const handleCloseUserTab = (userId: string) => {
+        setSelectedUsers((prev) => prev.filter((candidate) => candidate.id !== userId))
+        if (activeProjectsTab === userId) {
+            setActiveProjectsTab('mine')
+        }
+    }
 
     return (
         <div className="min-h-full overflow-y-auto bg-transparent">
@@ -302,13 +379,71 @@ export function WelcomePage() {
 
                 {/* Projects Section */}
                 <section>
-                    <div className="mb-6">
-                        <h2 className="text-xl font-semibold text-foreground flex items-center gap-2 sm:text-2xl">
+                    <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+                        <h2 className="text-xl font-semibold text-foreground flex items-center gap-3 sm:text-2xl">
                             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
                                 <FolderKanban className="h-5 w-5" />
                             </span>
-                            Мои проекты
+                            {hasAdditionalTabs ? (
+                                <span className="inline-flex items-center gap-2 rounded-lg border bg-card/60 p-1 text-base sm:text-lg">
+                                    <button
+                                        type="button"
+                                        onClick={() => handleSelectProjectsTab('mine')}
+                                        className={`rounded-md px-3 py-1.5 transition-colors ${
+                                            activeProjectsTab === 'mine'
+                                                ? 'bg-primary text-primary-foreground'
+                                                : 'text-muted-foreground hover:text-foreground'
+                                        }`}
+                                    >
+                                        Мои проекты
+                                    </button>
+                                    {selectedUsers.map((candidate) => {
+                                        const isActive = activeProjectsTab === candidate.id
+                                        return (
+                                            <span
+                                                key={candidate.id}
+                                                className={`inline-flex items-center gap-1 rounded-md px-1 py-1 transition-colors ${
+                                                    isActive
+                                                        ? 'bg-primary text-primary-foreground'
+                                                        : 'text-muted-foreground hover:text-foreground'
+                                                }`}
+                                            >
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleSelectProjectsTab(candidate.id)}
+                                                    className="rounded-sm px-2 py-0.5"
+                                                >
+                                                    Проекты: {candidate.username}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    title={`Закрыть вкладку ${candidate.username}`}
+                                                    className="rounded-sm p-1 hover:bg-black/10"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation()
+                                                        handleCloseUserTab(candidate.id)
+                                                    }}
+                                                >
+                                                    <X className="h-3.5 w-3.5" />
+                                                </button>
+                                            </span>
+                                        )
+                                    })}
+                                </span>
+                            ) : (
+                                <span>Мои проекты</span>
+                            )}
                         </h2>
+                        {isAdmin ? (
+                            <Button
+                                variant="outline"
+                                size="icon"
+                                title="Выбрать пользователя"
+                                onClick={() => setUserPickerOpen(true)}
+                            >
+                                <Search className="h-4 w-4" />
+                            </Button>
+                        ) : null}
                     </div>
 
                     {isLoading ? (
@@ -332,34 +467,44 @@ export function WelcomePage() {
                                 <div className="mb-5 flex h-20 w-20 items-center justify-center rounded-2xl bg-primary/10 text-primary">
                                     <FolderKanban className="h-10 w-10" />
                                 </div>
-                                <p className="text-lg font-semibold text-foreground mb-2">Пока нет проектов</p>
-                                <p className="text-center text-sm text-muted-foreground mb-6 max-w-sm">
-                                    Создайте первый проект — добавьте источники данных, постройте трансформации и дашборды.
+                                <p className="text-lg font-semibold text-foreground mb-2">
+                                    {isViewingSelectedUser
+                                        ? `У пользователя ${activeSelectedUser?.username ?? ''} пока нет проектов`
+                                        : 'Пока нет проектов'}
                                 </p>
-                                <div className="flex flex-wrap justify-center gap-3">
-                                    <Button onClick={openCreateProjectDialog} className="gap-2 rounded-full" size="lg">
-                                        <Plus className="h-4 w-4" />
-                                        Создать проект
-                                    </Button>
-                                    <Button
-                                        variant="outline"
-                                        onClick={() => setImportOpen(true)}
-                                        className="gap-2 rounded-full"
-                                        size="lg"
-                                    >
-                                        <Upload className="h-4 w-4" />
-                                        Импорт проекта
-                                    </Button>
-                                </div>
+                                <p className="text-center text-sm text-muted-foreground mb-6 max-w-sm">
+                                    {isViewingSelectedUser
+                                        ? 'Выберите другого пользователя или вернитесь во вкладку «Мои проекты».'
+                                        : 'Создайте первый проект — добавьте источники данных, постройте трансформации и дашборды.'}
+                                </p>
+                                {!isViewingSelectedUser ? (
+                                    <div className="flex flex-wrap justify-center gap-3">
+                                        <Button onClick={openCreateProjectDialog} className="gap-2 rounded-full" size="lg">
+                                            <Plus className="h-4 w-4" />
+                                            Создать проект
+                                        </Button>
+                                        <Button
+                                            variant="outline"
+                                            onClick={() => setImportOpen(true)}
+                                            className="gap-2 rounded-full"
+                                            size="lg"
+                                        >
+                                            <Upload className="h-4 w-4" />
+                                            Импорт проекта
+                                        </Button>
+                                    </div>
+                                ) : null}
                             </CardContent>
                         </Card>
                     ) : (
                         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                             {projects.map((project: ProjectWithBoards, index) => {
                                 const access = resolveMyAccess(project)
-                                const canShareProject = access === 'owner' || access === 'admin'
-                                const canExportProject = access !== 'viewer'
-                                const showProjectMenu = access !== 'viewer' || canShareProject
+                                const canManageProject = !isViewingSelectedUser
+                                const canShareProject =
+                                    canManageProject && (access === 'owner' || access === 'admin')
+                                const canExportProject = canManageProject && access !== 'viewer'
+                                const showProjectMenu = canManageProject && (access !== 'viewer' || canShareProject)
                                 const isOwner = access === 'owner'
                                 return (
                                 <Card
@@ -569,6 +714,66 @@ export function WelcomePage() {
                             {isSaving ? 'Сохранение...' : 'Сохранить'}
                         </Button>
                     </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog
+                open={userPickerOpen}
+                onOpenChange={(open) => {
+                    setUserPickerOpen(open)
+                    if (!open) {
+                        setUserSearchQuery('')
+                    }
+                }}
+            >
+                <DialogContent className="sm:max-w-lg">
+                    <DialogHeader>
+                        <DialogTitle>Выбрать пользователя</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-3">
+                        <Input
+                            value={userSearchQuery}
+                            onChange={(e) => setUserSearchQuery(e.target.value)}
+                            placeholder="Поиск по имени или email"
+                            autoFocus
+                        />
+                        <div className="max-h-72 overflow-y-auto rounded-md border">
+                            {isUserSearchLoading ? (
+                                <div className="flex items-center justify-center gap-2 p-4 text-sm text-muted-foreground">
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    Загрузка пользователей...
+                                </div>
+                            ) : userSearchResults.length === 0 ? (
+                                <div className="p-4 text-sm text-muted-foreground">
+                                    Пользователи не найдены
+                                </div>
+                            ) : (
+                                <ul className="divide-y">
+                                    {userSearchResults.map((candidate) => (
+                                        <li key={candidate.id}>
+                                            <button
+                                                type="button"
+                                                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-muted/50"
+                                                onClick={() => handlePickUserProjects(candidate)}
+                                            >
+                                                <span>
+                                                    <span className="block text-sm font-medium">
+                                                        {candidate.username}
+                                                    </span>
+                                                    <span className="block text-xs text-muted-foreground">
+                                                        {candidate.email}
+                                                    </span>
+                                                </span>
+                                                {selectedUsers.some((item) => item.id === candidate.id) ? (
+                                                    <Check className="h-4 w-4 text-primary" />
+                                                ) : null}
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                    </div>
                 </DialogContent>
             </Dialog>
 

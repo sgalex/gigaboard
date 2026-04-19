@@ -8,7 +8,7 @@ import httpx
 import json
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_db
@@ -26,6 +26,7 @@ from app.schemas import (
     AgentLLMOverridesSet,
     SystemLLMPlaygroundRunRequest,
     UserAISettingsTestResponse,
+    UserSearchResult,
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -43,6 +44,32 @@ AGENT_KEYS = [
     # Служебные ключи привязки LLM (не шаги плана), см. LLM_CONFIGURATION_CONCEPT.md
     "context_graph_compression",
 ]
+
+
+@router.get(
+    "/users",
+    response_model=list[UserSearchResult],
+    status_code=status.HTTP_200_OK,
+)
+async def list_users_for_admin(
+    q: str = Query("", max_length=200, description="Поиск по username/email"),
+    limit: int = Query(100, ge=1, le=500, description="Максимум записей"),
+    current_user: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[UserSearchResult]:
+    """Список пользователей системы для admin (поиск + ограничение)."""
+    term = (q or "").strip()
+    stmt = select(User).where(User.deleted_at.is_(None))
+    if term:
+        pat = f"%{term}%"
+        stmt = stmt.where(or_(User.username.ilike(pat), User.email.ilike(pat)))
+    stmt = stmt.order_by(User.username.asc()).limit(limit)
+    result = await db.execute(stmt)
+    users = result.scalars().all()
+    return [
+        UserSearchResult(id=u.id, username=u.username, email=u.email)
+        for u in users
+    ]
 
 
 def _llm_config_to_response(c: LLMConfig) -> LLMConfigResponse:

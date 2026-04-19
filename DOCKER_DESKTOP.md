@@ -264,22 +264,31 @@ BACKEND_PORT=8001
 
 ## 🔄 Development режим с hot reload
 
-Для разработки используйте `docker-compose.dev.yml`:
+Для разработки используйте [`docker-compose.dev.yml`](docker-compose.dev.yml) вместе с базовым compose:
 
 ```bash
-# Запуск в dev режиме
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
-
-# Теперь:
-# - Backend перезагружается при изменении кода
-# - Frontend использует Vite dev server с HMR
-# - Доступны pgAdmin (localhost:5050) и Redis Commander (localhost:8081)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
-**Логины для dev tools:**
+- **Backend**: bind-mount `apps/backend/app`, `uvicorn --reload`.
+- **Frontend**: Vite в контейнере, HMR. Открывайте **`http://localhost:5173`** (или порт из **`FRONTEND_DEV_PORT`** в `.env`). В compose задано `VITE_DEV_PROXY_TARGET=http://backend:8000` (см. `apps/web/vite.config.ts`).
+- Порт **`FRONTEND_PORT` (3000)** в этом режиме **не** публикуется для сервиса `frontend`: в `docker-compose.dev.yml` для `ports` используется **`!override`**, чтобы при слиянии с `docker-compose.yml` не остался лишний маппинг на nginx `:80` внутри dev-образа.
 
-- **pgAdmin**: `admin@gigaboard.local` / `admin`
+**pgAdmin и Redis Commander** поднимаются только с профилем **`tools`**:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile tools up --build
+```
+
+- **pgAdmin**: `http://localhost:5050` (переменная `PGADMIN_PORT`).
+- **Redis Commander**: `http://localhost:8081` (`REDIS_COMMANDER_PORT`).
+
+**Логины по умолчанию** (можно переопределить в `.env`, см. `.env.example`):
+
+- **pgAdmin**: `admin@gigaboard.local` / `admin` (или `PGADMIN_EMAIL` / `PGADMIN_PASSWORD`)
 - **Redis Commander**: без авторизации
+
+Подробнее: [docs/COMMANDS.md](docs/COMMANDS.md), [docs/DOCKER_VM_DEPLOYMENT.md](docs/DOCKER_VM_DEPLOYMENT.md).
 
 ---
 

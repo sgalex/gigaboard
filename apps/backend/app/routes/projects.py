@@ -3,7 +3,7 @@ from datetime import datetime
 from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_db
@@ -69,11 +69,20 @@ async def import_project_zip(
     responses={401: {"model": ErrorResponse}}
 )
 async def list_projects(
+    owner_user_id: UUID | None = Query(
+        None,
+        description="Только для admin: показать проекты конкретного владельца",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """List all projects for current user."""
-    projects = await ProjectService.list_projects_with_counts(db, current_user.id)
+    projects = await ProjectService.list_projects_with_counts(
+        db,
+        current_user.id,
+        owner_user_id=owner_user_id,
+        requester_is_admin=getattr(current_user, "role", "user") == "admin",
+    )
     return projects
 
 

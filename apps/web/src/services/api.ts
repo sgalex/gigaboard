@@ -107,7 +107,10 @@ export const healthAPI = {
 
 // Projects API
 export const projectsAPI = {
-    list: () => api.get<ProjectWithBoards[]>('/api/v1/projects'),
+    list: (ownerUserId?: string) =>
+        api.get<ProjectWithBoards[]>('/api/v1/projects', {
+            params: ownerUserId ? { owner_user_id: ownerUserId } : {},
+        }),
     create: (data: ProjectCreate) => api.post<Project>('/api/v1/projects', data),
     get: (id: string) => api.get<Project>(`/api/v1/projects/${id}`),
     update: (id: string, data: ProjectUpdate) => api.put<Project>(`/api/v1/projects/${id}`, data),
@@ -166,6 +169,10 @@ export const usersAPI = {
     search: (q: string, projectId: string) =>
         api.get<UserSearchResult[]>('/api/v1/users/search', {
             params: { q, project_id: projectId },
+        }),
+    listForAdmin: (q: string, limit: number = 100) =>
+        api.get<UserSearchResult[]>('/api/v1/admin/users', {
+            params: { q, limit },
         }),
 }
 

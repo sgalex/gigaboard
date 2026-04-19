@@ -67,6 +67,21 @@ interface LibraryStore {
 // In-flight guard to prevent duplicate auto-sync requests for the same widget node
 const _syncingWidgetNodes = new Set<string>()
 
+/** API tables may expose columns as strings or `{ name, type }` objects */
+function normalizeTableColumnNames(columns: unknown): string[] {
+    if (!Array.isArray(columns)) return []
+    const names: string[] = []
+    for (const c of columns) {
+        if (typeof c === 'string') {
+            if (c) names.push(c)
+        } else if (c && typeof c === 'object' && 'name' in c) {
+            const n = (c as { name: unknown }).name
+            if (typeof n === 'string' && n) names.push(n)
+        }
+    }
+    return names
+}
+
 export const useLibraryStore = create<LibraryStore>((set, get) => ({
     widgets: [],
     tables: [],
@@ -241,7 +256,7 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
                                 boardName: board.name,
                                 rowCount: t.row_count || 0,
                                 columnCount: t.column_count || 0,
-                                columns: Array.isArray(t.columns) ? t.columns : [],
+                                columns: normalizeTableColumnNames(t.columns),
                             })
                         })
                     }
@@ -260,7 +275,7 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
                                 boardName: board.name,
                                 rowCount: t.row_count || 0,
                                 columnCount: t.column_count || 0,
-                                columns: Array.isArray(t.columns) ? t.columns : [],
+                                columns: normalizeTableColumnNames(t.columns),
                             })
                         })
                     }

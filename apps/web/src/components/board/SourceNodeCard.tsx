@@ -6,7 +6,7 @@
  * 
  * См. docs/SOURCE_NODE_CONCEPT_V2.md
  */
-import { memo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { useFilterStore } from '@/store/filterStore'
 import { Handle, Position, NodeProps } from '@xyflow/react'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
@@ -53,6 +53,11 @@ import {
     Filter,
 } from 'lucide-react'
 import { SourceNode, SourceType } from '@/types'
+import {
+    activeFilterDimensions,
+    flattenConditions,
+    isTableAffectedByCrossFilter,
+} from '@/types/crossFilter'
 import { useBoardStore } from '@/store/boardStore'
 import { cn } from '@/lib/utils'
 import { TransformDialog } from './TransformDialog'
@@ -184,9 +189,23 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
 
     // Get content data (SourceNode now has content field from ContentNode inheritance)
     const content = sourceNode.content
+    const activeFilters = useFilterStore((s) => s.activeFilters)
+    const hasActiveCrossFilter = flattenConditions(activeFilters).length > 0
     const filteredEntry = useFilterStore((s) => s.filteredNodeData?.[sourceNode.id] ?? null)
-    const isFiltered = filteredEntry !== null
-    const tables = filteredEntry?.tables ?? content?.tables ?? []
+    const loadMappingsForNode = useFilterStore((s) => s.loadMappingsForNode)
+    const nodeMappingsForCrossHint = useFilterStore((s) => s.nodeMappings[sourceNode.id])
+
+    useEffect(() => {
+        void loadMappingsForNode(sourceNode.id)
+    }, [sourceNode.id, loadMappingsForNode])
+
+    const activeFilterDims = useMemo(() => activeFilterDimensions(activeFilters), [activeFilters])
+    const tableShowsCrossFilterHint = (table: any) =>
+        isTableAffectedByCrossFilter(table, activeFilterDims, nodeMappingsForCrossHint)
+
+    const tables = hasActiveCrossFilter
+        ? (filteredEntry?.tables ?? content?.tables ?? [])
+        : (content?.tables ?? [])
     const tableCount = tables.length
     const totalRows = tables.reduce((sum: number, t: any) => sum + (t.row_count || 0), 0)
     const hasText = !!content?.text
@@ -666,12 +685,6 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                     {/* Data preview (tables as clickable badges) */}
                     {tableCount > 0 && (
                         <div className="flex flex-wrap gap-1.5">
-                            {isFiltered && (
-                                <Filter
-                                    className="w-3 h-3 text-blue-600"
-                                    aria-label="Фильтр активен"
-                                />
-                            )}
                             {tables.map((table, idx: number) => (
                                 <Badge
                                     key={idx}
@@ -684,8 +697,14 @@ export const SourceNodeCard = memo(({ data, selected }: SourceNodeCardProps) => 
                                 >
                                     <Table2 className="h-3 w-3 mr-1" />
                                     <span className="font-medium">{table.name}</span>
-                                    <span className="ml-1.5 px-1.5 py-0.5 bg-primary/10 rounded text-[10px] font-semibold">
-                                        {table.row_count || 0}
+                                    <span className="ml-1.5 inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-primary/10 rounded text-[10px] font-semibold shrink-0">
+                                        <span>{table.row_count || 0}</span>
+                                        {tableShowsCrossFilterHint(table) && (
+                                            <Filter
+                                                className="w-3 h-3 text-blue-600 shrink-0"
+                                                aria-label="Кросс-фильтр затрагивает эту таблицу"
+                                            />
+                                        )}
                                     </span>
                                 </Badge>
                             ))}

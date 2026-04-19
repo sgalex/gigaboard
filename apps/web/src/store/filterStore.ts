@@ -101,6 +101,12 @@ interface FilterActions {
 
     getDataStack: (widgetNodeId: string) => { tables: any[] }[]
     pushToDataStack: (widgetNodeId: string, tables: any[]) => void
+    /**
+     * Оставляет стек только у указанного виджета (снимок перед его toggleFilter).
+     * Остальные стеки сбрасываются, иначе getPreviousData() у «тихих» виджетов продолжает
+     * отдавать полный датасет после фильтра с другой карточки.
+     */
+    clearWidgetDataStacksExcept: (keepWidgetId?: string | null) => void
 
     /** Резолв имени измерения по полю и content node (4-tier, см. CROSS_FILTER_SYSTEM). */
     resolveDimensionForWidget: (field: string, contentNodeId: string) => string
@@ -199,7 +205,7 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
     // ── Filter mutations ───────────────────────────────────────────
 
     setFilters: (filters) => {
-        set({ activeFilters: filters, activePresetId: null })
+        set({ activeFilters: filters, activePresetId: null, widgetDataStacks: {} })
         get().syncFiltersToBackend()
         get().computeFiltered()
     },
@@ -225,9 +231,29 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
     removeCondition: (dimName) => {
         const { activeFilters } = get()
         const existing = flattenConditions(activeFilters)
+        const removedInitiators = new Set<string>()
+        for (const c of existing) {
+            if (
+                c.dim === dimName &&
+                c.initiatorWidgetId != null &&
+                c.initiatorWidgetId !== ''
+            ) {
+                removedInitiators.add(c.initiatorWidgetId)
+            }
+        }
         const filtered = existing.filter((c) => c.dim !== dimName)
         const newFilters = buildAndGroup(filtered)
-        set({ activeFilters: newFilters, activePresetId: null })
+        set((s) => {
+            const nextStacks = { ...s.widgetDataStacks }
+            for (const wid of removedInitiators) {
+                delete nextStacks[wid]
+            }
+            return {
+                activeFilters: newFilters,
+                activePresetId: null,
+                widgetDataStacks: nextStacks,
+            }
+        })
         get().syncFiltersToBackend()
         get().computeFiltered()
     },
@@ -264,6 +290,7 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
 
     handleWidgetClick: (field, value, contentNodeId, initiatorWidgetId) => {
         void get().loadMappingsForNode(contentNodeId)
+        get().clearWidgetDataStacksExcept(initiatorWidgetId)
         const dimName = get().resolveDimensionForWidget(field, contentNodeId)
         get().addCondition({
             type: 'condition',
@@ -287,8 +314,19 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
                 (widgetId != null ? c.initiatorWidgetId === widgetId : !c.initiatorWidgetId)
         )
         if (idx >= 0) {
+            const removed = flat[idx]
             const rest = flat.filter((_, i) => i !== idx)
-            set({ activeFilters: buildAndGroup(rest), activePresetId: null })
+            set((s) => {
+                const nextStacks = { ...s.widgetDataStacks }
+                if (removed.initiatorWidgetId != null && removed.initiatorWidgetId !== '') {
+                    delete nextStacks[removed.initiatorWidgetId]
+                }
+                return {
+                    activeFilters: buildAndGroup(rest),
+                    activePresetId: null,
+                    widgetDataStacks: nextStacks,
+                }
+            })
             get().syncFiltersToBackend()
             get().computeFiltered()
             return
@@ -325,6 +363,16 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
         }))
     },
 
+    clearWidgetDataStacksExcept: (keepWidgetId) => {
+        set((s) => {
+            if (keepWidgetId == null || keepWidgetId === '') {
+                return { widgetDataStacks: {} }
+            }
+            const kept = s.widgetDataStacks[keepWidgetId] ?? []
+            return { widgetDataStacks: { [keepWidgetId]: [...kept] } }
+        })
+    },
+
     // ── Presets ────────────────────────────────────────────────────
 
     loadPresets: async (projectId) => {
@@ -345,6 +393,7 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
         set({
             activeFilters: preset.filters,
             activePresetId: presetId,
+            widgetDataStacks: {},
         })
         get().syncFiltersToBackend()
         get().computeFiltered()

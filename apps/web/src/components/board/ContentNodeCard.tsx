@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { useFilterStore } from '@/store/filterStore'
 import { useLibraryStore } from '@/store/libraryStore'
 import { Handle, Position, NodeProps } from '@xyflow/react'
@@ -37,6 +37,11 @@ import {
     Copy,
 } from 'lucide-react'
 import { ContentNode } from '@/types'
+import {
+    activeFilterDimensions,
+    flattenConditions,
+    isTableAffectedByCrossFilter,
+} from '@/types/crossFilter'
 import { cn } from '@/lib/utils'
 import { TransformDialog } from './TransformDialog'
 import { WidgetDialog } from './WidgetDialog'
@@ -134,9 +139,23 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
         setShowPreviewModal(true)
     }
 
+    const activeFilters = useFilterStore((s) => s.activeFilters)
+    const hasActiveCrossFilter = flattenConditions(activeFilters).length > 0
     const filteredEntry = useFilterStore((s) => s.filteredNodeData?.[contentNode.id] ?? null)
-    const isFiltered = filteredEntry !== null
-    const activeTables = filteredEntry?.tables ?? contentNode.content?.tables ?? []
+    const loadMappingsForNode = useFilterStore((s) => s.loadMappingsForNode)
+    const nodeMappingsForCrossHint = useFilterStore((s) => s.nodeMappings[contentNode.id])
+
+    useEffect(() => {
+        void loadMappingsForNode(contentNode.id)
+    }, [contentNode.id, loadMappingsForNode])
+
+    const activeFilterDims = useMemo(() => activeFilterDimensions(activeFilters), [activeFilters])
+    const tableShowsCrossFilterHint = (table: any) =>
+        isTableAffectedByCrossFilter(table, activeFilterDims, nodeMappingsForCrossHint)
+
+    const activeTables = hasActiveCrossFilter
+        ? (filteredEntry?.tables ?? contentNode.content?.tables ?? [])
+        : (contentNode.content?.tables ?? [])
     const tableCount = activeTables.length
     const hasText = !!contentNode.content?.text
     const totalRows = activeTables.reduce((sum: number, t: any) => sum + (t.row_count || 0), 0)
@@ -628,12 +647,6 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
                     {/* Tables as clickable badges */}
                     {tableCount > 0 && (
                         <div className="flex flex-wrap gap-1.5">
-                            {isFiltered && (
-                                <Filter
-                                    className="w-3 h-3 text-blue-600"
-                                    aria-label="Фильтр активен"
-                                />
-                            )}
                             {activeTables.map((table: any, idx: number) => (
                                 <Badge
                                     key={idx}
@@ -642,8 +655,14 @@ export const ContentNodeCard = memo(({ data, selected }: ContentNodeCardProps) =
                                     onClick={() => handleOpenTablePreview(idx)}
                                 >
                                     <span className="font-medium">{table.name}</span>
-                                    <span className="ml-1.5 px-1.5 py-0.5 bg-primary/10 rounded text-[10px] font-semibold">
-                                        {table.row_count || 0}
+                                    <span className="ml-1.5 inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-primary/10 rounded text-[10px] font-semibold shrink-0">
+                                        <span>{table.row_count || 0}</span>
+                                        {tableShowsCrossFilterHint(table) && (
+                                            <Filter
+                                                className="w-3 h-3 text-blue-600 shrink-0"
+                                                aria-label="Кросс-фильтр затрагивает эту таблицу"
+                                            />
+                                        )}
                                     </span>
                                 </Badge>
                             ))}

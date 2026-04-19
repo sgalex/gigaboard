@@ -15,7 +15,7 @@ interface ProjectStore {
 
     // Actions
     /** silent: обновить список без isLoading (например после импорта ZIP — сразу актуальные счётчики на карточке). */
-    fetchProjects: (opts?: { silent?: boolean }) => Promise<void>
+    fetchProjects: (opts?: { silent?: boolean; ownerUserId?: string }) => Promise<void>
     createProject: (data: ProjectCreate) => Promise<Project | null>
     fetchProject: (id: string) => Promise<void>
     updateProject: (id: string, data: ProjectUpdate) => Promise<void>
@@ -33,13 +33,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     error: null,
 
     // Fetch all projects
-    fetchProjects: async (opts?: { silent?: boolean }) => {
+    fetchProjects: async (opts?: { silent?: boolean; ownerUserId?: string }) => {
         const silent = Boolean(opts?.silent)
         if (!silent) {
             set({ isLoading: true, error: null })
         }
         try {
-            const response = await projectsAPI.list()
+            const response = await projectsAPI.list(opts?.ownerUserId)
             set((state) => ({
                 projects: response.data,
                 ...(silent ? {} : { isLoading: false }),
