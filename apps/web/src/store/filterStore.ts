@@ -151,6 +151,7 @@ type FilterStore = FilterState & FilterActions
 // Debounce timer for sync
 let _syncTimer: ReturnType<typeof setTimeout> | null = null
 const SYNC_DEBOUNCE_MS = 300
+let _pendingComputeFiltered = false
 
 export const useFilterStore = create<FilterStore>((set, get) => ({
     // ── Initial state ──────────────────────────────────────────────
@@ -276,12 +277,12 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
     resolveDimensionForWidget: (field, contentNodeId) => {
         const direct = get().resolveFieldToDimension(field, contentNodeId)
         if (direct) return direct.name
+        const localMaps = get().nodeMappings[contentNodeId]
+        const localMapping = localMaps?.find((m) => m.column_name === field)
+        if (localMapping?.dim_name) return localMapping.dim_name
         for (const maps of Object.values(get().nodeMappings)) {
             const mapping = maps.find((m) => m.column_name === field)
-            if (mapping) {
-                const dim = get().dimensions.find((d) => d.name === mapping.dim_name)
-                if (dim) return dim.name
-            }
+            if (mapping?.dim_name) return mapping.dim_name
         }
         const byName = get().dimensions.find((d) => d.name === field)
         if (byName) return byName.name
@@ -289,49 +290,53 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
     },
 
     handleWidgetClick: (field, value, contentNodeId, initiatorWidgetId) => {
-        void get().loadMappingsForNode(contentNodeId)
-        get().clearWidgetDataStacksExcept(initiatorWidgetId)
-        const dimName = get().resolveDimensionForWidget(field, contentNodeId)
-        get().addCondition({
-            type: 'condition',
-            dim: dimName,
-            op: '==',
-            value,
-            initiatorWidgetId,
-            initiatorContentNodeId: contentNodeId,
-        })
+        void (async () => {
+            await get().loadMappingsForNode(contentNodeId)
+            get().clearWidgetDataStacksExcept(initiatorWidgetId)
+            const dimName = get().resolveDimensionForWidget(field, contentNodeId)
+            get().addCondition({
+                type: 'condition',
+                dim: dimName,
+                op: '==',
+                value,
+                initiatorWidgetId,
+                initiatorContentNodeId: contentNodeId,
+            })
+        })()
     },
 
     handleWidgetToggleFilter: (dimension, value, contentNodeId, widgetId) => {
-        void get().loadMappingsForNode(contentNodeId)
-        const dimName = get().resolveDimensionForWidget(dimension, contentNodeId)
-        const flat = flattenConditions(get().activeFilters)
-        const idx = flat.findIndex(
-            (c) =>
-                c.dim === dimName &&
-                c.op === '==' &&
-                c.value === value &&
-                (widgetId != null ? c.initiatorWidgetId === widgetId : !c.initiatorWidgetId)
-        )
-        if (idx >= 0) {
-            const removed = flat[idx]
-            const rest = flat.filter((_, i) => i !== idx)
-            set((s) => {
-                const nextStacks = { ...s.widgetDataStacks }
-                if (removed.initiatorWidgetId != null && removed.initiatorWidgetId !== '') {
-                    delete nextStacks[removed.initiatorWidgetId]
-                }
-                return {
-                    activeFilters: buildAndGroup(rest),
-                    activePresetId: null,
-                    widgetDataStacks: nextStacks,
-                }
-            })
-            get().syncFiltersToBackend()
-            get().computeFiltered()
-            return
-        }
-        get().handleWidgetClick(dimension, value, contentNodeId, widgetId)
+        void (async () => {
+            await get().loadMappingsForNode(contentNodeId)
+            const dimName = get().resolveDimensionForWidget(dimension, contentNodeId)
+            const flat = flattenConditions(get().activeFilters)
+            const idx = flat.findIndex(
+                (c) =>
+                    c.dim === dimName &&
+                    c.op === '==' &&
+                    c.value === value &&
+                    (widgetId != null ? c.initiatorWidgetId === widgetId : !c.initiatorWidgetId)
+            )
+            if (idx >= 0) {
+                const removed = flat[idx]
+                const rest = flat.filter((_, i) => i !== idx)
+                set((s) => {
+                    const nextStacks = { ...s.widgetDataStacks }
+                    if (removed.initiatorWidgetId != null && removed.initiatorWidgetId !== '') {
+                        delete nextStacks[removed.initiatorWidgetId]
+                    }
+                    return {
+                        activeFilters: buildAndGroup(rest),
+                        activePresetId: null,
+                        widgetDataStacks: nextStacks,
+                    }
+                })
+                get().syncFiltersToBackend()
+                get().computeFiltered()
+                return
+            }
+            get().handleWidgetClick(dimension, value, contentNodeId, widgetId)
+        })()
     },
 
     handleWidgetRemoveFilter: (dimension: string) => {
@@ -550,29 +555,38 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
     // ── Пересчёт pandas-цепочки ────────────────────────────────────
 
     computeFiltered: async () => {
-        const { context, activeFilters, isComputingFiltered } = get()
+        const { context, isComputingFiltered } = get()
         if (!context || (context.type !== 'board' && context.type !== 'dashboard')) return
-        if (isComputingFiltered) return
+        if (isComputingFiltered) {
+            _pendingComputeFiltered = true
+            return
+        }
 
         set({ isComputingFiltered: true })
         try {
-            const res =
-                context.type === 'board'
-                    ? await filtersAPI.computeFiltered(context.id, activeFilters)
-                    : await filtersAPI.computeDashboardFiltered(context.id, activeFilters)
-            const nodes = res.data.nodes as Record<string, FilteredNodeEntry>
-            set({ filteredNodeData: nodes })
-            const ids = get().initiatorContentNodeIds
-            if (ids.length && nodes) {
-                const nextFull: Record<string, FilteredNodeEntry> = {}
-                for (const id of ids) {
-                    if (nodes[id]) nextFull[id] = nodes[id]
+            do {
+                _pendingComputeFiltered = false
+                const { context: ctx, activeFilters } = get()
+                if (!ctx || (ctx.type !== 'board' && ctx.type !== 'dashboard')) break
+                const res =
+                    ctx.type === 'board'
+                        ? await filtersAPI.computeFiltered(ctx.id, activeFilters)
+                        : await filtersAPI.computeDashboardFiltered(ctx.id, activeFilters)
+                const nodes = res.data.nodes as Record<string, FilteredNodeEntry>
+                set({ filteredNodeData: nodes })
+                const ids = get().initiatorContentNodeIds
+                if (ids.length && nodes) {
+                    const nextFull: Record<string, FilteredNodeEntry> = {}
+                    for (const id of ids) {
+                        if (nodes[id]) nextFull[id] = nodes[id]
+                    }
+                    set({ initiatorFullNodeData: nextFull })
                 }
-                set({ initiatorFullNodeData: nextFull })
-            }
+            } while (_pendingComputeFiltered)
         } catch (e) {
             console.error('Failed to compute filtered pipeline', e)
             set({ filteredNodeData: null, initiatorFullNodeData: {} })
+            _pendingComputeFiltered = false
         } finally {
             set({ isComputingFiltered: false })
         }

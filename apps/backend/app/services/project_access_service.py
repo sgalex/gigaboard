@@ -8,7 +8,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Project, ProjectCollaborator
+from app.models import Project, ProjectCollaborator, User
 
 ProjectAccessLevel = Literal["owner", "viewer", "editor", "admin"]
 
@@ -17,6 +17,12 @@ FORBIDDEN_SHARE = "Управление участниками доступно 
 
 
 class ProjectAccessService:
+    @staticmethod
+    async def _is_admin_user(db: AsyncSession, user_id: UUID) -> bool:
+        r = await db.execute(select(User.role).where(User.id == user_id))
+        role = r.scalar_one_or_none()
+        return role == "admin"
+
     @staticmethod
     async def get_access_level(
         db: AsyncSession, project_id: UUID, user_id: UUID
@@ -56,10 +62,15 @@ class ProjectAccessService:
         """Любой доступ: владелец или соавтор (любая роль)."""
         p = await ProjectAccessService.get_project_if_accessible(db, project_id, user_id)
         if not p:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found",
-            )
+            # Глобальный системный admin может просматривать любой проект.
+            if await ProjectAccessService._is_admin_user(db, user_id):
+                r = await db.execute(select(Project).where(Project.id == project_id))
+                p = r.scalar_one_or_none()
+            if not p:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found",
+                )
         return p
 
     @staticmethod
@@ -69,7 +80,9 @@ class ProjectAccessService:
         """Изменение досок/дашбордов/данных: владелец, editor или admin (не viewer)."""
         p = await ProjectAccessService.require_project_view_access(db, project_id, user_id)
         level = await ProjectAccessService.get_access_level(db, project_id, user_id)
-        if level == "viewer":
+        # Системный admin может смотреть любые проекты, но не редактировать
+        # проекты, где он не владелец/соавтор.
+        if level is None or level == "viewer":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=FORBIDDEN_VIEW_ONLY,
